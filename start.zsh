@@ -6,7 +6,7 @@ entry "oh-my-zsh"
 entry "style"
 entry "term"
 
-if [ "$HOME/.zsh_profiles/ssh-shortcuts.zsh" ]; then
+if [[ -e "$HOME/.zsh_profiles/ssh-shortcuts.zsh" ]]; then
   entry "ssh-shortcuts"
 fi
 
