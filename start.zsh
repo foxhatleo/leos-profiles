@@ -15,3 +15,7 @@ entry "path.powerline"
 entry "command.macos"
 entry "command.linux"
 entry "command.shopify"
+
+if [["$HOME/.zsh_profiles/ssh-shortcuts.zsh"]]; then
+  entry "ssh-shortcuts"
+fi

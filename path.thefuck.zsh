@@ -1,3 +1,3 @@
-if ! type "thefuck" > /dev/null; then
+if type "thefuck" > /dev/null; then
   eval $(thefuck --alias)
 fi

@@ -13,7 +13,7 @@ if [[ "$OSTYPE" == "linux-gnu" ]]; then
   function bye() {
     _bye__output "Bye!";
 
-    if ! type "apt" > /dev/null; then
+    if type "apt" > /dev/null; then
       _bye__output "Doing apt checkup...";
       apt-checkup;
     fi
