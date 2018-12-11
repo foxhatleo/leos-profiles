@@ -10,6 +10,7 @@ entry "path.brew"
 entry "path.rbenv"
 entry "path.thefuck"
 entry "path.wine"
+entry "path.powerline"
 
 entry "command.macos"
 entry "command.shopify"
