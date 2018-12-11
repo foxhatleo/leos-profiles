@@ -6,6 +6,10 @@ entry "oh-my-zsh"
 entry "style"
 entry "term"
 
+if [ "$HOME/.zsh_profiles/ssh-shortcuts.zsh" ]; then
+  entry "ssh-shortcuts"
+fi
+
 entry "path.brew"
 entry "path.rbenv"
 entry "path.thefuck"
@@ -15,7 +19,3 @@ entry "path.powerline"
 entry "command.macos"
 entry "command.linux"
 entry "command.shopify"
-
-if [["$HOME/.zsh_profiles/ssh-shortcuts.zsh"]]; then
-  entry "ssh-shortcuts"
-fi
