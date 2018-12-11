@@ -1,12 +1,12 @@
 if [[ "$OSTYPE" == "linux-gnu" ]]; then
   function clear-history() {
-      rm -f ~/.*history ;
-      rm -f ~/.zcompdump* ;
+    rm -f ~/.*history ;
+    rm -f ~/.zcompdump* ;
   }
   function apt-checkup() {
-    apt update ;
-    apt upgrade ;
-    apt autoremove ;
+    sudo apt update ;
+    sudo apt upgrade ;
+    sudo apt autoremove ;
   }
 
   function _bye__output() { echo "$(tput setaf 4 bold)===>$(tput bold) $1$(tput sgr0)"; }
