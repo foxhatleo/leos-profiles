@@ -17,7 +17,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
   }
 
   function _bye__output() { echo "$(tput setaf 4 bold)===>$(tput bold) $1$(tput sgr0)"; }
-  function bye() {
+  function ciao() {
     _bye__output "Bye!";
 
     _bye__output "Removing .DS_Store...";
