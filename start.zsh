@@ -13,4 +13,5 @@ entry "path.wine"
 entry "path.powerline"
 
 entry "command.macos"
+entry "command.linux"
 entry "command.shopify"

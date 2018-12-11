@@ -10,7 +10,7 @@ if [[ "$OSTYPE" == "linux-gnu" ]]; then
   }
 
   function _bye__output() { echo "$(tput setaf 4 bold)===>$(tput bold) $1$(tput sgr0)"; }
-  function ciao() {
+  function bye() {
     _bye__output "Bye!";
 
     if ! type "apt" > /dev/null; then
