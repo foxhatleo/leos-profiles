@@ -11,7 +11,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     brew update ;
     brew upgrade ;
     brew cask upgrade ;
-    brew cleanup ;
+    brew cleanup -s ;
     brew prune ;
     brew doctor ;
   }
