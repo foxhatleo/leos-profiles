@@ -5,6 +5,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
       rm -f ~/.zcompdump* ;
       rm -r ~/.oracle_jre_usage ;
   }
+  mkcdir () { mkdir -p -- "$1" && cd -P -- "$1" }.
   function hidden-on() { defaults write com.apple.Finder AppleShowAllFiles YES ; }
   function hidden-off() { defaults write com.apple.Finder AppleShowAllFiles NO ; }
   function brew-checkup() {
