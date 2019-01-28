@@ -1,11 +1,10 @@
 if [[ "$OSTYPE" == "darwin"* ]]; then
-  function rmdsstore() { sudo ~/.zsh_profiles/rmdsstore/rmdsstore ; }
+  function rmdsstore() { sudo find / -name ".DS_Store" -depth -exec rm {} \; }
   function clear-history() {
       rm -f ~/.*history ;
       rm -f ~/.zcompdump* ;
       rm -r ~/.oracle_jre_usage ;
   }
-  function mkcdir () { mkdir -p -- "$1" && cd -P -- "$1" }
   function hidden-on() { defaults write com.apple.Finder AppleShowAllFiles YES ; }
   function hidden-off() { defaults write com.apple.Finder AppleShowAllFiles NO ; }
   function brew-checkup() {
@@ -13,7 +12,6 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     brew upgrade ;
     brew cask upgrade ;
     brew cleanup -s ;
-    brew prune ;
     brew doctor ;
   }
 

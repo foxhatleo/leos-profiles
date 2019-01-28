@@ -1,6 +1,4 @@
-entry () {
-    source "$HOME/.zsh_profiles/$1.zsh"
-}
+function entry () { source "$HOME/.zsh_profiles/$1.zsh" }
 
 entry "oh-my-zsh"
 entry "style"
@@ -15,7 +13,9 @@ entry "path.rbenv"
 entry "path.thefuck"
 entry "path.wine"
 entry "path.powerline"
+entry "path.opam"
 
+entry "command"
 entry "command.macos"
 entry "command.linux"
 entry "command.shopify"
