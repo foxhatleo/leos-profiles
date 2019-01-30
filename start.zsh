@@ -1,7 +1,6 @@
 function entry () { source "$HOME/.zsh_profiles/$1.zsh" }
 
 entry "oh-my-zsh"
-entry "style"
 entry "term"
 
 if [[ -e "$HOME/.zsh_profiles/ssh-shortcuts.zsh" ]]; then
