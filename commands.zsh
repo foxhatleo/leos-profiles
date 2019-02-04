@@ -1,5 +1,5 @@
 if [[ "$OSTYPE" == "darwin"* ]]; then
-  rmdsstore() { sudo find / -depth -xdev -path /Volumes -prune -o -iname ".DS_Store" -delete -print }
+  rmdsstore() { sudo find / -depth -xdev -path /Volumes -prune -o -iname ".DS_Store" -exec rm {} \; }
 
   clear-history() {
     rm -rf ~/.*history ;
@@ -15,8 +15,8 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
   bye() {
     puts "Bye!";
 
-    puts "Removing .DS_Store...";
-    rmdsstore;
+    # puts "Quick-removing .DS_Store...";
+    # rmdsstore;
 
     if hash brew-checkup 2>/dev/null; then
       puts "Doing brew checkup...";
