@@ -1,5 +1,5 @@
 if [[ "$OSTYPE" == "darwin"* ]]; then
-  rmdsstore() { sudo find / -depth -xdev -name ".DS_Store" -delete -print }
+  rmdsstore() { sudo find / -depth -xdev -path /Volumes -prune -o -name ".DS_Store" -delete -print }
 
   clear-history() {
     rm -rf ~/.*history ;
