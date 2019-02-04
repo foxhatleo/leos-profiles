@@ -1,20 +1,15 @@
-function entry () { source "$HOME/.zsh_profiles/$1.zsh" }
+source "$HOME/.zsh_profiles/core.zsh"
 
 entry "oh-my-zsh"
 entry "term"
 
-if [[ -e "$HOME/.zsh_profiles/ssh-shortcuts.zsh" ]]; then
-  entry "ssh-shortcuts"
-fi
+entry "ssh-shortcuts" optional
 
 entry "path.brew"
+entry "path.brew-packages"
 entry "path.rbenv"
 entry "path.thefuck"
-entry "path.wine"
-entry "path.powerline"
 entry "path.opam"
 
-entry "command"
-entry "command.macos"
-entry "command.linux"
-entry "command.shopify"
+entry "commands"
+entry "commands.shopify"
