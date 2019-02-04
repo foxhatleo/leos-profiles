@@ -18,7 +18,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     # puts "Quick-removing .DS_Store...";
     # rmdsstore;
 
-    if hash brew-checkup 2>/dev/null; then
+    if command -v brew-checkup >/dev/null 2>/dev/null; then
       puts "Doing brew checkup...";
        brew-checkup;
     fi
@@ -29,7 +29,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     puts "Restarting Finder, Dock, SystemUIServer...";
     killall Finder Dock SystemUIServer;
 
-    if hash upgrade_oh_my_zsh 2>/dev/null; then
+    if command -v upgrade_oh_my_zsh >/dev/null 2>/dev/null; then
       puts "Upgrading oh my zsh...";
       upgrade_oh_my_zsh;
     fi
