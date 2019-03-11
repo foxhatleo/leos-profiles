@@ -1,14 +1,13 @@
-add-path() {
-  if [ -d $1 ]; then
-    export PATH="$1:$PATH"
-    return true
-  else
-    puts-err "$1 is not found."
-    return false
-  fi
-}
-
 if type "brew" > /dev/null; then
+  add-path() {
+    if [ -d $1 ]; then
+      export PATH="$1:$PATH"
+      return true
+    else
+      puts-err "$1 is not found."
+      return false
+    fi
+  }
   add-path "/usr/local/opt/coreutils/libexec/gnubin"
   add-path "/usr/local/opt/findutils/libexec/gnubin"
   add-path "/usr/local/opt/gnu-sed/libexec/gnubin"
