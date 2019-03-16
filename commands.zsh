@@ -1,19 +1,26 @@
+# Remove all .DS_Store files.
 rmdsstore() {
   sudo find / -depth -iname .DS_Store -type f -print -delete 2> /dev/null || true ;
 }
 
+# Clear any history files.
 clear-history() {
-  rm -rf ~/.*history ;
-  rm -rf ~/.zcompdump* ;
-  rm -rf ~/.oracle_jre_usage ;
-  rm -rf ~/.lldb/*history ;
+  rm -rf $HOME/.*history ;
+  rm -rf $HOME/.zcompdump* ;
+  rm -rf $HOME/.oracle_jre_usage ;
+  if [ -d "$HOME/.lldb" ]; then
+    rm -rf $HOME/.lldb/*history ;
+  fi
 }
 
+# Show/hide hidden files in Finder.
 hidden-on() { defaults write com.apple.Finder AppleShowAllFiles YES ; }
 hidden-off() { defaults write com.apple.Finder AppleShowAllFiles NO ; }
 
+# mk a directory then cd into it.
 mkcdir () { mkdir -p -- "$1" && cd -P -- "$1" }
 
+# Clean up and quit the terminal.
 bye() {
   puts "Bye!";
 
@@ -36,5 +43,6 @@ bye() {
   fi
 
   puts "Exiting...";
+  [ $1 = "--debug" && read -s -k "Press any key to exit.";
   exit;
 }

@@ -1,3 +1,5 @@
+# This is for the Shopify theme creation command.
+
 function ssl-check() {
   f=~/.localhost_ssl;
   ssl_crt=$f/server.crt

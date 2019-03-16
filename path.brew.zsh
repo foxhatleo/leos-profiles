@@ -8,4 +8,8 @@ if type "brew" > /dev/null; then
     brew cleanup -s ;
     brew doctor ;
   }
+else
+  if [[ "$OSTYPE" == "darwin"* ]] && [ ! -f $HOME/.zp-nobrew ]; then
+    puts-err "brew is not installed. To silence, touch \$HOME/.zp-nobrew.";
+  fi
 fi
