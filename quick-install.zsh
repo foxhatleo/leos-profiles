@@ -68,10 +68,14 @@ main() {
     printf "${BLUE}Installing packages...${NORMAL}\n"
     brew install ack coreutils dark-mode findutils git git-lfs gnu-sed moreutils node opam openssl postgresql pv python python3 rbenv rename ruby ruby-build sqlite ssh-copy-id thefuck trash vim wget yarn youtube-dl zsh
   fi
+
   printf "${BLUE}Installing oh my zsh...${NORMAL}\n"
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
-  rm $HOME/.zshrc.pre-oh-my-zsh
-  mv $HOME/.zshrc.pre-oh-my-zsh $HOME/.zshrc
+  if [ -f $HOME/.zshrc.pre-oh-my-zsh ] || [ -h $HOME/.zshrc.pre-oh-my-zsh ]; then
+    rm $HOME/.zshrc.pre-oh-my-zsh
+    mv $HOME/.zshrc.pre-oh-my-zsh $HOME/.zshrc
+  fi
+
   printf "${BLUE}Installation finished.${NORMAL}\n"
   printf "${BLUE}Now please configure your rbenv, opam, etc.${NORMAL}\n"
 }
