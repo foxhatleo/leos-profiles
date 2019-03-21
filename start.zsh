@@ -1,15 +1,19 @@
-source "$HOME/.zsh_profiles/core.zsh"
+puts () {
+  echo "$(tput setaf 4 bold)===>$(tput sgr0)$(tput bold) $1$(tput sgr0)";
+}
 
-entry "oh-my-zsh"
-entry "term"
+puts-err () {
+  echo "$(tput setaf 1 bold)===>$(tput sgr0)$(tput bold) $1$(tput sgr0)";
+}
 
-entry "ssh-shortcuts" optional
+LEOS_PROFILES=$HOME/.leos_profiles
 
-entry "path.brew"
-entry "path.brew-packages"
-entry "path.rbenv"
-entry "path.thefuck"
-entry "path.opam"
+entry () {
+  if [ -e "$LEOS_PROFILES/$1.zsh" ]; then
+    source "$LEOS_PROFILES/$1.zsh"
+  elif ! [ "$2" = "optional" ]; then
+    puts-err "$1 is not found. Check $LEOS_PROFILES/entries.zsh."
+  fi
+}
 
-entry "commands"
-entry "commands.shopify"
+entry "entries"

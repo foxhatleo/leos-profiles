@@ -6,8 +6,8 @@ if [ -d $ZSH ]; then
     brew
     bundler
     capistrano
-    coffee
     django
+    dnf
     gem
     git
     github
@@ -22,8 +22,8 @@ if [ -d $ZSH ]; then
     rake
     ruby
     sudo
+    vscode
     yarn
-    zsh-autosuggestions
   )
   source $ZSH/oh-my-zsh.sh
 else

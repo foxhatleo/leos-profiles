@@ -20,6 +20,9 @@ hidden-off() { defaults write com.apple.Finder AppleShowAllFiles NO ; }
 # mk a directory then cd into it.
 mkcdir () { mkdir -p -- "$1" && cd -P -- "$1" }
 
+# ocp-indent a file.
+ocpind () { ocp-indent $1 > __test.ml; rm $1; mv __test.ml $1 }
+
 # Clean up and quit the terminal.
 bye() {
   puts "Bye!";
@@ -45,4 +48,9 @@ bye() {
   puts "Exiting...";
   [ $1 = "--debug" && read -s -k "Press any key to exit.";
   exit;
+}
+
+# Upgrade Leo's profiles.
+upgrade-leos-profiles () {
+  git pull $HOME/.leos-profiles
 }
