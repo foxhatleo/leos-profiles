@@ -8,6 +8,10 @@ puts-err () {
 
 LEOS_PROFILES=$HOME/.leos_profiles
 
+if ! [ -d $ZSH ]; then
+  puts-err "$LEO_PROFILES is not found!";
+fi
+
 entry () {
   if [ -e "$LEOS_PROFILES/$1.zsh" ]; then
     source "$LEOS_PROFILES/$1.zsh"

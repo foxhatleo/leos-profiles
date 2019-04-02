@@ -8,6 +8,7 @@ clear-history() {
   rm -rf $HOME/.*history ;
   rm -rf $HOME/.zcompdump* ;
   rm -rf $HOME/.oracle_jre_usage ;
+  rm -rf $HOME/.*hsts ;
   if [ -d "$HOME/.lldb" ]; then
     rm -rf $HOME/.lldb/*history ;
   fi
@@ -19,9 +20,6 @@ hidden-off() { defaults write com.apple.Finder AppleShowAllFiles NO ; }
 
 # mk a directory then cd into it.
 mkcdir () { mkdir -p -- "$1" && cd -P -- "$1" }
-
-# ocp-indent a file.
-ocpind () { ocp-indent $1 > __test.ml; rm $1; mv __test.ml $1 }
 
 # Clean up and quit the terminal.
 bye() {

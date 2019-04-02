@@ -5,3 +5,8 @@ else
     puts-err "opam is not installed. To silence, touch \$HOME/.zp-noopam.";
   fi
 fi
+
+if type "ocp-indent" > /dev/null; then
+  # ocp-indent a file.
+  ocpind () { ocp-indent $1 > __test.ml; rm $1; mv __test.ml $1 }
+fi
