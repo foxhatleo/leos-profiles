@@ -6,7 +6,7 @@ puts-err () {
   echo "$(tput setaf 1 bold)===>$(tput sgr0)$(tput bold) $1$(tput sgr0)";
 }
 
-LEOS_PROFILES=$HOME/.leos_profiles
+LEOS_PROFILES=$HOME/.leos-profiles
 
 if ! [ -d $ZSH ]; then
   puts-err "$LEO_PROFILES is not found!";
