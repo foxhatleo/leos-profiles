@@ -44,8 +44,7 @@ bye() {
   fi
 
   puts "Exiting...";
-  [ $1 = "--debug" && read -s -k "Press any key to exit.";
-  exit;
+  exit 0;
 }
 
 # Upgrade Leo's profiles.
