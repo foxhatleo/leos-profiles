@@ -32,7 +32,7 @@ main() {
   umask g-w,o-w
 
   if [ ! -n "$PF" ]; then
-    PF=$HOME/.leos_profiles
+    PF=$HOME/.leos-profiles
   fi
 
   if [ -d "$PF" ]; then
@@ -75,6 +75,13 @@ main() {
     rm $HOME/.zshrc.pre-oh-my-zsh
     mv $HOME/.zshrc.pre-oh-my-zsh $HOME/.zshrc
   fi
+
+  printf "${BLUE}Installing Powerline fonts...${NORMAL}\n"
+  git clone https://github.com/powerline/fonts.git --depth=1
+  cd fonts
+  ./install.sh
+  cd ..
+  rm -rf fonts
 
   printf "${BLUE}Installation finished.${NORMAL}\n"
   printf "${BLUE}Now please configure your rbenv, opam, etc.${NORMAL}\n"
