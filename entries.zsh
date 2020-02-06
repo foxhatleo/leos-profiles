@@ -6,6 +6,7 @@ entry "path.brew-packages"
 entry "path.rbenv"
 entry "path.thefuck"
 entry "path.ocaml"
+entry "path.anaconda"
 
 entry "_private" optional
 
