@@ -66,7 +66,7 @@ main() {
     printf "${BLUE}Installing home brew...${NORMAL}\n"
     /usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
     printf "${BLUE}Installing packages...${NORMAL}\n"
-    brew install ack coreutils dark-mode findutils git git-lfs gnu-sed moreutils node opam openssl postgresql pv python python3 rbenv rename ruby ruby-build sqlite ssh-copy-id thefuck trash vim wget yarn youtube-dl zsh
+    brew install coreutils findutils gnu-sed gradle maven node openjdk perl python rbenv ruby ruby-build ssh-copy-id thefuck vim wget yarn youtube-dl zsh
   fi
 
   printf "${BLUE}Installing oh my zsh...${NORMAL}\n"
