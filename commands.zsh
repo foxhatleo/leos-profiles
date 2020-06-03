@@ -1,6 +1,14 @@
 # Remove all .DS_Store files.
 rmdsstore() {
-  sudo find / -depth -iname .DS_Store -type f -print -delete 2> /dev/null || true ;
+  sudo find /Users -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /private usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /Library usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /bin usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /cores usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /opt usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /sbin usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /usr usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /Applications -depth -iname .DS_Store -type f -print -delete 2> /dev/null || true
 }
 
 # Clear any history files.
