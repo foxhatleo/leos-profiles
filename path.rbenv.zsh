@@ -1,4 +1,6 @@
-export PATH="$HOME/.rbenv/bin:$PATH"
+RBENV_BIN_PATH="${HOME}/.rbenv/bin"
+
+export PATH="$RBENV_BIN_PATH:$PATH"
 if type "rbenv" > /dev/null; then
   eval "$(rbenv init -)";
 else
