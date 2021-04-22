@@ -41,7 +41,7 @@ bye() {
 
   if command -v upgrade_oh_my_zsh >/dev/null 2>/dev/null; then
     puts "Upgrading oh my zsh...";
-    upgrade_oh_my_zsh;
+    omz update;
   fi
 
   puts "Clear all history files..";
@@ -59,8 +59,4 @@ bye() {
 # Upgrade Leo's profiles.
 upgrade-leos-profiles () {
   git pull $HOME/.leos-profiles
-}
-
-dl-hls() {
-  ffmpeg -i "$1" -c copy -bsf:a aac_adtstoasc "$2";
 }

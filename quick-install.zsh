@@ -36,21 +36,18 @@ main() {
   fi
 
   if [ -d "$PF" ]; then
-    printf "${YELLOW}You already have Leo's Profiles installed.${NORMAL}\n"
-    printf "You'll need to remove $PF if you want to re-install.\n"
-    exit
+    printf "${YELLOW}You already have Leo's Profiles cloned.${NORMAL}\n"
+  else
+    printf "${BLUE}Cloning Leo's Profiles...${NORMAL}\n";
+    command -v git >/dev/null 2>&1 || {
+      echo "Error: git is not installed"
+        exit 1
+    };
+    env git clone https://github.com/foxhatleo/leos-profiles "$PF" || {
+      printf "Error: git clone of Leo's Profiles repo failed\n"
+      exit 1
+    }
   fi
-
-  printf "${BLUE}Cloning Leo's Profiles...${NORMAL}\n"
-  command -v git >/dev/null 2>&1 || {
-    echo "Error: git is not installed"
-    exit 1
-  }
-
-  env git clone https://github.com/foxhatleo/leos-profiles "$PF" || {
-    printf "Error: git clone of Leo's Profiles repo failed\n"
-    exit 1
-  }
 
   printf "${BLUE}Looking for an existing zsh config...${NORMAL}\n"
   if [ -f $HOME/.zshrc ] || [ -h $HOME/.zshrc ]; then
