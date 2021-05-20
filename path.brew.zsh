@@ -3,6 +3,7 @@ if type "brew" > /dev/null; then
   if [[ -f "$HOME/.brew-china" ]]; then
     export HOMEBREW_BOTTLE_DOMAIN="https://mirrors.ustc.edu.cn/homebrew-bottles";
   fi
+
   brew-checkup() {
     brew update ;
     HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade ;
@@ -10,6 +11,7 @@ if type "brew" > /dev/null; then
     brew cleanup -s ;
     # brew doctor ;
   }
+
   brew-china-enable() {
     git -C "$(brew --repo)" remote set-url origin https://mirrors.ustc.edu.cn/brew.git;
     git -C "$(brew --repo)/Library/Taps/homebrew/homebrew-core" remote set-url origin https://mirrors.ustc.edu.cn/homebrew-core.git;
@@ -18,6 +20,7 @@ if type "brew" > /dev/null; then
     export HOMEBREW_BOTTLE_DOMAIN="https://mirrors.ustc.edu.cn/homebrew-bottles";
     brew update;
   }
+
   brew-china-disable() {
     git -C "$(brew --repo)" remote set-url origin https://github.com/Homebrew/brew.git;
     git -C "$(brew --repo)/Library/Taps/homebrew/homebrew-core" remote set-url origin https://github.com/Homebrew/homebrew-core.git;
@@ -26,8 +29,9 @@ if type "brew" > /dev/null; then
     unset HOMEBREW_BOTTLE_DOMAIN;
     brew update;
   }
+  
 else
-  if [[ "$OSTYPE" == "darwin"* ]] && [ ! -f $HOME/.zp-nobrew ]; then
-    puts-err "brew is not installed. To silence, touch \$HOME/.zp-nobrew.";
+  if [[ "$OSTYPE" == "darwin"* ]] && [ ! -f $HOME/.lp-nobrew ]; then
+    puts-err "brew is not installed. To silence, touch \$HOME/.lp-nobrew.";
   fi
 fi

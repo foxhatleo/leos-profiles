@@ -24,8 +24,15 @@ clear-history() {
 }
 
 # Show/hide hidden files in Finder.
-hidden-on() { defaults write com.apple.Finder AppleShowAllFiles YES ; }
-hidden-off() { defaults write com.apple.Finder AppleShowAllFiles NO ; }
+__hidden-set() {
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    defaults write com.apple.Finder AppleShowAllFiles $1 ;
+  else
+    puts-err "This command is only available on macOS."
+  fi
+}
+hidden-on() { __hidden-set YES ; }
+hidden-off() { __hidden-set NO ; }
 
 # mk a directory then cd into it.
 mkcdir () { mkdir -p -- "$1" && cd -P -- "$1" }
@@ -36,10 +43,15 @@ bye() {
 
   if command -v brew-checkup >/dev/null 2>/dev/null; then
     puts "Doing brew checkup...";
-      brew-checkup;
+    brew-checkup;
   fi
 
-  if command -v upgrade_oh_my_zsh >/dev/null 2>/dev/null; then
+  if command -v apt-checkup >/dev/null 2>/dev/null; then
+    puts "Doing apt checkup...";
+    apt-checkup;
+  fi
+
+  if command -v omz >/dev/null 2>/dev/null; then
     puts "Upgrading oh my zsh...";
     omz update;
   fi

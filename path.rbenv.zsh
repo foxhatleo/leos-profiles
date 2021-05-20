@@ -1,10 +1,10 @@
 RBENV_BIN_PATH="${HOME}/.rbenv/bin"
 
-export PATH="$RBENV_BIN_PATH:$PATH"
+add-path "$RBENV_BIN_PATH";
 if type "rbenv" > /dev/null; then
   eval "$(rbenv init -)";
 else
-  if [ ! -f $HOME/.zp-norbenv ]; then
-    puts-err "rbenv is not installed. To silence, touch \$HOME/.zp-norbenv.";
+  if [ ! -f $HOME/.lp-norbenv ]; then
+    puts-err "rbenv is not installed. To silence, touch \$HOME/.lp-norbenv.";
   fi
 fi
