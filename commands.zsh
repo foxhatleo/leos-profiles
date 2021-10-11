@@ -1,13 +1,13 @@
 # Remove all .DS_Store files.
 rmdsstore() {
   sudo find /Users -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /private usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /Library usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /bin usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /cores usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /opt usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /sbin usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /usr usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /private -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /Library -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /bin -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /cores -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /opt -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /sbin -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
   sudo find /Applications -depth -iname .DS_Store -type f -print -delete 2> /dev/null || true
 }
 
@@ -20,6 +20,9 @@ clear-history() {
   rm -rf $HOME/.*hsts ;
   if [ -d "$HOME/.lldb" ]; then
     rm -rf $HOME/.lldb/*history ;
+  fi
+  if command -v powershell.exe >/dev/null 2>/dev/null; then
+    powershell.exe -Command "Remove-Item (Get-PSReadlineOption).HistorySavePath";
   fi
 }
 

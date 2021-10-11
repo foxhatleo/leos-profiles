@@ -7,7 +7,6 @@ if [ -d $ZSH ]; then
       brew
       bundler
       capistrano
-      django
       dnf
       gem
       git
