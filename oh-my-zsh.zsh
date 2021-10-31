@@ -24,6 +24,9 @@ if [ -d $ZSH ]; then
       sudo
       vscode
       yarn
+      zsh-syntax-highlighting
+      zsh-autosuggestions
+      zsh-completions
     )
     source $ZSH/oh-my-zsh.sh
   fi
