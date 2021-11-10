@@ -19,7 +19,7 @@ add-path() {
 LEOS_PROFILES=$HOME/.leos-profiles
 
 if ! [ -d $ZSH ]; then
-  puts-err "$LEO_PROFILES is not found!";
+  puts-err "oh-my-zsh is not found!";
 fi
 
 entry () {

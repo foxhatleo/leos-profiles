@@ -53,12 +53,14 @@ main() {
 
   if [ -d "$PF" ]; then
     printf "${YELLOW}You already have Leo's Profiles cloned.${NORMAL}\n"
+
   else
     printf "${BLUE}Cloning Leo's Profiles...${NORMAL}\n";
     command -v git >/dev/null 2>&1 || {
       echo "Error: git is not installed"
         exit 1
     };
+
     env git clone https://github.com/foxhatleo/leos-profiles "$PF" || {
       printf "Error: git clone of Leo's Profiles repo failed\n"
       exit 1
@@ -70,15 +72,15 @@ main() {
     printf "${BLUE}Installing home brew...${NORMAL}\n"
     /usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
     printf "${BLUE}Installing packages...${NORMAL}\n"
-    brew install coreutils findutils gnu-sed gradle maven node openjdk perl python ruby ssh-copy-id thefuck vim wget yarn youtube-dl zsh
+    brew install coreutils findutils gnu-sed node openjdk python ruby ssh-copy-id thefuck vim wget zsh
   fi
 
   if type "apt" > /dev/null; then
-    sudo apt update;
-    sudo apt upgrade;
-    sudo apt install git imagemagick ffmpeg pngquant python3 zsh;
+    sudo apt -y update;
+    sudo apt -y upgrade;
+    sudo apt -y install python ruby thefuck vim wget zsh;
     curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -;
-    sudo apt-get install -y nodejs;
+    sudo apt install -y nodejs;
     sudo npm install --global yarn;
   fi
 
@@ -88,11 +90,8 @@ main() {
   git clone https://github.com/rbenv/ruby-build.git "$($HOME/.rbenv/bin/rbenv root)"/plugins/ruby-build
 
   printf "${BLUE}Installing oh my zsh...${NORMAL}\n"
-  sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
-  if [ -f $HOME/.zshrc.pre-oh-my-zsh ] || [ -h $HOME/.zshrc.pre-oh-my-zsh ]; then
-    rm $HOME/.zshrc.pre-oh-my-zsh;
-    mv $HOME/.zshrc.pre-oh-my-zsh $HOME/.zshrc;
-  fi
+  RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
+  rm -rf $HOME/.*.pre-oh-my-zsh;
 
   if [[ "$OSTYPE" == "darwin"* ]]; then
     printf "${BLUE}Installing Powerline fonts...${NORMAL}\n"
@@ -101,12 +100,17 @@ main() {
     ./install.sh
     cd ..
     rm -rf fonts
+
+  else
+    printf "${YELLOW}${BOLD}Intsall Powerline fonts manually here: https://github.com/powerline/fonts.git${NORMAL}"
   fi
 
   apply-zshrc;
 
   printf "${BLUE}Installation finished.${NORMAL}\n"
   printf "${BLUE}Now please configure your rbenv, opam, etc.${NORMAL}\n"
+
+  exec zsh -l
 }
 
 main

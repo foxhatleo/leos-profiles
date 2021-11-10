@@ -18,6 +18,7 @@ clear-history() {
   rm -rf $HOME/.zcompdump* ;
   rm -rf $HOME/.oracle_jre_usage ;
   rm -rf $HOME/.*hsts ;
+  rm -rf $HOME/.*hsts ;
   if [ -d "$HOME/.lldb" ]; then
     rm -rf $HOME/.lldb/*history ;
   fi

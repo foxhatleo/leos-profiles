@@ -28,6 +28,7 @@ if [ -d $ZSH ]; then
       zsh-autosuggestions
       zsh-completions
     )
+    unset SSH_CLIENT
     source $ZSH/oh-my-zsh.sh
   fi
 else
