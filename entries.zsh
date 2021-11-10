@@ -9,7 +9,6 @@ entry "path.thefuck"
 entry "path.ocaml"
 entry "path.node"
 entry "path.gpg"
-entry "path.vsc"
 
 entry "_private" optional
 
