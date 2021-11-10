@@ -13,7 +13,7 @@ if [ -d $ZSH ]; then
       github
       node
       npm
-      osx
+      macos
       pip
       pyenv
       python
