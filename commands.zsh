@@ -55,6 +55,11 @@ bye() {
     apt-checkup;
   fi
 
+  if command -v dnf-checkup >/dev/null 2>/dev/null; then
+    puts "Doing dnf checkup...";
+    dnf-checkup;
+  fi
+
   if command -v omz >/dev/null 2>/dev/null; then
     puts "Upgrading oh my zsh...";
     omz update;

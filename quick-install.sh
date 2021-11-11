@@ -1,5 +1,5 @@
 # TO INSTALL:
-# $ /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/quick-install.sh)""
+# $ /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/quick-install.sh)"
 
 # Use colors, but only if connected to a terminal, and that terminal
 # supports them.
@@ -81,6 +81,12 @@ main() {
     sudo apt -y install python ruby thefuck vim wget zsh;
     curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -;
     sudo apt install -y nodejs;
+    sudo npm install --global yarn;
+  fi
+
+  if type "dnf" > /dev/null; then
+    sudo dnf -y update;
+    sudo dnf -y install python ruby thefuck vim wget zsh nodejs;
     sudo npm install --global yarn;
   fi
 
