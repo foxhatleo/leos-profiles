@@ -43,7 +43,6 @@ apply-zshrc() {
   if [ -f $HOME/.zshrc ] || [ -h $HOME/.zshrc ]; then
     printf "${YELLOW}Found ~/.zshrc.${NORMAL} ${GREEN}Backing up to ~/.zshrc.pre-leo${NORMAL}\n";
     mv $HOME/.zshrc $HOME/.zshrc.pre-leo;
-    rm $HOME/.zshrc;
   fi
   
   echo "source $PF/start.zsh" >> $HOME/.zshrc;
@@ -78,7 +77,7 @@ main() {
   if type "apt" > /dev/null; then
     sudo apt -y update;
     sudo apt -y upgrade;
-    sudo apt -y install python ruby thefuck vim wget zsh;
+    sudo apt -y install python ruby thefuck vim wget zsh openssh-server;
     curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -;
     sudo apt install -y nodejs;
     sudo npm install --global yarn;
@@ -86,7 +85,7 @@ main() {
 
   if type "dnf" > /dev/null; then
     sudo dnf -y update;
-    sudo dnf -y install python ruby thefuck vim wget zsh nodejs;
+    sudo dnf -y install python ruby thefuck vim wget zsh nodejs openssh-server;
     sudo npm install --global yarn;
   fi
 
