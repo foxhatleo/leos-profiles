@@ -77,7 +77,7 @@ main() {
   if type "apt" > /dev/null; then
     sudo apt -y update;
     sudo apt -y upgrade;
-    sudo apt -y install python ruby thefuck vim wget zsh openssh-server;
+    sudo apt -y install python ruby thefuck vim wget zsh openssh-server fonts-powerline;
     curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -;
     sudo apt install -y nodejs;
     sudo npm install --global yarn;
@@ -85,7 +85,7 @@ main() {
 
   if type "dnf" > /dev/null; then
     sudo dnf -y update;
-    sudo dnf -y install python ruby thefuck vim wget zsh nodejs openssh-server;
+    sudo dnf -y install python ruby thefuck vim wget zsh nodejs openssh-server fonts-powerline;
     sudo npm install --global yarn;
   fi
 
@@ -97,6 +97,9 @@ main() {
   printf "${BLUE}Installing oh my zsh...${NORMAL}\n"
   RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
   rm -rf $HOME/.*.pre-oh-my-zsh;
+  git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting ;
+  git clone https://github.com/zsh-users/zsh-autosuggestions.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions ;
+  git clone https://github.com/zsh-users/zsh-completions.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-completions ;
 
   if [[ "$OSTYPE" == "darwin"* ]]; then
     printf "${BLUE}Installing Powerline fonts...${NORMAL}\n"
@@ -105,9 +108,6 @@ main() {
     ./install.sh
     cd ..
     rm -rf fonts
-
-  else
-    printf "${YELLOW}${BOLD}Intsall Powerline fonts manually here: https://github.com/powerline/fonts.git${NORMAL}"
   fi
 
   apply-zshrc;
