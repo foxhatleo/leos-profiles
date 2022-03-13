@@ -73,8 +73,10 @@ bye() {
     killall Finder Dock SystemUIServer;
   fi
 
-  puts "Exiting...";
-  exit 0;
+  if ! [ "$1" = "noexit" ]; then
+    puts "Exiting...";
+    exit 0;
+  fi
 }
 
 # Upgrade Leo's profiles.
