@@ -84,9 +84,15 @@ upgrade-leos-profiles () {
 
 gui-disable() {
   sudo systemctl set-default multi-user;
-  sudo systemctl stop gdm3;
+  gui-stop;
 }
 gui-enable() {
   sudo systemctl set-default graphical;
+  gui-start;
+}
+gui-start() {
   sudo systemctl start gdm3;
+}
+gui-stop() {
+  sudo systemctl stop gdm3;
 }
