@@ -73,8 +73,11 @@ bye() {
     killall Finder Dock SystemUIServer;
   fi
 
-  if ! [ "$1" = "noexit" ]; then
-    puts "Exiting...";
+  if [ "$1" = "noexit" ]; then
+    puts "Skipped exiting.";
+  elif command -v /mnt/c/Windows/system32/wsl.exe &> /dev/null ; then
+    mnt/c/Windows/system32/wsl.exe --shutdown
+  else
     exit 0;
   fi
 }
