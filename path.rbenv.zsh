@@ -1,6 +1,6 @@
 RBENV_BIN_PATH="${HOME}/.rbenv/bin"
-
 add-path "$RBENV_BIN_PATH";
+
 if type "rbenv" > /dev/null; then
   eval "$(rbenv init -)";
 else

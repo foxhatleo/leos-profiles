@@ -77,7 +77,7 @@ main() {
   if type "apt" > /dev/null; then
     sudo apt -y update;
     sudo apt -y upgrade;
-    sudo apt -y install python ruby thefuck vim wget zsh openssh-server fonts-powerline;
+    sudo apt -y install python ruby thefuck vim wget zsh;
     curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -;
     sudo apt install -y nodejs;
     sudo npm install --global yarn;
@@ -85,8 +85,7 @@ main() {
 
   if type "dnf" > /dev/null; then
     sudo dnf -y update;
-    sudo dnf -y install python ruby thefuck vim wget zsh nodejs openssh-server fonts-powerline;
-    sudo npm install --global yarn;
+    sudo dnf -y install python ruby thefuck vim wget zsh;
   fi
 
   git clone https://github.com/rbenv/rbenv.git ~/.rbenv

@@ -8,6 +8,8 @@ rmdsstore() {
   sudo find /opt -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
   sudo find /sbin -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
   sudo find /usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /var -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo find /etc -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
   sudo find /Applications -depth -iname .DS_Store -type f -print -delete 2> /dev/null || true
 }
 

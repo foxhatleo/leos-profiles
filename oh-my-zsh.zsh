@@ -4,13 +4,20 @@ if [ -d $ZSH ]; then
     [ -z "$ZSH_THEME" ] && ZSH_THEME="agnoster"
     DEFAULT_USER="leoliang"
     plugins=(
+      1password
       brew
       bundler
       capistrano
+      command-not-found
+      common-aliases
+      debian
       dnf
+      dotenv
       gem
       git
       github
+      gradle
+      heroku
       node
       npm
       macos
@@ -20,8 +27,12 @@ if [ -d $ZSH ]; then
       postgres
       rails
       rake
+      rbenv
       ruby
       sudo
+      systemd
+      ubuntu
+      ufw
       vscode
       yarn
       zsh-syntax-highlighting
