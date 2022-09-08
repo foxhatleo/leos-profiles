@@ -20,7 +20,6 @@ clear-history() {
   rm -rf $HOME/.zcompdump* ;
   rm -rf $HOME/.oracle_jre_usage ;
   rm -rf $HOME/.*hsts ;
-  rm -rf $HOME/.*hsts ;
   if [ -d "$HOME/.lldb" ]; then
     rm -rf $HOME/.lldb/*history ;
   fi
@@ -57,11 +56,6 @@ bye() {
     apt-checkup;
   fi
 
-  if command -v dnf-checkup >/dev/null 2>/dev/null; then
-    puts "Doing dnf checkup...";
-    dnf-checkup;
-  fi
-
   if command -v omz >/dev/null 2>/dev/null; then
     puts "Upgrading oh my zsh...";
     omz update;
@@ -93,13 +87,16 @@ gui-disable() {
   sudo systemctl set-default multi-user;
   gui-stop;
 }
+
 gui-enable() {
   sudo systemctl set-default graphical;
   gui-start;
 }
+
 gui-start() {
   sudo systemctl start gdm3;
 }
+
 gui-stop() {
   sudo systemctl stop gdm3;
 }

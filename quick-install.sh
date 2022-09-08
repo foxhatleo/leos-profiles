@@ -49,7 +49,6 @@ apply-zshrc() {
 }
 
 main() {
-
   if [ -d "$PF" ]; then
     printf "${YELLOW}You already have Leo's Profiles cloned.${NORMAL}\n"
 
@@ -77,15 +76,14 @@ main() {
   if type "apt" > /dev/null; then
     sudo apt -y update;
     sudo apt -y upgrade;
-    sudo apt -y install python ruby thefuck vim wget zsh;
-    curl -fsSL https://deb.nodesource.com/setup_current.x | sudo -E bash -;
+    sudo apt -y install build-essential python2 python3 ruby thefuck vim wget zsh;
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -;
     sudo apt install -y nodejs;
-    sudo npm install --global yarn;
   fi
 
   if type "dnf" > /dev/null; then
     sudo dnf -y update;
-    sudo dnf -y install python ruby thefuck vim wget zsh;
+    sudo dnf -y install python2 python3 ruby thefuck vim wget zsh;
   fi
 
   git clone https://github.com/rbenv/rbenv.git ~/.rbenv
