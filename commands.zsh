@@ -58,7 +58,7 @@ bye() {
 
   if command -v omz >/dev/null 2>/dev/null; then
     puts "Upgrading oh my zsh...";
-    omz update;
+    omz update --unattended;
   fi
 
   puts "Clear all history files..";
