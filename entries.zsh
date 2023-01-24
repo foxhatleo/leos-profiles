@@ -1,3 +1,5 @@
+entry "path.pyenv"
+
 entry "oh-my-zsh"
 entry "term"
 
