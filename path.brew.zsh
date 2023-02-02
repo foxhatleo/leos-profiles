@@ -6,8 +6,8 @@ if type "brew" > /dev/null; then
 
   brew-checkup() {
     brew update ;
-    HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade ;
-    HOMEBREW_NO_AUTO_UPDATE=1 brew cask upgrade ;
+    brew upgrade ;
+    brew upgrade --cask ;
     brew cleanup -s ;
     # brew doctor ;
   }

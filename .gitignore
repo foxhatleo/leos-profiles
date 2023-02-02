@@ -1,3 +1,5 @@
 .DS_Store
 ssh-shortcuts.zsh
 _*
+*.txt
+*.bak

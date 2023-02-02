@@ -66,6 +66,7 @@ bye() {
 
   if [[ "$OSTYPE" == "darwin"* ]]; then
     puts "Restarting Finder, Dock, SystemUIServer...";
+    rmdsstore;
     killall Finder Dock SystemUIServer;
   fi
 
