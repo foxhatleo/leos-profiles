@@ -1,16 +1,21 @@
+__rmdsstore() {
+  sudo find "$1" -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  puts "Finished scanning $1";
+}
+
 # Remove all .DS_Store files.
 rmdsstore() {
-  sudo find /Users -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /private -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /Library -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /bin -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /cores -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /opt -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /sbin -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /usr -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /var -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /etc -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
-  sudo find /Applications -depth -iname .DS_Store -type f -print -delete 2> /dev/null || true
+  __rmdsstore /Users ;
+  __rmdsstore /private ;
+  __rmdsstore /Library ;
+  __rmdsstore /bin ;
+  __rmdsstore /cores ;
+  __rmdsstore /opt ;
+  __rmdsstore /sbin ;
+  __rmdsstore /usr ;
+  __rmdsstore /var ;
+  __rmdsstore /etc ;
+  __rmdsstore /Applications ;
 }
 
 # Clear any history files.
@@ -66,7 +71,7 @@ bye() {
 
   if [[ "$OSTYPE" == "darwin"* ]]; then
     puts "Restarting Finder, Dock, SystemUIServer...";
-    rmdsstore;
+    # rmdsstore;
     killall Finder Dock SystemUIServer;
   fi
 
