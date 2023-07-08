@@ -5,17 +5,11 @@ __rmdsstore() {
 
 # Remove all .DS_Store files.
 rmdsstore() {
-  __rmdsstore /Users ;
-  __rmdsstore /private ;
-  __rmdsstore /Library ;
-  __rmdsstore /bin ;
-  __rmdsstore /cores ;
-  __rmdsstore /opt ;
-  __rmdsstore /sbin ;
-  __rmdsstore /usr ;
-  __rmdsstore /var ;
-  __rmdsstore /etc ;
-  __rmdsstore /Applications ;
+  __rmdsstore /System/Volumes/Data/Users ;
+  __rmdsstore /System/Volumes/Data/Library ;
+  __rmdsstore /System/Volumes/Data/opt ;
+  __rmdsstore /System/Volumes/Data/usr ;
+  __rmdsstore /System/Volumes/Data/private ;
 }
 
 # Clear any history files.
