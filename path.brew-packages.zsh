@@ -1,5 +1,4 @@
 if (type "brew" > /dev/null) && [ "$(arch)" = "arm64" ]; then
-  echo "brew"
   add-path "/opt/homebrew/opt/coreutils/libexec/gnubin" required
   add-path "/opt/homebrew/opt/findutils/libexec/gnubin" required
   add-path "/opt/homebrew/opt/gnu-sed/libexec/gnubin" required
