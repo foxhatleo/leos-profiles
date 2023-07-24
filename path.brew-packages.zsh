@@ -1,3 +1,9 @@
+if [ "$(arch)" = "arm64" ] && [ -d "/opt/homebrew/bin" ]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [ "$(arch)" = "i386" ] && [ -d "/usr/local/bin" ]; then
+  eval "$(/usr/local/bin/brew shellenv)"
+fi
+
 if (type "brew" > /dev/null) && [ "$(arch)" = "arm64" ]; then
   add-path "/opt/homebrew/opt/coreutils/libexec/gnubin" required
   add-path "/opt/homebrew/opt/findutils/libexec/gnubin" required
