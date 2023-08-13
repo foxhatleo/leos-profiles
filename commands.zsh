@@ -1,5 +1,5 @@
 __rmdsstore() {
-  sudo find "$1" -depth -iname .DS_Store -type f -print -delete 2> /dev/null ;
+  sudo python $HOME/.leos-profiles/rmdsstore.py "$1";
   puts "Finished scanning $1";
 }
 
