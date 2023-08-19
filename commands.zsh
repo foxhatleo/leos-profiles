@@ -1,5 +1,6 @@
 __rmdsstore() {
-  sudo python $HOME/.leos-profiles/rmdsstore.py "$1";
+  echo "$HOME/.leos-profiles/rmdsstore.py";
+  sudo python "$HOME/.leos-profiles/rmdsstore.py" "$1";
   puts "Finished scanning $1";
 }
 
