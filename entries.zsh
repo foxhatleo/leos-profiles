@@ -1,7 +1,8 @@
+entry "path.python"
 entry "path.pyenv"
 
 entry "oh-my-zsh"
-entry "term"
+entry "terminal"
 
 entry "path.brew"
 entry "path.brew-packages"
@@ -10,7 +11,6 @@ entry "path.rbenv"
 entry "path.thefuck"
 entry "path.ocaml"
 entry "path.node"
-entry "path.java"
 entry "path.gpg"
 entry "path.bin"
 entry "path.miniconda"

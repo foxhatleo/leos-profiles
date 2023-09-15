@@ -70,7 +70,7 @@ main() {
     printf "${BLUE}Installing home brew...${NORMAL}\n"
     /usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
     printf "${BLUE}Installing packages...${NORMAL}\n"
-    brew install coreutils findutils gnu-sed node openjdk python ruby ssh-copy-id thefuck vim wget zsh
+    brew install coreutils findutils fzf gnu-sed node python ruby ssh-copy-id thefuck vim wget zsh zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting
   fi
 
   if type "apt" > /dev/null; then

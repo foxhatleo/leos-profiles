@@ -5,43 +5,74 @@ if [ -d $ZSH ]; then
     DEFAULT_USER="leoliang"
     plugins=(
       1password
+      adb
+      alias-finder
+      aliases
+      aws
       brew
       bundler
       capistrano
       command-not-found
       common-aliases
+      copybuffer
+      copyfile
+      copypath
+      cp
       debian
+      dirhistory
       dnf
+      docker
+      docker-compose
       dotenv
+      dotnet
+      emoji
+      encode64
+      extract
+      flutter
       gem
       git
+      git-auto-fetch
+      git-lfs
+      git-prompt
       github
+      gitignore
+      golang
+      gpg-agent
       gradle
       heroku
+      last-working-dir
+      macos
+      man
       node
       npm
-      macos
+      nvm
+      perl
       pip
-      pyenv
-      python
       postgres
+      pyenv
+      pylint
+      python
       rails
       rake
       rbenv
+      react-native
       ruby
+      rvm
+      shrink-path
       sudo
       systemd
       ubuntu
       ufw
+      vagrant
       vscode
+      web-search
+      xcode
       yarn
-      zsh-syntax-highlighting
-      zsh-autosuggestions
-      zsh-completions
+      zsh-interactive-cd
     )
     unset SSH_CLIENT
     source $ZSH/oh-my-zsh.sh
   fi
 else
-  puts-err "Oh my zsh is not installed!"
+  puts-err "Oh my zsh! is not installed!"
 fi

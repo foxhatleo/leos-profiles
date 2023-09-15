@@ -15,3 +15,9 @@ if (type "brew" > /dev/null) && [ "$(arch)" = "arm64" ]; then
   fi
   add-path "/opt/homebrew/opt/ssh-copy-id/bin"
 fi
+
+if (type "brew" > /dev/null); then
+  source $(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+  source $(brew --prefix)/share/zsh-history-substring-search/zsh-history-substring-search.zsh
+  source $(brew --prefix)/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+fi
