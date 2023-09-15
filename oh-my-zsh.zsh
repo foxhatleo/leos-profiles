@@ -33,7 +33,6 @@ if [ -d $ZSH ]; then
       git
       git-auto-fetch
       git-lfs
-      git-prompt
       github
       gitignore
       golang
