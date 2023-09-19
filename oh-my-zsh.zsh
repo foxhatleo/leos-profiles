@@ -39,7 +39,6 @@ if [ -d $ZSH ]; then
       gpg-agent
       gradle
       heroku
-      last-working-dir
       macos
       man
       node
