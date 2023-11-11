@@ -46,14 +46,19 @@ mkcdir () { mkdir -p -- "$1" && cd -P -- "$1" }
 bye() {
   puts "Bye!";
 
-  if command -v brew-checkup >/dev/null 2>/dev/null; then
+  if command -v brew-checkup &>/dev/null; then
     puts "Doing brew checkup...";
     brew-checkup;
   fi
 
-  if command -v apt-checkup >/dev/null 2>/dev/null; then
+  if command -v apt-checkup &>/dev/null; then
     puts "Doing apt checkup...";
     apt-checkup;
+  fi
+
+  if command -v dnf-checkup &>/dev/null; then
+    puts "Doing dnf checkup...";
+    dnf-checkup;
   fi
 
   if command -v omz >/dev/null 2>/dev/null; then
