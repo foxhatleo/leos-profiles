@@ -14,6 +14,7 @@ entry "path.node"
 entry "path.gpg"
 entry "path.bin"
 entry "path.miniconda"
+entry "path.sdkman"
 
 entry "_private" optional
 
