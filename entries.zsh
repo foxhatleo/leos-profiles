@@ -1,21 +1,21 @@
-entry "path.python"
-entry "path.pyenv"
+# Leo's zsh Profiles
+# Entries script
+#
+# This script lists a series of scripts and loads them.
 
 entry "oh-my-zsh"
 entry "terminal"
 
 entry "path.brew"
-entry "path.brew-packages"
 entry "path.apt"
 entry "path.dnf"
+entry "path.node"
+entry "path.pyenv"
 entry "path.rbenv"
 entry "path.thefuck"
-entry "path.ocaml"
-entry "path.node"
 entry "path.gpg"
 entry "path.bin"
-entry "path.miniconda"
-entry "path.sdkman"
+entry "path.fzf"
 
 entry "_private" optional
 

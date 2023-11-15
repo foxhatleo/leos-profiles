@@ -1,1 +1,0 @@
-add-path "/opt/homebrew/opt/python@3/libexec/bin"

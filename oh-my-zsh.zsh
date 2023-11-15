@@ -1,3 +1,8 @@
+# Leo's zsh Profiles
+# Oh my zsh
+#
+# This script loads oh my zsh and configures it properly.
+
 export ZSH="$HOME/.oh-my-zsh"
 if [ -d $ZSH ]; then
   if [ -z "$OMZ_DISABLED" ]; then
@@ -47,7 +52,6 @@ if [ -d $ZSH ]; then
       perl
       pip
       postgres
-      pyenv
       pylint
       python
       rails

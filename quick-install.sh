@@ -41,11 +41,11 @@ apply-zshrc() {
   printf "${BLUE}Looking for an existing zsh config...${NORMAL}\n"
 
   if [ -f $HOME/.zshrc ] || [ -h $HOME/.zshrc ]; then
-    printf "${YELLOW}Found ~/.zshrc.${NORMAL} ${GREEN}Backing up to ~/.zshrc.pre-leo${NORMAL}\n";
-    mv $HOME/.zshrc $HOME/.zshrc.pre-leo;
+    printf "${YELLOW}Found ~/.zshrc.${NORMAL} ${GREEN}Backing up to ~/.zshrc.pre-leo${NORMAL}\n"
+    mv $HOME/.zshrc $HOME/.zshrc.pre-leo
   fi
   
-  echo "source $PF/start.zsh" >> $HOME/.zshrc;
+  echo "source $PF/start.zsh" >> $HOME/.zshrc
 }
 
 main() {
@@ -53,11 +53,11 @@ main() {
     printf "${YELLOW}You already have Leo's Profiles cloned.${NORMAL}\n"
 
   else
-    printf "${BLUE}Cloning Leo's Profiles...${NORMAL}\n";
+    printf "${BLUE}Cloning Leo's Profiles...${NORMAL}\n"
     command -v git >/dev/null 2>&1 || {
       echo "Error: git is not installed"
         exit 1
-    };
+    }
 
     env git clone https://github.com/foxhatleo/leos-profiles "$PF" || {
       printf "Error: git clone of Leo's Profiles repo failed\n"
@@ -70,33 +70,34 @@ main() {
     printf "${BLUE}Installing home brew...${NORMAL}\n"
     /usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
     printf "${BLUE}Installing packages...${NORMAL}\n"
-    brew install asimov cloc coreutils findutils fzf gnu-sed go icoutils imagemagick jpeg librsvg mitmproxy node pkg-config python ruby ssh-copy-id thefuck tldr vim wget zsh zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting
+    brew install git node python ruby ssh-copy-id thefuck tldr wget zsh zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting
   fi
 
-  if type "apt" > /dev/null; then
-    sudo apt -y update;
-    sudo apt -y upgrade;
-    sudo apt -y install build-essential python2 python3 ruby thefuck vim wget zsh;
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -;
-    sudo apt install -y nodejs;
+  if command -v apt &> /dev/null; then
+    sudo apt -y update
+    sudo apt -y upgrade
+    sudo apt -y install build-essential python2 python3 ruby thefuck wget zsh
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+    sudo apt install -y nodejs
   fi
 
-  if type "dnf" > /dev/null; then
-    sudo dnf -y update;
-    sudo dnf -y install python2 python3 ruby thefuck vim wget zsh;
+  if command -v dnf &> /dev/null; then
+    sudo dnf -y update
+    sudo dnf -y install python2 python3 ruby thefuck vim wget zsh
   fi
 
-  git clone https://github.com/rbenv/rbenv.git ~/.rbenv
-  cd ~/.rbenv && src/configure && make -C src
+  printf "${BLUE}Installing pyenv...${NORMAL}\n"
+  git clone https://github.com/pyenv/pyenv.git $HOME/.pyenv
+  cd $HOME/.pyenv && src/configure && make -C src
+
+  printf "${BLUE}Installing rbenv...${NORMAL}\n"
+  git clone https://github.com/rbenv/rbenv.git $HOME/.rbenv
   mkdir -p "$($HOME/.rbenv/bin/rbenv root)"/plugins
   git clone https://github.com/rbenv/ruby-build.git "$($HOME/.rbenv/bin/rbenv root)"/plugins/ruby-build
 
   printf "${BLUE}Installing oh my zsh...${NORMAL}\n"
   RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
-  rm -rf $HOME/.*.pre-oh-my-zsh;
-  git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting ;
-  git clone https://github.com/zsh-users/zsh-autosuggestions.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions ;
-  git clone https://github.com/zsh-users/zsh-completions.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-completions ;
+  rm -rf $HOME/.*.pre-oh-my-zsh
 
   if [[ "$OSTYPE" == "darwin"* ]]; then
     printf "${BLUE}Installing Powerline fonts...${NORMAL}\n"
@@ -107,7 +108,7 @@ main() {
     rm -rf fonts
   fi
 
-  apply-zshrc;
+  apply-zshrc
 
   printf "${BLUE}Installation finished.${NORMAL}\n"
   printf "${BLUE}Now please configure your rbenv, opam, etc.${NORMAL}\n"

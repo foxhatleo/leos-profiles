@@ -1,3 +1,8 @@
+# Leo's zsh Profiles
+# Terminal
+#
+# This script sets up terminal environment.
+
 # Languages
 export LC_ALL=en_GB.UTF-8
 export LANG=en_GB.UTF-8
@@ -12,7 +17,7 @@ zstyle ':completion:*:default' list-colors ${(s.:.)LS_COLORS}
 export EDITOR=nano
 
 # Colourful term output
-alias ls="ls --color=auto -N"
+alias ls="ls --color=auto"
 alias grep="grep --color=auto"
 alias fgrep="fgrep --color=auto"
 alias egrep="egrep --color=auto"
