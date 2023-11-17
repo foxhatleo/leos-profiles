@@ -7,6 +7,7 @@ entry "oh-my-zsh"
 entry "terminal"
 
 entry "path.brew"
+entry "path.gnu"
 entry "path.apt"
 entry "path.dnf"
 entry "path.node"

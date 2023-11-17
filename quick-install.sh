@@ -70,7 +70,9 @@ main() {
     printf "${BLUE}Installing home brew...${NORMAL}\n"
     /usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
     printf "${BLUE}Installing packages...${NORMAL}\n"
-    brew install git node python ruby ssh-copy-id thefuck tldr wget zsh zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting
+    brew install git node python ruby ssh-copy-id thefuck tldr wget yarn \
+      zsh zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting \
+      coreutils findutils gnu-indent gnu-sed gnutls grep gnu-tar gawk diffutils ed gnu-which gzip bash nano less
   fi
 
   if command -v apt &> /dev/null; then
