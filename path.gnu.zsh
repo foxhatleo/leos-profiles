@@ -16,7 +16,7 @@ if [[ "$OSTYPE" == "darwin"* ]] && ! [ -f "$HOME/.lp-no-gnu" ]; then
 fi
 
 enable-gnu() {
-  rm "$HOME/.lp-no-gnu"
+  rm -f "$HOME/.lp-no-gnu"
   puts "Enabled GNU tools. Restart shell to take effect."
 }
 
