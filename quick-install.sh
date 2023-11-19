@@ -78,12 +78,12 @@ main() {
   if command -v apt &> /dev/null; then
     sudo apt -y update
     sudo apt -y upgrade
-    sudo apt -y install build-essential python2 python3 ruby thefuck wget zsh
+    sudo apt -y install build-essential fzf python2 python3 ruby thefuck wget zsh
   fi
 
   if command -v dnf &> /dev/null; then
     sudo dnf -y update
-    sudo dnf -y install python2 python3 ruby thefuck vim wget zsh
+    sudo dnf -y install fzf python2 python3 ruby thefuck vim wget zsh
   fi
 
   printf "${BLUE}Installing pyenv...${NORMAL}\n"
