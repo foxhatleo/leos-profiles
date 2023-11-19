@@ -7,7 +7,9 @@ export ZSH="$HOME/.oh-my-zsh"
 if [ -d $ZSH ]; then
   if [ -z "$OMZ_DISABLED" ]; then
     [ -z "$ZSH_THEME" ] && ZSH_THEME="agnoster"
-    DEFAULT_USER="leoliang"
+    if [[ $(hostname) == FHL-Mac* ]]; then
+      DEFAULT_USER="leoliang"
+    fi
     plugins=(
       1password
       adb
