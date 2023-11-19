@@ -79,8 +79,6 @@ main() {
     sudo apt -y update
     sudo apt -y upgrade
     sudo apt -y install build-essential python2 python3 ruby thefuck wget zsh
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-    sudo apt install -y nodejs
   fi
 
   if command -v dnf &> /dev/null; then
