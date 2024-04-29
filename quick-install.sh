@@ -82,7 +82,7 @@ main() {
       coreutils findutils gnu-indent gnu-sed gnutls grep gnu-tar gawk diffutils ed gnu-which gzip bash nano less
   fi
 
-  if command -v apt &> /dev/null; then
+  if command -v apt-get &> /dev/null; then
     sudo apt -y update
     sudo apt -y upgrade
     sudo apt -y install build-essential fzf python2 python3 ruby thefuck wget zsh
