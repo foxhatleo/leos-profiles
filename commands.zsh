@@ -4,7 +4,6 @@
 # This script adds useful commands to the environment.
 
 __rmdsstore() {
-  echo "$HOME/.leos-profiles/rmdsstore.py"
   sudo python "$HOME/.leos-profiles/rmdsstore.py" "$1"
   puts "Finished scanning $1"
 }

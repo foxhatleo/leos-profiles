@@ -4,6 +4,7 @@
 import os
 import sys
 import re
+import shutil
 
 if len(sys.argv) <= 1:
     print("No argument provided.")
@@ -27,6 +28,13 @@ def smart_gen_progress(p, prompt='Scanning: {}...', newline=False) :
         sys.stdout.write('\r')
     sys.stdout.flush()
 
+def rm(top):
+    for root, dirs, files in os.walk(top, topdown=False):
+        for name in files:
+            os.remove(os.path.join(root, name))
+        for name in dirs:
+            os.rmdir(os.path.join(root, name))
+
 print("Running rmdsstore on \"{}\".".format(sys.argv[1]))
 for root, dirs, files in os.walk(sys.argv[1], followlinks=False):
     dirs[:] = [d for d in dirs if not d.endswith('.duck')]
@@ -35,11 +43,11 @@ for root, dirs, files in os.walk(sys.argv[1], followlinks=False):
         if name == '$RECYCLE.BIN':
             smart_gen_progress(os.path.join(root, name), prompt='Removing {}...', newline=True)
             try:
-                os.rmdir(os.path.join(root, name))
+                shutil.rmtree(os.path.join(root, name), ignore_errors=True)
             except:
                 smart_gen_progress(os.path.join(root, name), prompt='Could not remove {}.', newline=True)
     for name in files:
-        if name == '.DS_Store':
+        if name == '.DS_Store' or name == 'Thumbs.db' or name == 'desktop.ini':
             smart_gen_progress(os.path.join(root, name), prompt='Removing {}...', newline=True)
             try:
                 os.remove(os.path.join(root, name))

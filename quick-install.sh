@@ -65,6 +65,13 @@ main() {
     }
   fi
 
+  printf "${BLUE}Install local bins...${NORMAL}\n"
+  mkdir -p "$HOME/.local/bin"
+  curl -o "$HOME/.local/bin/rpatool" https://raw.githubusercontent.com/shizmob/rpatool/master/rpatool
+  chmod u+x "$HOME/.local/bin/rpatool"
+  cp "$PF/libs/sync-cloud" "$HOME/.local/bin/sync-cloud"
+  chmod u+x "$HOME/.local/bin/sync-cloud"
+
   if [[ "$OSTYPE" == "darwin"* ]]; then
     printf "${BLUE}You are on macOS!${NORMAL}\n"
     printf "${BLUE}Installing home brew...${NORMAL}\n"
@@ -112,6 +119,7 @@ main() {
 
   printf "${BLUE}Installation finished.${NORMAL}\n"
   printf "${BLUE}Now please configure your rbenv, opam, etc.${NORMAL}\n"
+  printf "${BLUE}sync-cloud is installed but it is not in crontab. Configure rclone first!${NORMAL}\n"
 
   exec zsh -l
 }
