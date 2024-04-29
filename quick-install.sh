@@ -41,7 +41,7 @@ apply-zshrc() {
   printf "${BLUE}Looking for an existing zsh config...${NORMAL}\n"
 
   if [ -f $HOME/.zshrc ] || [ -h $HOME/.zshrc ]; then
-    printf "${YELLOW}Found ~/.zshrc.${NORMAL} ${GREEN}Backing up to ~/.zshrc.pre-leo${NORMAL}\n"
+    printf "${YELLOW}Found ~/.zshrc.\n${NORMAL} ${GREEN}Backing up to ~/.zshrc.pre-leo${NORMAL}\n"
     mv $HOME/.zshrc $HOME/.zshrc.pre-leo
   fi
   
@@ -94,17 +94,29 @@ main() {
   fi
 
   printf "${BLUE}Installing pyenv...${NORMAL}\n"
-  git clone https://github.com/pyenv/pyenv.git $HOME/.pyenv
-  cd $HOME/.pyenv && src/configure && make -C src
+  if [ -d "$HOME/.pyenv" ]; then
+    printf "${YELLOW}You already have pyenv cloned.${NORMAL}\n"
+  else
+    git clone https://github.com/pyenv/pyenv.git $HOME/.pyenv
+    cd $HOME/.pyenv && src/configure && make -C src
+  fi
 
   printf "${BLUE}Installing rbenv...${NORMAL}\n"
-  git clone https://github.com/rbenv/rbenv.git $HOME/.rbenv
-  mkdir -p "$($HOME/.rbenv/bin/rbenv root)"/plugins
-  git clone https://github.com/rbenv/ruby-build.git "$($HOME/.rbenv/bin/rbenv root)"/plugins/ruby-build
+  if [ -d "$HOME/.rbenv" ]; then
+    printf "${YELLOW}You already have rbenv cloned.${NORMAL}\n"
+  else
+    git clone https://github.com/rbenv/rbenv.git $HOME/.rbenv
+    mkdir -p "$($HOME/.rbenv/bin/rbenv root)"/plugins
+    git clone https://github.com/rbenv/ruby-build.git "$($HOME/.rbenv/bin/rbenv root)"/plugins/ruby-build
+  fi
 
   printf "${BLUE}Installing oh my zsh...${NORMAL}\n"
-  RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
-  rm -rf $HOME/.*.pre-oh-my-zsh
+  if [ -d "$HOME/.oh-my-zsh" ]; then
+    printf "${YELLOW}You already OMZ installed.${NORMAL}\n"
+  else
+    RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
+    rm -rf $HOME/.*.pre-oh-my-zsh
+  fi
 
   if [[ "$OSTYPE" == "darwin"* ]]; then
     printf "${BLUE}Installing Powerline fonts...${NORMAL}\n"
