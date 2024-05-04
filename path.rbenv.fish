@@ -10,4 +10,6 @@ if not type -q rbenv
     if not test -f $HOME/.lp-norbenv
         puts-err "rbenv is not installed. To silence, touch \$HOME/.lp-nopyenv." >&2
     end
+else
+    rbenv init - | source
 end
