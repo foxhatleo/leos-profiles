@@ -199,7 +199,9 @@ main() {
   fi
 
   printf "${BLUE}Setting up fish...${NORMAL}\n"
-  curl -L https://get.oh-my.fish | fish
+  curl https://raw.githubusercontent.com/oh-my-fish/oh-my-fish/master/bin/install > omf-install
+  fish omf-install --noninteractive
+  rm omf-install
   fish -c 'curl -sL https://git.io/fisher | source'
   fish -c 'fisher install jorgebucaran/fisher'
   fish -c 'fisher install PatrickF1/fzf.fish'
