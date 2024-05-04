@@ -37,15 +37,18 @@ if [ ! -n "$PF" ]; then
   PF=$HOME/.leos-profiles
 fi
 
-apply-zshrc() {
-  printf "${BLUE}Looking for an existing zsh config...${NORMAL}\n"
-
-  if [ -f $HOME/.zshrc ] || [ -h $HOME/.zshrc ]; then
-    printf "${YELLOW}Found ~/.zshrc.\n${NORMAL} ${GREEN}Backing up to ~/.zshrc.pre-leo${NORMAL}\n"
-    mv $HOME/.zshrc $HOME/.zshrc.pre-leo
-  fi
-  
-  echo "source $PF/start.zsh" >> $HOME/.zshrc
+apply-fish-config() {
+  printf "${BLUE}Installing fish config...${NORMAL}\n"
+  # Define the path to the Fish configuration file
+  FISH_CONFIG_PATH="$HOME/.config/fish/config.fish"
+  # Ensure the configuration directory exists
+  mkdir -p "$(dirname "$FISH_CONFIG_PATH")"
+  # Set the content to the config.fish file
+  cat << EOF > "$FISH_CONFIG_PATH"
+if status is-interactive
+    source "$HOME/.leos-profiles/start.fish"
+end
+EOF
 }
 
 main() {
@@ -76,6 +79,7 @@ main() {
     printf "${BLUE}You are on macOS!${NORMAL}\n"
     printf "${BLUE}Installing home brew...${NORMAL}\n"
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    export PATH="/opt/homebrew/bin:$PATH"
     printf "${BLUE}Installing packages...${NORMAL}\n"
     brew tap heroku/brew
     brew install bash \
@@ -199,6 +203,7 @@ main() {
   curl -sL https://git.io/fisher | source && fisher install jorgebucaran/fisher
   fisher install PatrickF1/fzf.fish
   omf install agnoster
+  curl -L https://iterm2.com/shell_integration/fish -o ~/.iterm2_shell_integration.fish
 
   printf "${BLUE}Installing Powerline fonts...${NORMAL}\n"
   git clone https://github.com/powerline/fonts.git --depth=1
