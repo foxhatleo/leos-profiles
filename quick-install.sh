@@ -151,7 +151,7 @@ main() {
 
   if command -v dnf &> /dev/null; then
     sudo dnf -y update
-    sudo dnf groupinstall "Development Tools" "Development Libraries"
+    sudo dnf -y groupinstall "Development Tools" "Development Libraries"
     curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
     sudo dnf -y install \
       bash \
