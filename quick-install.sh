@@ -200,7 +200,11 @@ main() {
 
   printf "${BLUE}Setting up fish...${NORMAL}\n"
   curl https://raw.githubusercontent.com/oh-my-fish/oh-my-fish/master/bin/install > omf-install
-  fish omf-install --noninteractive
+  if [ -d "$HOME/.local/share/omf" ]; then
+    printf "${YELLOW}You already have OMF installed.${NORMAL}\n"
+  else
+    fish omf-install --noninteractive
+  fi
   rm omf-install
   fish -c 'curl -sL https://git.io/fisher | source'
   fish -c 'fisher install jorgebucaran/fisher'
