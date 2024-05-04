@@ -19,13 +19,13 @@ end
 
 # Clear any history files.
 function clear-history
-  for file in $HOME/.*history ; rm $file; end
-  for file in $HOME/.zcompdump* ; rm $file; end
-  for file in $HOME/.oracle_jre_usage ; rm $file; end
-  for file in $HOME/.*hsts ; rm $file; end
+  for file in $HOME/.*history ; rm -rf $file; end
+  for file in $HOME/.zcompdump* ; rm -rf $file; end
+  for file in $HOME/.oracle_jre_usage ; rm -rf $file; end
+  for file in $HOME/.*hsts ; rm -rf $file; end
   echo yes | history --clear
   if test -d "$HOME/.lldb"
-    for file in $HOME/.lldb/*history ; rm $file; end 
+    for file in $HOME/.lldb/*history ; rm -rf $file; end 
   end
   if command -sq powershell.exe
     powershell.exe -Command "Remove-Item (Get-PSReadlineOption).HistorySavePath"
