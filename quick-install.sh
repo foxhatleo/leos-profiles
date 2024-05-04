@@ -200,9 +200,10 @@ main() {
 
   printf "${BLUE}Setting up fish...${NORMAL}\n"
   curl -L https://get.oh-my.fish | fish
-  curl -sL https://git.io/fisher | source && fisher install jorgebucaran/fisher
-  fisher install PatrickF1/fzf.fish
-  omf install agnoster
+  fish -c 'curl -sL https://git.io/fisher | source'
+  fish -c 'fisher install jorgebucaran/fisher'
+  fish -c 'fisher install PatrickF1/fzf.fish'
+  fish -c 'omf install agnoster'
   curl -L https://iterm2.com/shell_integration/fish -o ~/.iterm2_shell_integration.fish
 
   printf "${BLUE}Installing Powerline fonts...${NORMAL}\n"
