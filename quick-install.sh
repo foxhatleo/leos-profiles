@@ -153,7 +153,6 @@ main() {
     sudo dnf -y update
     sudo dnf groupinstall "Development Tools" "Development Libraries"
     curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-    curl -sL https://dl.yarnpkg.com/rpm/yarn.repo | sudo tee /etc/yum.repos.d/yarn.repo
     sudo dnf -y install \
       bash \
       coreutils \
@@ -177,7 +176,7 @@ main() {
       thefuck \
       tldr \
       wget \
-      yarn \
+      yarnpkg \
       yt-dlp \
       zsh
   fi
