@@ -3,7 +3,7 @@
 #
 # This script adds useful commands if Homebrew is present.
 
-if command -v brew > /dev/null 2>&1
+if test -d /opt/homebrew/bin
     # Set up Homebrew environment
     add-path "/opt/homebrew/bin"
     eval (brew shellenv)

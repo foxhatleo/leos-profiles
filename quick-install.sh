@@ -47,6 +47,7 @@ apply-fish-config() {
   cat << EOF > "$FISH_CONFIG_PATH"
 if status is-interactive
     source "$HOME/.leos-profiles/start.fish"
+    set fish_greeting
 end
 EOF
 }
@@ -199,21 +200,19 @@ main() {
   fi
 
   printf "${BLUE}Setting up fish...${NORMAL}\n"
-  curl https://raw.githubusercontent.com/oh-my-fish/oh-my-fish/master/bin/install > omf-install
-  if [ -d "$HOME/.local/share/omf" ]; then
-    printf "${YELLOW}You already have OMF installed.${NORMAL}\n"
-  else
-    fish omf-install --noninteractive
-  fi
-  rm omf-install
   fish -c 'curl -sL https://git.io/fisher | source && fisher install jorgebucaran/fisher'
   fish -c 'fisher install PatrickF1/fzf.fish'
-  fish -c 'omf install agnoster'
+  fish -c 'fisher install franciscolourenco/done'
+  fish -c 'fisher install decors/fish-colored-man'
+  fish -c 'fisher install gazorby/fish-abbreviation-tips'
+  fish -c 'fisher install jorgebucaran/autopair.fish'
+  fish -c 'fisher install IlanCosman/tide@v6'
+  fish -c "tide configure --auto --style=Rainbow --prompt_colors='True color' --show_time=No --rainbow_prompt_separators=Angled --powerline_prompt_heads=Sharp --powerline_prompt_tails=Flat --powerline_prompt_style='Two lines, character' --prompt_connection=Dotted --powerline_right_prompt_frame=No --prompt_connection_andor_frame_color=Light --prompt_spacing=Sparse --icons='Few icons' --transient=No"
   curl -L https://iterm2.com/shell_integration/fish -o ~/.iterm2_shell_integration.fish
 
-  printf "${BLUE}Installing Powerline fonts...${NORMAL}\n"
-  git clone https://github.com/powerline/fonts.git --depth=1
-  cd fonts
+  printf "${BLUE}Installing nerd fonts...${NORMAL}\n"
+  git clone https://github.com/ryanoasis/nerd-fonts.git --depth=1
+  cd nerd-fonts
   ./install.sh
   cd ..
   rm -rf fonts
