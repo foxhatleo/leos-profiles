@@ -5,7 +5,7 @@
 
 function __rmdsstore
   sudo python "$HOME/.leos-profiles/rmdsstore.py" $argv
-  echo "Finished scanning $argv"
+  puts "Finished scanning $argv"
 end
 
 # Remove all .DS_Store files.
@@ -19,13 +19,13 @@ end
 
 # Clear any history files.
 function clear-history
-  set -g fish_user_paths
-  rm -rf $HOME/.*history 
-  rm -rf $HOME/.zcompdump* 
-  rm -rf $HOME/.oracle_jre_usage 
-  rm -rf $HOME/.*hsts 
+  for file in $HOME/.*history ; rm $file; end
+  for file in $HOME/.zcompdump* ; rm $file; end
+  for file in $HOME/.oracle_jre_usage ; rm $file; end
+  for file in $HOME/.*hsts ; rm $file; end
+  echo yes | history --clear
   if test -d "$HOME/.lldb"
-    rm -rf $HOME/.lldb/*history 
+    for file in $HOME/.lldb/*history ; rm $file; end 
   end
   if command -sq powershell.exe
     powershell.exe -Command "Remove-Item (Get-PSReadlineOption).HistorySavePath"
@@ -34,10 +34,10 @@ end
 
 # Show/hide hidden files in Finder.
 function __hidden-set
-  if string match -q "darwin*" $OSTYPE
+  if test (uname -s) = 'Darwin'
     defaults write com.apple.Finder AppleShowAllFiles $argv
   else
-    echo "This command is only available on macOS."
+    puts-err "This command is only available on macOS."
   end
 end
 function hidden-on
@@ -54,39 +54,35 @@ end
 
 # Clean up and quit the terminal.
 function bye
-  echo "Bye!"
+  puts "Bye!"
+  sudo echo nothing > /dev/null
 
-  if command -sq brew-checkup
-    echo "Doing brew checkup..."
+  if functions brew-checkup > /dev/null
+    puts "Doing brew checkup..."
     brew-checkup
   end
 
-  if command -sq apt-checkup
-    echo "Doing apt checkup..."
+  if functions apt-checkup > /dev/null
+    puts "Doing apt checkup..."
     apt-checkup
   end
 
-  if command -sq dnf-checkup
-    echo "Doing dnf checkup..."
+  if functions dnf-checkup > /dev/null
+    puts "Doing dnf checkup..."
     dnf-checkup
   end
 
-  if command -sq omf
-    echo "Upgrading oh my zsh..."
-    omz update
-  end
-
-  echo "Clear all history files.."
+  puts "Clear all history files.."
   clear-history
 
-  if string match -q "darwin*" $OSTYPE
-    echo "Restarting Finder, Dock, SystemUIServer..."
+  if test (uname -s) = 'Darwin'
+    puts "Restarting Finder, Dock, SystemUIServer..."
     rmdsstore
     killall Finder Dock SystemUIServer
   end
 
   if test "$argv" = "noexit"
-    echo "Skipped exiting."
+    puts "Skipped exiting."
   else if command -sq /mnt/c/Windows/system32/wsl.exe
     /mnt/c/Windows/system32/wsl.exe --shutdown
   else

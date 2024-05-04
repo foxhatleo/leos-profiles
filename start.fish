@@ -4,11 +4,11 @@
 # This script adds basic utility functions, and loads "entries.fish".
 
 function puts
-  set_color -b blue; set_color bold; echo "===> $argv"; set_color normal
+  set_color --bold blue; echo -n "===> "; set_color normal ; set_color --bold; echo "$argv"; set_color normal
 end
 
 function puts-err
-  set_color -b red; set_color bold; echo "===> $argv"; set_color normal
+  set_color --bold red; echo -n "===> "; set_color normal ; set_color --bold; echo "$argv"; set_color normal
 end
 
 function add-path

@@ -3,7 +3,7 @@
 #
 # This script replaces BSD tools on macOS with GNU tools if enabled.
 
-if test (string match -q "darwin*" -- $OSTYPE) && not test -f "$HOME/.lp-no-gnu"
+if test (uname -s) = 'Darwin'; and not test -f "$HOME/.lp-no-gnu"
     add-path "/opt/homebrew/opt/coreutils/libexec/gnubin"
     add-path "/opt/homebrew/opt/findutils/libexec/gnubin"
     add-path "/opt/homebrew/opt/gnu-indent/libexec/gnubin"
@@ -16,11 +16,11 @@ if test (string match -q "darwin*" -- $OSTYPE) && not test -f "$HOME/.lp-no-gnu"
 
     function enable-gnu
         rm -f "$HOME/.lp-no-gnu"
-        echo "Enabled GNU tools. Restart shell to take effect."
+        puts "Enabled GNU tools. Restart shell to take effect."
     end
 
     function disable-gnu
         touch "$HOME/.lp-no-gnu"
-        echo "Disabled GNU tools. Restart shell to take effect."
+        puts "Disabled GNU tools. Restart shell to take effect."
     end
 end

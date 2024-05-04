@@ -8,6 +8,6 @@ add-path "$RBENV_ROOT/bin"
 
 if not type -q rbenv
     if not test -f $HOME/.lp-norbenv
-        echo "rbenv is not installed. To silence, touch \$HOME/.lp-nopyenv." >&2
+        puts-err "rbenv is not installed. To silence, touch \$HOME/.lp-nopyenv." >&2
     end
 end

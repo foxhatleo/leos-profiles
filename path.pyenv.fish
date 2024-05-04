@@ -8,6 +8,6 @@ add-path "$PYENV_ROOT/bin"
 
 if not type -q pyenv
     if not test -f $HOME/.lp-nopyenv
-        echo "pyenv is not installed. To silence, touch \$HOME/.lp-nopyenv." >&2
+        puts-err "pyenv is not installed. To silence, touch \$HOME/.lp-nopyenv." >&2
     end
 end

@@ -40,7 +40,7 @@ if test -d /opt/homebrew/bin
     end
     
 else
-    if string match -q "darwin*" -- $OSTYPE; and not test -f $HOME/.lp-nobrew
+    if test (uname -s) = 'Darwin'; and not test -f $HOME/.lp-nobrew
         # Error function must be defined in fish, or you can use a simple echo with color here.
         echo (set_color red) "brew is not installed. To silence, touch \$HOME/.lp-nobrew." (set_color normal)
     end
