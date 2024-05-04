@@ -1,9 +1,8 @@
-# Leo's zsh Profiles
+# Leo's Profiles
 # Entries script
 #
 # This script lists a series of scripts and loads them.
 
-entry "oh-my-zsh"
 entry "terminal"
 
 entry "path.brew"
@@ -17,7 +16,6 @@ entry "path.flutter"
 entry "path.thefuck"
 entry "path.gpg"
 entry "path.bin"
-entry "path.fzf"
 
 entry "_private" optional
 

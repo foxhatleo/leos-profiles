@@ -75,22 +75,106 @@ main() {
   if [[ "$OSTYPE" == "darwin"* ]]; then
     printf "${BLUE}You are on macOS!${NORMAL}\n"
     printf "${BLUE}Installing home brew...${NORMAL}\n"
-    /usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     printf "${BLUE}Installing packages...${NORMAL}\n"
-    brew install git node python ruby ssh-copy-id thefuck tldr wget yarn \
-      zsh zsh-autosuggestions zsh-history-substring-search zsh-syntax-highlighting \
-      coreutils findutils gnu-indent gnu-sed gnutls grep gnu-tar gawk diffutils ed gnu-which gzip bash nano less
+    brew tap heroku/brew
+    brew install bash \
+      coreutils \
+      diffutils \
+      ed \
+      ffmpeg \
+      findutils \
+      fish \
+      heroku \
+      imagemagick \
+      git \
+      gnu-indent \
+      gnu-sed \
+      gnu-tar \
+      gnu-which \
+      gnutls \
+      grep \
+      gawk \
+      gzip \
+      less \
+      nano \
+      node \
+      python \
+      rclone \
+      ruby \
+      smartmontools \
+      ssh-copy-id \
+      thefuck \
+      tldr \
+      wget \
+      yarn \
+      yt-dlp \
+      zsh
   fi
 
   if command -v apt-get &> /dev/null; then
     sudo apt -y update
     sudo apt -y upgrade
-    sudo apt -y install build-essential fzf python2 python3 ruby thefuck wget zsh
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - 
+    sudo apt -y install build-essential \
+      bash \
+      coreutils \
+      diffutils \
+      ed \
+      ffmpeg \
+      findutils \
+      fish \
+      heroku \
+      imagemagick \
+      git \
+      grep \
+      gawk \
+      gzip \
+      less \
+      nano \
+      nodejs \
+      python-is-python3 \
+      rclone \
+      ruby \
+      smartmontools \
+      thefuck \
+      tldr \
+      wget \
+      yarn \
+      yt-dlp \
+      zsh
   fi
 
   if command -v dnf &> /dev/null; then
     sudo dnf -y update
-    sudo dnf -y install fzf python2 python3 ruby thefuck vim wget zsh
+    sudo dnf groupinstall "Development Tools" "Development Libraries"
+    sudo dnf -y install build-essential \
+      bash \
+      coreutils \
+      diffutils \
+      ed \
+      ffmpeg \
+      findutils \
+      fish \
+      heroku \
+      imagemagick \
+      git \
+      grep \
+      gawk \
+      gzip \
+      less \
+      nano \
+      nodejs \
+      python-is-python3 \
+      rclone \
+      ruby \
+      smartmontools \
+      thefuck \
+      tldr \
+      wget \
+      yarn \
+      yt-dlp \
+      zsh
   fi
 
   printf "${BLUE}Installing pyenv...${NORMAL}\n"
@@ -110,30 +194,41 @@ main() {
     git clone https://github.com/rbenv/ruby-build.git "$($HOME/.rbenv/bin/rbenv root)"/plugins/ruby-build
   fi
 
-  printf "${BLUE}Installing oh my zsh...${NORMAL}\n"
-  if [ -d "$HOME/.oh-my-zsh" ]; then
-    printf "${YELLOW}You already OMZ installed.${NORMAL}\n"
+  printf "${BLUE}Setting up fish...${NORMAL}\n"
+  curl -L https://get.oh-my.fish | fish
+  curl -sL https://git.io/fisher | source && fisher install jorgebucaran/fisher
+  fisher install PatrickF1/fzf.fish
+  omf install agnoster
+
+  printf "${BLUE}Installing Powerline fonts...${NORMAL}\n"
+  git clone https://github.com/powerline/fonts.git --depth=1
+  cd fonts
+  ./install.sh
+  cd ..
+  rm -rf fonts
+
+  FISH_PATH=$(which fish)
+  # Check if Fish is installed
+  if [ -z "$FISH_PATH" ]; then
+      echo "Fish shell is not installed. Exiting."
+      exit 1
+  fi
+  # Check if Fish path is already in /etc/shells
+  if ! grep -qxFe "$FISH_PATH" /etc/shells; then
+      echo "Adding $FISH_PATH to /etc/shells"
+      echo "$FISH_PATH" | sudo tee -a /etc/shells > /dev/null
   else
-    RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
-    rm -rf $HOME/.*.pre-oh-my-zsh
+      echo "Fish shell is already listed in /etc/shells."
   fi
+  # Change the default shell to Fish
+  echo "Changing default shell to Fish..."
+  chsh -s "$FISH_PATH"
 
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    printf "${BLUE}Installing Powerline fonts...${NORMAL}\n"
-    git clone https://github.com/powerline/fonts.git --depth=1
-    cd fonts
-    ./install.sh
-    cd ..
-    rm -rf fonts
-  fi
-
-  apply-zshrc
+  apply-fish-config
 
   printf "${BLUE}Installation finished.${NORMAL}\n"
   printf "${BLUE}Now please configure your rbenv, opam, etc.${NORMAL}\n"
   printf "${BLUE}sync-cloud is installed but it is not in crontab. Configure rclone first!${NORMAL}\n"
-
-  exec zsh -l
 }
 
 main

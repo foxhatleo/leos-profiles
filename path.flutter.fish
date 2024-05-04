@@ -1,4 +1,4 @@
-# Leo's zsh Profiles
+# Leo's Profiles
 # Flutter
 #
 # This script sets up Flutter.
