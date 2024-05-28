@@ -3,34 +3,38 @@
 # Define the lock file and log directory
 lock_file="$HOME/.local/bin/sync-cloud.lock"
 log_dir="$HOME/.local/log/sync-cloud"
+current_date=$(date "+%Y%m%d%H%M%S")
+log_file="${log_dir}/${current_date}.rclone.log"
+rclone_log_file="${log_dir}/${current_date}.rclone.log"
+
 mkdir -p "$log_dir"
+
+# Remove old log files
+find "$log_dir" -name '*.log' -type f -mtime +7 -exec rm {} \;
 
 # Set up lock file descriptor and attempt to acquire lock
 exec 200>"$lock_file"
 if ! flock -n 200; then
-    echo "Sync script is already running."
+    echo "Sync script is already running." >> $log_file
     exit 1
 fi
 
 # Cleanup function to be called on script termination
 cleanup() {
-    echo "Cleaning up..."
+    echo "Cleaning up..." >> $log_file
     # Optionally, put any other cleanup commands here
     exec 200>&-  # Close the file descriptor to release the lock
-    echo "Lock released and cleanup done."
+    echo "Lock released and cleanup done." >> $log_file
 }
 
 # Trap SIGINT, SIGTERM, and EXIT to ensure cleanup runs
 trap cleanup SIGINT SIGTERM EXIT
 
-# Remove old log files
-find "$log_dir" -name '*.log' -type f -mtime +7 -exec rm {} \;
-
 # Function to monitor power status
 monitor_power() {
     while sleep 5; do
         if pmset -g ps | grep -q "Battery Power"; then
-            echo "Power disconnected, stopping rclone."
+            echo "Power disconnected, stopping rclone." >> $log_file
             kill -INT "$1"  # Send SIGINT to the rclone process
             break
         fi
@@ -43,12 +47,9 @@ sync() {
 
     # Check if running on battery before starting sync
     if pmset -g ps | grep -q "Battery Power"; then
-        echo "The machine is running on battery. Exiting."
+        echo "The machine is running on battery. Exiting." >> $log_file
         return
     fi
-
-    local current_date=$(date "+%Y%m%d%H%M%S")
-    local log_file="${log_dir}/${current_date}.log"
 
     # Sync with rclone, outputting to both log file and stdout
     rclone sync "$HOME/$dir_name" "dropbox:$dir_name" --log-level INFO \
@@ -56,14 +57,15 @@ sync() {
         --exclude ".next/**" \
         --exclude "*.DS_Store" \
         --retries 5 \
-        --retries-sleep 20s | tee "$log_file" &
+        --retries-sleep 20s | tee -a "$rclone_log_file" &
 
     rclone_pid=$!
     monitor_power $rclone_pid &
+    power_monitor_pid=$!
     wait $rclone_pid
 
     # Kill the power monitoring process if still running
-    kill $! 2>/dev/null
+    kill $power_monitor_pid 2>/dev/null
 }
 
 # Call sync function with "workspace" as the argument
