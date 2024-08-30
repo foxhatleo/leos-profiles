@@ -206,6 +206,7 @@ main() {
   fish -c 'fisher install gazorby/fish-abbreviation-tips'
   fish -c 'fisher install jorgebucaran/autopair.fish'
   fish -c 'fisher install IlanCosman/tide@v6'
+  fish -c 'fisher install jorgebucaran/nvm.fish'
   fish -c "tide configure --auto --style=Rainbow --prompt_colors='True color' --show_time=No --rainbow_prompt_separators=Angled --powerline_prompt_heads=Sharp --powerline_prompt_tails=Flat --powerline_prompt_style='Two lines, character' --prompt_connection=Dotted --powerline_right_prompt_frame=No --prompt_connection_andor_frame_color=Light --prompt_spacing=Sparse --icons='Few icons' --transient=No"
   fish -c 'fish_update_completions'
   curl -L https://iterm2.com/shell_integration/fish -o ~/.iterm2_shell_integration.fish
