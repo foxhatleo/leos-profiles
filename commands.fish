@@ -4,7 +4,7 @@
 # This script adds useful commands to the environment.
 
 function __rmdsstore
-  sudo python "$HOME/.leos-profiles/rmdsstore.py" $argv
+  sudo python3 "$HOME/.leos-profiles/rmdsstore.py" $argv
   puts "Finished scanning $argv"
 end
 
@@ -49,7 +49,13 @@ end
 
 # Make a directory then cd into it.
 function mkcdir
-  mkdir -p -- $argv; and cd -P -- $argv
+  if test (count $argv) -eq 0
+    echo "Usage: mkcdir <directory>"
+    return 1
+  end
+
+  mkdir -p $argv[1]  # Create the directory (and parents, if needed)
+  cd $argv[1]        # Change into the directory
 end
 
 # Clean up and quit the terminal.
