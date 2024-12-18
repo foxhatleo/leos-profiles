@@ -78,7 +78,7 @@ function bye
     dnf-checkup
   end
 
-  if string match -r "*keep-history*" $argv
+  if string match -r ".*keep-history.*" $argv
     puts "Clear all history files.."
     clear-history
   end
