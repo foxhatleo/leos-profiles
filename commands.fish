@@ -78,8 +78,10 @@ function bye
     dnf-checkup
   end
 
-  puts "Clear all history files.."
-  clear-history
+  if string match -r "*keep-history*" $argv
+    puts "Clear all history files.."
+    clear-history
+  end
 
   if test (uname -s) = 'Darwin'
     puts "Restarting Finder, Dock, SystemUIServer..."
@@ -87,7 +89,7 @@ function bye
     killall Finder Dock SystemUIServer
   end
 
-  if test "$argv" = "noexit"
+  if string match -r ".*no-exit.*" $argv
     puts "Skipped exiting."
   else if command -sq /mnt/c/Windows/system32/wsl.exe
     /mnt/c/Windows/system32/wsl.exe --shutdown
