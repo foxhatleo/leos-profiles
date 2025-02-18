@@ -231,7 +231,7 @@ main() {
   fi
 
   printf "${BLUE}Setting up fish...${NORMAL}\n"
-  fish -c 'curl -sL https://git.io/fisher | source && fisher install jorgebucaran/fisher'
+  fish -c 'curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher'
   fish -c 'fisher install PatrickF1/fzf.fish'
   fish -c 'fisher install franciscolourenco/done'
   fish -c 'fisher install decors/fish-colored-man'
