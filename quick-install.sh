@@ -115,9 +115,9 @@ main() {
       yarn \
       yt-dlp \
       zsh
-  fi
-
-  if command -v apt-get &> /dev/null; then
+  elif command -v apt-get &> /dev/null; then
+    printf "${BLUE}You are on Debian-based!${NORMAL}\n"
+    printf "${BLUE}Installing packages...${NORMAL}\n"
     sudo apt -y update
     sudo apt -y upgrade
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - 
@@ -147,9 +147,9 @@ main() {
       yarn \
       yt-dlp \
       zsh
-  fi
-
-  if command -v dnf &> /dev/null; then
+  elif command -v dnf &> /dev/null; then
+    printf "${BLUE}You are on Fedora or RHEL-based!${NORMAL}\n"
+    printf "${BLUE}Installing packages...${NORMAL}\n"
     sudo dnf -y update
     sudo dnf -y groupinstall "Development Tools" "Development Libraries"
     curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
@@ -177,6 +177,38 @@ main() {
       tldr \
       wget \
       yarnpkg \
+      yt-dlp \
+      zsh
+  elif command -v pacman &> /dev/null; then
+    printf "${BLUE}You are on Arch Linux!${NORMAL}\n"
+    printf "${BLUE}Installing packages...${NORMAL}\n"
+    sudo pacman -Syu --noconfirm
+    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+    sudo pacman -S --noconfirm \
+      base-devel\
+      bash \
+      coreutils \
+      diffutils \
+      ed \
+      ffmpeg \
+      findutils \
+      fish \
+      imagemagick \
+      git \
+      grep \
+      gawk \
+      gzip \
+      less \
+      nano \
+      nodejs \
+      python \
+      rclone \
+      ruby \
+      smartmontools \
+      thefuck \
+      tldr \
+      wget \
+      yarn \
       yt-dlp \
       zsh
   fi
@@ -207,16 +239,16 @@ main() {
   fish -c 'fisher install jorgebucaran/autopair.fish'
   fish -c 'fisher install IlanCosman/tide@v6'
   fish -c 'fisher install jorgebucaran/nvm.fish'
-  fish -c "tide configure --auto --style=Rainbow --prompt_colors='True color' --show_time=No --rainbow_prompt_separators=Slanted --powerline_prompt_heads=Slanted --powerline_prompt_tails=Flat --powerline_prompt_style='Two lines, character' --prompt_connection=Dotted --powerline_right_prompt_frame=No --prompt_connection_andor_frame_color=Light --prompt_spacing=Sparse --icons='Few icons' --transient=No"
+  fish -c "tide configure --auto --style=Rainbow --prompt_colors='True color' --show_time=No --rainbow_prompt_separators=Angled --powerline_prompt_heads=Sharp --powerline_prompt_tails=Flat --powerline_prompt_style='Two lines, character' --prompt_connection=Dotted --powerline_right_prompt_frame=No --prompt_connection_andor_frame_color=Light --prompt_spacing=Sparse --icons='Few icons' --transient=No"
   fish -c 'fish_update_completions'
   curl -L https://iterm2.com/shell_integration/fish -o ~/.iterm2_shell_integration.fish
   # Remove a few Tide icons that conflict with Intellij terminals.
-  set -U tide_distrobox_icon
-  set -U tide_gcloud_icon
-  set -U tide_kubectl_icon
-  set -U tide_private_mode_icon
-  set -U tide_python_icon
-  set -U tide_terraform_icon
+  fish -c "set -U tide_distrobox_icon"
+  fish -c "set -U tide_gcloud_icon"
+  fish -c "set -U tide_kubectl_icon"
+  fish -c "set -U tide_private_mode_icon"
+  fish -c "set -U tide_python_icon"
+  fish -c "set -U tide_terraform_icon"
 
   printf "${BLUE}Installing nerd fonts...${NORMAL}\n"
   git clone https://github.com/ryanoasis/nerd-fonts.git --depth=1
