@@ -231,16 +231,17 @@ main() {
   fi
 
   printf "${BLUE}Setting up fish...${NORMAL}\n"
-  fish -c 'curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher'
-  fish -c 'fisher install PatrickF1/fzf.fish'
-  fish -c 'fisher install franciscolourenco/done'
-  fish -c 'fisher install decors/fish-colored-man'
-  fish -c 'fisher install gazorby/fish-abbreviation-tips'
-  fish -c 'fisher install jorgebucaran/autopair.fish'
-  fish -c 'fisher install IlanCosman/tide@v6'
-  fish -c 'fisher install jorgebucaran/nvm.fish'
+  fish -c "curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher"
+  fish -c "fisher install PatrickF1/fzf.fish"
+  fish -c "fisher install franciscolourenco/done"
+  fish -c "fisher install decors/fish-colored-man"
+  fish -c "fisher install gazorby/fish-abbreviation-tips"
+  fish -c "fisher install jorgebucaran/autopair.fish"
+  fish -c "fisher install IlanCosman/tide@v6"
+  fish -c "fisher install jorgebucaran/nvm.fish"
+  fish -c "fisher install lgathy/google-cloud-sdk-fish-completion"
   fish -c "tide configure --auto --style=Rainbow --prompt_colors='True color' --show_time=No --rainbow_prompt_separators=Angled --powerline_prompt_heads=Sharp --powerline_prompt_tails=Flat --powerline_prompt_style='Two lines, character' --prompt_connection=Dotted --powerline_right_prompt_frame=No --prompt_connection_andor_frame_color=Light --prompt_spacing=Sparse --icons='Few icons' --transient=No"
-  fish -c 'fish_update_completions'
+  fish -c "fish_update_completions"
   curl -L https://iterm2.com/shell_integration/fish -o ~/.iterm2_shell_integration.fish
   # Remove a few Tide icons that conflict with Intellij terminals.
   fish -c "set -U tide_distrobox_icon"
