@@ -16,6 +16,7 @@ entry "path.nvm"
 entry "path.go"
 entry "path.flutter"
 entry "path.thefuck"
+entry "path.gcloud"
 entry "path.gpg"
 entry "path.bin"
 
