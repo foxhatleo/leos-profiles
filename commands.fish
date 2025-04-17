@@ -63,7 +63,7 @@ function bye
   puts "Bye!"
   sudo echo '' > /dev/null
 
-  if string match -r ".*keep-history.*" $argv
+  if string match -r ".*keep-history.*" $argv >/dev/null
     puts "History will be preserved."
   end
 
@@ -82,7 +82,7 @@ function bye
     dnf-checkup
   end
 
-  if not string match -r ".*keep-history.*" $argv
+  if not string match -r ".*keep-history.*" $argv >/dev/null
     puts "Clear all history files.."
     clear-history
   end
