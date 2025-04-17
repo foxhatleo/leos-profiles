@@ -250,6 +250,7 @@ main() {
   fish -c "set -U tide_private_mode_icon"
   fish -c "set -U tide_python_icon"
   fish -c "set -U tide_terraform_icon"
+  fish -c "set -U tide_right_prompt_items status cmd_duration context jobs direnv node python rustc java php java php ruby go"
 
   printf "${BLUE}Installing nerd fonts...${NORMAL}\n"
   git clone https://github.com/ryanoasis/nerd-fonts.git --depth=1
