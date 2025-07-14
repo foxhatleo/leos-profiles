@@ -252,12 +252,16 @@ main() {
   fish -c "set -U tide_terraform_icon"
   fish -c "set -U tide_right_prompt_items status cmd_duration context jobs direnv node python rustc java php java php ruby go"
 
-  printf "${BLUE}Installing nerd fonts...${NORMAL}\n"
-  git clone https://github.com/ryanoasis/nerd-fonts.git --depth=1
-  cd nerd-fonts
-  ./install.sh
-  cd ..
-  rm -rf fonts
+  if [ -z "$NO_FONTS" ]; then
+    printf "${BLUE}Installing nerd fonts...${NORMAL}\n"
+    git clone https://github.com/ryanoasis/nerd-fonts.git --depth=1
+    cd nerd-fonts
+    ./install.sh
+    cd ..
+    rm -rf fonts
+  else
+    printf "${YELLOW}Skipping nerd font install because NO_FONTS is set.${NORMAL}\n"
+  fi
 
   FISH_PATH=$(which fish)
   # Check if Fish is installed
