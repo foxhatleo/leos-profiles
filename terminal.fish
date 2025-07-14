@@ -4,8 +4,8 @@
 # This script sets up the terminal environment in fish shell.
 
 # Languages
-set -gx LC_ALL en_GB.UTF-8
-set -gx LANG en_GB.UTF-8
+set -gx LC_ALL C.UTF-8
+set -gx LANG C.UTF-8
 
 # Term colours
 set -gx CLICOLOR 1
