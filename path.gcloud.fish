@@ -3,6 +3,8 @@
 #
 # This script sets up GCloud on macOS.
 
-if test -d "$(brew --prefix)/share/google-cloud-sdk"
-    source "$(brew --prefix)/share/google-cloud-sdk/path.fish.inc"
+if test -d /opt/homebrew/bin
+    if test -d "$(brew --prefix)/share/google-cloud-sdk"
+        source "$(brew --prefix)/share/google-cloud-sdk/path.fish.inc"
+    end
 end
