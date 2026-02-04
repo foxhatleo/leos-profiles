@@ -111,6 +111,7 @@ main() {
       ssh-copy-id \
       thefuck \
       tldr \
+      vim \
       wget \
       yarn \
       yt-dlp \
@@ -120,7 +121,7 @@ main() {
     printf "${BLUE}Installing packages...${NORMAL}\n"
     sudo apt -y update
     sudo apt -y upgrade
-    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - 
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - 
     sudo apt -y install \
       bash \
       coreutils \
@@ -143,6 +144,7 @@ main() {
       smartmontools \
       thefuck \
       tldr \
+      vim \
       wget \
       yarn \
       yt-dlp \
@@ -151,14 +153,14 @@ main() {
     printf "${BLUE}You are on Fedora or RHEL-based!${NORMAL}\n"
     printf "${BLUE}Installing packages...${NORMAL}\n"
     sudo dnf -y update
-    sudo dnf -y groupinstall "Development Tools" "Development Libraries"
-    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+    sudo dnf -y group install "development-tools"
+    curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
     sudo dnf -y install \
       bash \
       coreutils \
       diffutils \
       ed \
-      ffmpeg-free \
+      ffmpeg \
       findutils \
       fish \
       ImageMagick \
@@ -175,17 +177,17 @@ main() {
       smartmontools \
       thefuck \
       tldr \
+      vim \
       wget \
-      yarnpkg \
+      yarn \
       yt-dlp \
       zsh
   elif command -v pacman &> /dev/null; then
     printf "${BLUE}You are on Arch Linux!${NORMAL}\n"
     printf "${BLUE}Installing packages...${NORMAL}\n"
     sudo pacman -Syu --noconfirm
-    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
     sudo pacman -S --noconfirm \
-      base-devel\
+      base-devel \
       bash \
       coreutils \
       diffutils \
@@ -201,12 +203,14 @@ main() {
       less \
       nano \
       nodejs \
+      npm \
       python \
       rclone \
       ruby \
       smartmontools \
       thefuck \
       tldr \
+      vim \
       wget \
       yarn \
       yt-dlp \
