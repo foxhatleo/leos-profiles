@@ -109,7 +109,6 @@ main() {
       ruby \
       smartmontools \
       ssh-copy-id \
-      thefuck \
       tldr \
       vim \
       wget \
