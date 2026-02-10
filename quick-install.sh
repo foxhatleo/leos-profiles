@@ -142,7 +142,6 @@ main() {
       rclone \
       ruby \
       smartmontools \
-      thefuck \
       tldr \
       vim \
       wget \
@@ -175,7 +174,6 @@ main() {
       rclone \
       ruby \
       smartmontools \
-      thefuck \
       tldr \
       vim \
       wget \
@@ -208,7 +206,6 @@ main() {
       rclone \
       ruby \
       smartmontools \
-      thefuck \
       tldr \
       vim \
       wget \
