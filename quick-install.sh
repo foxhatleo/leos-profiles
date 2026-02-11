@@ -171,7 +171,7 @@ install_packages_macos() {
   brew install bash coreutils diffutils ed ffmpeg findutils fish heroku \
     imagemagick git gnu-indent gnu-sed gnu-tar gnu-which gnutls grep gawk \
     gzip less nano node python rclone ruby smartmontools ssh-copy-id tldr \
-    vim wget yarn yt-dlp zsh
+    vim wget yt-dlp zsh
 }
 
 install_packages_apt() {
@@ -182,7 +182,7 @@ install_packages_apt() {
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
   sudo apt -y install bash coreutils diffutils ed ffmpeg findutils fish \
     imagemagick git grep gawk gzip less nano nodejs python-is-python3 rclone \
-    ruby smartmontools tldr vim wget yarn yt-dlp zsh
+    ruby smartmontools tldr vim wget yt-dlp zsh
 }
 
 install_packages_dnf() {
@@ -193,7 +193,7 @@ install_packages_dnf() {
   curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
   sudo dnf -y install bash coreutils diffutils ed ffmpeg findutils fish \
     ImageMagick git grep gawk gzip less nano nodejs python-is-python3 rclone \
-    ruby smartmontools tldr vim wget yarn yt-dlp zsh
+    ruby smartmontools tldr vim wget yt-dlp zsh
 }
 
 install_packages_pacman() {
@@ -202,7 +202,7 @@ install_packages_pacman() {
   sudo pacman -Syu --noconfirm
   sudo pacman -S --noconfirm base-devel bash coreutils diffutils ed ffmpeg \
     findutils fish imagemagick git grep gawk gzip less nano nodejs npm python \
-    rclone ruby smartmontools tldr vim wget yarn yt-dlp zsh
+    rclone ruby smartmontools tldr vim wget yt-dlp zsh
 }
 
 install_os_packages() {
@@ -237,6 +237,16 @@ install_rbenv() {
     mkdir -p "$("$HOME/.rbenv/bin/rbenv" root)"/plugins
     git clone https://github.com/rbenv/ruby-build.git "$("$HOME/.rbenv/bin/rbenv" root)/plugins/ruby-build"
   fi
+}
+
+install_bun() {
+  printf "${BLUE}Installing bun...${NORMAL}\n"
+  curl -fsSL https://bun.com/install | bash
+}
+
+install_yarn() {
+  printf "${BLUE}Installing yarn...${NORMAL}\n"
+  npm install --global yarn
 }
 
 setup_fish() {
@@ -313,6 +323,8 @@ main() {
   install_os_packages
   install_pyenv
   install_rbenv
+  install_bun
+  install_yarn
   setup_fish
   install_nerd_fonts
   set_default_shell_fish
