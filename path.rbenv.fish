@@ -3,7 +3,7 @@
 #
 # This script sets up pyenv if present.
 
-set -Ux RBENV_ROOT $HOME/.rbenv
+set -gx RBENV_ROOT $HOME/.rbenv
 add-path "$RBENV_ROOT/bin"
 
 if not type -q rbenv

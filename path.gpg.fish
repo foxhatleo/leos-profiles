@@ -3,4 +3,9 @@
 #
 # This script sets up GPG.
 
-set -x GPG_TTY (tty)
+if status is-interactive
+    set -l gpg_tty (tty)
+    if test $status -eq 0
+        set -gx GPG_TTY $gpg_tty
+    end
+end

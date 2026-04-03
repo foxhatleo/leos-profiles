@@ -3,7 +3,7 @@
 #
 # This script sets up pyenv if present.
 
-set -Ux PYENV_ROOT $HOME/.pyenv
+set -gx PYENV_ROOT $HOME/.pyenv
 add-path "$PYENV_ROOT/bin"
 
 if not type -q pyenv
