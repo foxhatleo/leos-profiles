@@ -13,7 +13,7 @@ end
 
 function add-path
   if test -d $argv[1]
-    fish_add_path $argv[1]
+    fish_add_path -m $argv[1]
   else if test "$argv[2]" = "required"
     puts-err "$argv[1] is not found."
     return 1
