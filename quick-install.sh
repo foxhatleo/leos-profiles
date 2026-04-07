@@ -180,8 +180,8 @@ install_packages_apt() {
   sudo apt -y update
   sudo apt -y upgrade
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
-  sudo apt -y install bash coreutils diffutils ed ffmpeg findutils fish \
-    imagemagick git grep gawk gzip less nano nodejs python-is-python3 rclone \
+  sudo apt -y install bash clang coreutils diffutils ed ffmpeg findutils fish \
+    imagemagick gcc git grep gawk gzip less nano nodejs python-is-python3 rclone \
     ruby smartmontools tldr vim wget yt-dlp zsh
 }
 
