@@ -1,5 +1,9 @@
 .DS_Store
 ssh-shortcuts.zsh
+__pycache__/
+*.pyc
 _*
 *.txt
 *.bak
+verify-quick-install-packages-report.md
+quick-install.state

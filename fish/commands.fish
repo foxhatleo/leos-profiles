@@ -4,7 +4,7 @@
 # This script adds useful commands to the environment.
 
 function __rmdsstore
-  sudo python3 "$HOME/.leos-profiles/rmdsstore.py" $argv
+  sudo python3 "$HOME/.leos-profiles/util/rmdsstore.py" $argv
   puts "Finished scanning $argv"
 end
 
@@ -35,7 +35,8 @@ end
 # Show/hide hidden files in Finder.
 function __hidden-set
   if test (uname -s) = 'Darwin'
-    defaults write com.apple.Finder AppleShowAllFiles $argv
+    defaults write com.apple.Finder AppleShowAllFiles $argv; or return 1
+    killall Finder > /dev/null 2>&1; or true
   else
     puts-err "This command is only available on macOS."
   end
@@ -104,7 +105,7 @@ end
 
 # Upgrade Leo's profiles.
 function upgrade-leos-profiles
-  git pull $HOME/.leos-profiles
+  git -C "$HOME/.leos-profiles" pull
 end
 
 # Disable GUI on Linux systems.

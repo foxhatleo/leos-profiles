@@ -10,6 +10,8 @@ if len(sys.argv) <= 1:
     print("No argument provided.")
     exit(1)
 
+IGNORED_DIRS = {'CloudStorage'}
+
 def make_width(p):
     width = os.get_terminal_size()[0]
     return p.ljust(width, ' ')
@@ -37,7 +39,7 @@ def rm(top):
 
 print("Running rmdsstore on \"{}\".".format(sys.argv[1]))
 for root, dirs, files in os.walk(sys.argv[1], followlinks=False):
-    dirs[:] = [d for d in dirs if not d.endswith('.duck')]
+    dirs[:] = [d for d in dirs if not d.endswith('.duck') and d not in IGNORED_DIRS]
     smart_gen_progress(root)
     for name in dirs:
         if name == '$RECYCLE.BIN':

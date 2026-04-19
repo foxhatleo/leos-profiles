@@ -3,7 +3,14 @@
 #
 # This script adds support for nvm.
 
-functions -c fish_prompt __nvm_original_fish_prompt
+if not functions -q __nvm_original_fish_prompt
+    if functions -q fish_prompt
+        functions -c fish_prompt __nvm_original_fish_prompt
+    else
+        function __nvm_original_fish_prompt
+        end
+    end
+end
 
 function __leos_nvm_sync
     if not functions -q nvm
