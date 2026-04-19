@@ -64,6 +64,7 @@ STATE_LAST_FAILED_STEP=""
 STATE_LAST_STATUS=""
 STATE_RUN_STARTED_AT=""
 STATE_UPDATED_AT=""
+INSTALLED_NVM_VERSION=""
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -297,6 +298,7 @@ ensure_step_dependencies_selected() {
 start_new_run() {
   reset_state_tracking
   STATE_RUN_STARTED_AT=$(date +%s)
+  INSTALLED_NVM_VERSION=""
   if [ -t 0 ]; then
     configure_steps_interactively
     ensure_step_dependencies_selected
@@ -523,8 +525,6 @@ install_local_bins() {
   mkdir -p "$HOME/.local/bin"
   curl -o "$HOME/.local/bin/rpatool" https://raw.githubusercontent.com/shizmob/rpatool/master/rpatool
   chmod u+x "$HOME/.local/bin/rpatool"
-  cp "$PF/bin/sync-cloud" "$HOME/.local/bin/sync-cloud"
-  chmod u+x "$HOME/.local/bin/sync-cloud"
 }
 
 install_packages_macos() {
@@ -656,13 +656,18 @@ setup_fish() {
   fish -c "set -U tide_terraform_icon"
   fish -c "set -U tide_right_prompt_items status cmd_duration context jobs direnv node python rustc java php ruby go"
   fish -c "set -U fish_key_bindings fish_default_key_bindings"
-  fish -c "if set -l current_version (nvm current 2>/dev/null); and test \"$current_version\" != \"none\"; set -U nvm_default_version $current_version; end"
+
+  if [ -n "$INSTALLED_NVM_VERSION" ]; then
+    fish -c "set -U nvm_default_version $INSTALLED_NVM_VERSION"
+  else
+    fish -c "if set -l current_version (nvm current 2>/dev/null); and test -n \"$current_version\"; and test \"$current_version\" != \"none\"; set -U nvm_default_version $current_version; else; set -Ue nvm_default_version; end"
+  fi
 }
 
 setup_nvm_default_node() {
   printf "${BLUE}Installing latest Node.js LTS with nvm...${NORMAL}\n"
   ensure_fisher_and_nvm_fish
-  fish -c "nvm install lts"
+  INSTALLED_NVM_VERSION=$(fish -c 'nvm install lts >/dev/null; set -l current_version (nvm current 2>/dev/null); if test -n "$current_version"; and test "$current_version" != "none"; printf "%s\n" "$current_version"; end' | tr -d '[:space:]')
 }
 
 # True if we're on a desktop (macOS or Linux with X/Wayland/DE). Skip nerd fonts on servers.
@@ -722,7 +727,6 @@ main() {
 
   printf "${BLUE}Installation finished.${NORMAL}\n"
   printf "${BLUE}Now please configure your rbenv, opam, etc.${NORMAL}\n"
-  printf "${BLUE}sync-cloud is installed but it is not in crontab. Configure rclone first!${NORMAL}\n"
 }
 
 trap record_interrupted_run INT TERM

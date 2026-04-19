@@ -45,15 +45,12 @@ The quick installer can:
 
 - [`util/rmdsstore.py`](./util/rmdsstore.py): recursively removes `.DS_Store`, `Thumbs.db`, `desktop.ini`, and `$RECYCLE.BIN` artifacts
 - [`util/verify-quick-install-packages.py`](./util/verify-quick-install-packages.py): checks whether packages referenced by the installer exist in official/default package sources across supported platforms
-- [`bin/sync-cloud`](./bin/sync-cloud): `rclone` wrapper with locking, logging, and battery-aware interruption logic
 - [`res/adblock-hosts`](./res/adblock-hosts): hosts-style blocklist resource file
 
 ## Repository Layout
 
 ```text
 .
-├── bin/
-│   └── sync-cloud
 ├── fish/
 │   ├── commands.fish
 │   ├── entries.fish
@@ -82,7 +79,6 @@ Notes:
 
 - Fedora support intentionally uses RPM Fusion for `ffmpeg` when needed.
 - Nerd Fonts installation is skipped automatically on non-desktop environments, or when `NO_FONTS=1` is set.
-- `bin/sync-cloud` is macOS-oriented because it uses `pmset` to stop syncing when the machine switches to battery power.
 
 ## Quick Start
 
@@ -218,8 +214,7 @@ If you do not want to use the full bootstrap flow, a minimal manual setup usuall
 1. Clone the repository to `~/.leos-profiles`.
 2. Install Fish and any package-manager dependencies you care about.
 3. Add the Fish startup snippet shown above to `~/.config/fish/config.fish`.
-4. Optionally copy `bin/sync-cloud` into `~/.local/bin/`.
-5. Optionally run selected utilities directly from `util/`.
+4. Optionally run selected utilities directly from `util/`.
 
 ## Development Notes
 
@@ -233,7 +228,6 @@ If you do not want to use the full bootstrap flow, a minimal manual setup usuall
 - If Fish reports missing tools such as `pyenv` or `rbenv`, the profile can silence those warnings with marker files like `~/.lp-nopyenv` and `~/.lp-norbenv`.
 - If a quick-install run is interrupted, rerun the installer and it should offer to continue from the failed step.
 - If Nerd Fonts are not wanted or you are running on a headless machine, use `NO_FONTS=1`.
-- If `sync-cloud` exits immediately, check whether another lock is active or whether the machine is on battery power.
 
 ## License
 
