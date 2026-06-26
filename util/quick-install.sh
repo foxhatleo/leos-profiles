@@ -50,6 +50,7 @@ STEP_IDS=(
   install_bun
   install_yarn
   setup_nvm_default_node
+  install_ai_tools
   setup_fish
   install_nerd_fonts
   apply_fish_config
@@ -184,6 +185,7 @@ step_label() {
     install_yarn) echo "Install yarn" ;;
     setup_fish) echo "Set up fish plugins and prompt" ;;
     setup_nvm_default_node) echo "Install latest Node.js LTS with nvm" ;;
+    install_ai_tools) echo "Install AI coding tools (Claude Code, Codex)" ;;
     install_nerd_fonts) echo "Install nerd fonts" ;;
     set_default_shell_fish) echo "Set default shell to fish" ;;
     apply_fish_config) echo "Write fish config" ;;
@@ -197,6 +199,7 @@ step_dependencies() {
     install_yarn) echo "install_os_packages" ;;
     setup_fish) echo "install_os_packages" ;;
     setup_nvm_default_node) echo "install_os_packages" ;;
+    install_ai_tools) echo "setup_nvm_default_node" ;;
     set_default_shell_fish) echo "install_os_packages" ;;
     apply_fish_config) echo "prepare_and_clone_repo" ;;
   esac
@@ -668,6 +671,36 @@ setup_nvm_default_node() {
   printf "${BLUE}Installing latest Node.js LTS with nvm...${NORMAL}\n"
   ensure_fisher_and_nvm_fish
   INSTALLED_NVM_VERSION=$(fish -c 'nvm install lts >/dev/null; set -l current_version (nvm current 2>/dev/null); if test -n "$current_version"; and test "$current_version" != "none"; printf "%s\n" "$current_version"; end' | tr -d '[:space:]')
+}
+
+# Copy a starter config into place only if the target does not already exist.
+# $1 = template path relative to the repo, $2 = absolute destination path.
+seed_one_ai_config() {
+  local src="$PF/$1" dst="$2"
+  [ -f "$src" ] || return 0
+  if [ -f "$dst" ]; then
+    printf "${YELLOW}Keeping existing %s${NORMAL}\n" "$dst"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dst")"
+  cp "$src" "$dst"
+  printf "${GREEN}Seeded %s${NORMAL}\n" "$dst"
+}
+
+seed_ai_config() {
+  seed_one_ai_config res/ai/claude-settings.json "$HOME/.claude/settings.json"
+  seed_one_ai_config res/ai/codex-config.toml "$HOME/.codex/config.toml"
+}
+
+setup_ai_tools_node() {
+  ensure_fisher_and_nvm_fish
+  fish -c "npm install -g @anthropic-ai/claude-code @openai/codex"
+}
+
+install_ai_tools() {
+  printf "${BLUE}Installing AI coding tools (Claude Code, Codex)...${NORMAL}\n"
+  setup_ai_tools_node
+  seed_ai_config
 }
 
 # True if we're on a desktop (macOS or Linux with X/Wayland/DE). Skip nerd fonts on servers.

@@ -114,6 +114,11 @@ function bye
     dnf-checkup
   end
 
+  if functions ai-checkup > /dev/null
+    puts "Doing AI tools checkup..."
+    ai-checkup
+  end
+
   if not set -q keep_history[1]
     puts "Clear all history files.."
     clear-history
@@ -143,6 +148,16 @@ end
 # Upgrade Leo's profiles.
 function upgrade-leos-profiles
   git -C "$HOME/.leos-profiles" pull
+end
+
+# Update AI coding CLIs (Claude Code, Codex) to their latest versions.
+function ai-checkup
+  if not command -sq npm
+    puts-err "npm is not available; cannot update AI tools."
+    return 1
+  end
+  puts "Updating Claude Code and Codex..."
+  npm update -g @anthropic-ai/claude-code @openai/codex
 end
 
 # Disable GUI on Linux systems.
@@ -195,3 +210,6 @@ complete -c bye -f -a "non-interactive" -d "Run upgrades without confirmation pr
 
 # Upgrade Leo's profiles
 complete -c upgrade-leos-profiles -f -d "Upgrade Leo's profiles"
+
+# Update AI coding CLIs (Claude Code, Codex)
+complete -c ai-checkup -f -d "Update AI coding CLIs (Claude Code, Codex)"

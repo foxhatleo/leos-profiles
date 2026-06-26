@@ -36,6 +36,7 @@ The quick installer can:
 - set up `pyenv` and `rbenv`
 - install `bun` and global `yarn`
 - install the latest Node.js LTS with `nvm.fish`
+- install AI coding CLIs (Claude Code and Codex) and seed starter config
 - install Fish plugins and configure the Tide prompt
 - write `~/.config/fish/config.fish`
 - optionally install Nerd Fonts on desktop systems
@@ -46,6 +47,7 @@ The quick installer can:
 - [`util/rmdsstore.py`](./util/rmdsstore.py): recursively removes `.DS_Store`, `Thumbs.db`, `desktop.ini`, and `$RECYCLE.BIN` artifacts
 - [`util/verify-quick-install-packages.py`](./util/verify-quick-install-packages.py): checks whether packages referenced by the installer exist in official/default package sources across supported platforms
 - [`res/adblock-hosts`](./res/adblock-hosts): hosts-style blocklist resource file
+- [`res/ai/`](./res/ai): starter config templates for the AI coding CLIs, seeded into `~/.claude/` and `~/.codex/` only when those files do not already exist (login/auth stays manual)
 
 ## Repository Layout
 
@@ -58,7 +60,8 @@ The quick installer can:
 │   ├── terminal.fish
 │   └── path/
 ├── res/
-│   └── adblock-hosts
+│   ├── adblock-hosts
+│   └── ai/
 ├── util/
 │   ├── quick-install.sh
 │   ├── rmdsstore.py
@@ -124,10 +127,11 @@ Default step flow:
 6. Install `bun`
 7. Install `yarn`
 8. Install latest Node.js LTS with `nvm`
-9. Set up Fish plugins and prompt
-10. Install Nerd Fonts when appropriate
-11. Write Fish config
-12. Set default shell to Fish
+9. Install AI coding tools (Claude Code, Codex)
+10. Set up Fish plugins and prompt
+11. Install Nerd Fonts when appropriate
+12. Write Fish config
+13. Set default shell to Fish
 
 In an interactive terminal, the script prompts you step-by-step so you can skip pieces you do not want.
 
@@ -167,6 +171,7 @@ Common examples:
 - `clear-history`: remove shell and related history files
 - `bye`: cleanup-oriented shell exit helper
 - `apt-checkup`, `dnf-checkup`, `brew-checkup`: package-manager maintenance helpers when those tools are available
+- `ai-checkup`: update the AI coding CLIs (Claude Code, Codex) via `npm update -g`
 - `brew-china-enable` / `brew-china-disable`: switch Homebrew remotes and bottle mirror settings
 - `enable-gnu` / `disable-gnu`: toggle GNU tool precedence on macOS
 - `rmdsstore`: scan standard macOS filesystem roots and remove Finder/Windows metadata files
