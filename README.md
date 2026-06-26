@@ -42,6 +42,8 @@ The quick installer can:
 - optionally install Nerd Fonts on desktop systems
 - optionally switch the default shell to Fish
 
+On an interactive terminal the installer shows a **fullscreen setup wizard** (pure bash + ANSI, zero extra dependencies) that lets you choose which steps and package groups to include and review a confirmation screen before anything runs. It accepts CLI flags for scripted and CI use. Run `util/quick-install.sh --help` for the full flag reference.
+
 ### Utility scripts
 
 - [`util/rmdsstore.py`](./util/rmdsstore.py): recursively removes `.DS_Store`, `Thumbs.db`, `desktop.ini`, and `$RECYCLE.BIN` artifacts
@@ -93,6 +95,12 @@ Run the public bootstrap entrypoint:
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/quick-install.sh)"
 ```
 
+On an interactive terminal this opens the setup wizard. To run non-interactively with defaults instead:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/quick-install.sh)" -- --silent
+```
+
 If you prefer HTTPS cloning instead of SSH:
 
 ```bash
@@ -133,16 +141,83 @@ Default step flow:
 12. Write Fish config
 13. Set default shell to Fish
 
-In an interactive terminal, the script prompts you step-by-step so you can skip pieces you do not want.
+On an interactive terminal the wizard lets you toggle steps and package groups before anything runs, then shows a read-only confirmation screen. The wizard pre-seeds its selections from your flags and environment so forced-on or locked choices are clearly marked. After the wizard, the normal scrolling install log runs outside the alternate screen so the output is fully scrollable.
+
+If a step fails during an interactive run, the installer offers `[R]etry / [S]kip / [A]bort` so you can recover without restarting from scratch. Package selections are saved to the resume state, so a re-run after failure restores your previous choices without re-prompting the wizard. Pass `--fresh` to discard saved state and restart cleanly.
 
 ## Installer Configuration
 
-The installer recognizes a few useful environment variables:
+### CLI flags
+
+`util/quick-install.sh` accepts flags directly. Run `util/quick-install.sh --help` for the full reference. Key flags:
+
+| Flag | Effect |
+| --- | --- |
+| `-h, --help` | Print help and exit |
+| `-s, --silent, --non-interactive` | Skip the wizard; run with flags/env/defaults |
+| `-y, --yes` | Skip the confirm screen; proceed once the plan is resolved |
+| `--fresh` | Ignore saved resume state; start a clean run |
+| `--only=IDS` | Run only the listed step ids (comma-separated) |
+| `--skip=IDS` | Skip the listed step ids |
+| `--packages=SEL` | Install only the listed package groups or items |
+| `--skip-packages=SEL` | Skip the listed package groups or items |
+| `--no-fonts` | Skip Nerd Fonts (same as `NO_FONTS=1`) |
+| `--https` | Clone via HTTPS (same as `USE_HTTPS=1`) |
+| `--state-file=PATH` | Override the resume-state file path |
+| `--list-steps` | Print all step ids with labels and defaults, then exit |
+| `--list-packages` | Print package groups and per-OS members, then exit |
+| `--version` | Print installer version and exit |
+
+`--only` and `--skip` are mutually exclusive, as are `--packages` and `--skip-packages`.
+
+**Package selection syntax (`SEL`):** comma-separated group names (e.g. `dev-tools`) or `group:item` for a single package (e.g. `media:ffmpeg`). Available groups:
+
+| Group | Contents |
+| --- | --- |
+| `core-utils` | Core CLI utilities (bash, coreutils, grep, gawk, sed, tar, …) |
+| `shell` | Shell packages (fish, zsh) |
+| `dev-tools` | Developer tools and build (git, vim, gcc, clang, build-essential) |
+| `languages` | Languages and runtimes (node, python, ruby) |
+| `media` | Media tools (ffmpeg, imagemagick, yt-dlp) |
+| `network` | Network and transfer (wget, rclone, gnutls, heroku, ssh-copy-id) |
+| `system` | System and disk tools (smartmontools) |
+
+**Examples:**
+
+```bash
+# Silent install, skip Nerd Fonts
+util/quick-install.sh --silent --no-fonts
+
+# Install only the repo clone and OS packages steps
+util/quick-install.sh --only=prepare_and_clone_repo,install_os_packages
+
+# Silent install with a specific package subset
+util/quick-install.sh --silent --packages=core-utils,shell,network --no-fonts
+
+# See what steps are available
+util/quick-install.sh --list-steps
+
+# See package groups and per-OS members
+util/quick-install.sh --list-packages
+```
+
+### Precedence
+
+When the same setting is specified in more than one place, the order of precedence is (highest wins):
+
+```
+flags  >  environment variables  >  wizard selections  >  built-in defaults
+```
+
+### Environment variables
+
+All existing env vars are still honored. Flags take precedence over them.
 
 - `USE_HTTPS=1`: clone the repo via HTTPS instead of SSH
 - `NO_FONTS=1`: skip Nerd Fonts installation
 - `PF=/custom/path`: change the target installation path from the default `~/.leos-profiles`
 - `QUICK_INSTALL_STATE_FILE=/custom/file`: override the resume state file path
+- `QUICK_INSTALL_SILENT=1`: same as `--silent` (useful for CI environments)
 
 The script also applies a restrictive `umask` to avoid Fish completion permission issues and writes a resume-state file after each step.
 
@@ -229,10 +304,12 @@ If you do not want to use the full bootstrap flow, a minimal manual setup usuall
 
 ## Troubleshooting
 
-- If remote bootstrap fails during SSH cloning, rerun with `USE_HTTPS=1`.
+- If remote bootstrap fails during SSH cloning, rerun with `USE_HTTPS=1` or pass `--https`.
 - If Fish reports missing tools such as `pyenv` or `rbenv`, the profile can silence those warnings with marker files like `~/.lp-nopyenv` and `~/.lp-norbenv`.
-- If a quick-install run is interrupted, rerun the installer and it should offer to continue from the failed step.
-- If Nerd Fonts are not wanted or you are running on a headless machine, use `NO_FONTS=1`.
+- If a quick-install run is interrupted, rerun the installer and it will offer to continue from the failed step using the same package selections. In an interactive terminal each failing step also offers `[R]etry / [S]kip / [A]bort` inline.
+- To discard a saved partial run and start over, pass `--fresh`.
+- If Nerd Fonts are not wanted or you are running on a headless machine, use `NO_FONTS=1` or pass `--no-fonts`.
+- In CI or minimal containers where `/dev/tty` is unavailable, the wizard is skipped automatically and the installer runs non-interactively. Set `QUICK_INSTALL_SILENT=1` or pass `--silent` to make this explicit.
 
 ## License
 
