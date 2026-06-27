@@ -898,6 +898,29 @@ exec_steps_run() {
 }
 
 # =============================================================================
+# §3b  AI CLI probe helpers (bash 3.2 safe; testable with PATH-shim stubs)
+# =============================================================================
+
+# True if the named AI CLI is on PATH.
+cli_is_installed() {
+  case "$1" in
+    claude|codex) command -v "$1" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# True if the named AI CLI reports an authenticated session.
+# claude: `claude auth status` exits 0 when signed in.
+# codex:  `codex login status` exits 0 when signed in.
+cli_is_authenticated() {
+  case "$1" in
+    claude) claude auth status >/dev/null 2>&1 ;;
+    codex)  codex login status >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# =============================================================================
 # §8  Step bodies (unchanged behavior)
 # =============================================================================
 

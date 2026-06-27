@@ -622,6 +622,35 @@ _reset_opts; args_parse --print-runbook
 assert_eq "--print-runbook flag"      "$OPT_PRINT_RUNBOOK" "1"
 
 # ---------------------------------------------------------------------------
+# Task 3: cli_is_installed / cli_is_authenticated
+# ---------------------------------------------------------------------------
+printf '\n=== Task 3: cli_is_installed / cli_is_authenticated ===\n'
+
+# assert_exit <name> <expected_rc> <cmd-string>
+# Runs cmd-string in a subshell and compares its exit code to expected_rc.
+assert_exit() {
+  local name="$1" expected_rc="$2" cmd="$3" actual_rc
+  actual_rc=0
+  ( eval "$cmd" ) >/dev/null 2>&1 || actual_rc=$?
+  if [ "$actual_rc" -eq "$expected_rc" ]; then
+    _pass "$name"
+  else
+    _fail "$name" "expected exit $expected_rc, got $actual_rc"
+  fi
+}
+
+_stubdir="$(mktemp -d)"; _oldpath="$PATH"
+# stub: claude authed (auth status exit 0), codex present but unauthed (login status exit 1)
+printf '#!/bin/sh\ncase "$1 $2" in "auth status") exit 0;; esac\nexit 0\n' > "$_stubdir/claude"
+printf '#!/bin/sh\ncase "$1 $2" in "login status") exit 1;; esac\nexit 0\n' > "$_stubdir/codex"
+chmod +x "$_stubdir/claude" "$_stubdir/codex"; PATH="$_stubdir:$PATH"
+assert_exit "claude installed"      0 'cli_is_installed claude'
+assert_exit "claude authed"         0 'cli_is_authenticated claude'
+assert_exit "codex installed"       0 'cli_is_installed codex'
+assert_exit "codex unauthed -> 1"   1 'cli_is_authenticated codex'
+PATH="$_oldpath"; rm -rf "$_stubdir"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 printf '\n================================================\n'
