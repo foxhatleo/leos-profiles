@@ -283,13 +283,13 @@ _reset_opts; _reset_state
 args_parse --only=install_ai_tools
 capture_env
 resolve_plan 2>/dev/null
-assert_word_present "install_ai_tools pulls in setup_nvm_default_node" "setup_nvm_default_node" "$STATE_ENABLED_STEPS"
+assert_word_present "install_ai_tools pulls in install_min_toolchain" "install_min_toolchain" "$STATE_ENABLED_STEPS"
 
 _reset_opts; _reset_state
 args_parse --only=install_ai_tools
 capture_env
 resolve_plan 2>/dev/null
-assert_word_present "install_ai_tools pulls in install_os_packages transitively" "install_os_packages" "$STATE_ENABLED_STEPS"
+assert_word_present "install_ai_tools pulls in prepare_and_clone_repo transitively" "prepare_and_clone_repo" "$STATE_ENABLED_STEPS"
 
 _reset_opts; _reset_state
 args_parse --only=setup_nvm_default_node
@@ -648,6 +648,25 @@ assert_exit "claude installed"      0 'cli_is_installed claude'
 assert_exit "claude authed"         0 'cli_is_authenticated claude'
 assert_exit "codex installed"       0 'cli_is_installed codex'
 assert_exit "codex unauthed -> 1"   1 'cli_is_authenticated codex'
+PATH="$_oldpath"; rm -rf "$_stubdir"
+
+# ---------------------------------------------------------------------------
+# Task 4: install_min_toolchain skip-aware
+# ---------------------------------------------------------------------------
+printf '\n=== Task 4: install_min_toolchain skip-aware ===\n'
+
+assert_eq "min_toolchain in STEP_IDS" \
+  "$(printf '%s\n' "${STEP_IDS[@]}" | grep -c '^install_min_toolchain$')" "1"
+assert_eq "min_toolchain label" \
+  "$(step_label install_min_toolchain)" "Install minimal toolchain (brew, node, npm)"
+assert_eq "ai_tools depends on min_toolchain" \
+  "$(step_dependencies install_ai_tools)" "install_min_toolchain"
+# skip logic: with node+npm present, needs_* return 1 (false)
+_stubdir="$(mktemp -d)"; _oldpath="$PATH"
+printf '#!/bin/sh\nexit 0\n' > "$_stubdir/node"; printf '#!/bin/sh\nexit 0\n' > "$_stubdir/npm"
+chmod +x "$_stubdir/node" "$_stubdir/npm"; PATH="$_stubdir:$PATH"
+assert_exit "node present -> no need" 1 'min_toolchain_needs_node'
+assert_exit "npm present -> no need"  1 'min_toolchain_needs_npm'
 PATH="$_oldpath"; rm -rf "$_stubdir"
 
 # ---------------------------------------------------------------------------

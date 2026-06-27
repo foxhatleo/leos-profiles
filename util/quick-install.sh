@@ -66,13 +66,14 @@ QUICK_INSTALL_VERSION="1.0.0"
 STEP_IDS=(
   prepare_and_clone_repo
   install_local_bins
+  install_min_toolchain
+  install_ai_tools
   install_os_packages
   install_pyenv
   install_rbenv
   install_bun
   install_yarn
   setup_nvm_default_node
-  install_ai_tools
   setup_fish
   install_nerd_fonts
   apply_fish_config
@@ -481,6 +482,7 @@ step_label() {
   case "$1" in
     prepare_and_clone_repo) echo "Prepare and clone repo" ;;
     install_local_bins) echo "Install local bins" ;;
+    install_min_toolchain) echo "Install minimal toolchain (brew, node, npm)" ;;
     install_os_packages) echo "Install OS packages" ;;
     install_pyenv) echo "Install pyenv" ;;
     install_rbenv) echo "Install rbenv" ;;
@@ -499,10 +501,11 @@ step_label() {
 step_dependencies() {
   case "$1" in
     install_local_bins) echo "prepare_and_clone_repo" ;;
+    install_min_toolchain) echo "prepare_and_clone_repo" ;;
     install_yarn) echo "install_os_packages" ;;
     setup_fish) echo "install_os_packages" ;;
     setup_nvm_default_node) echo "install_os_packages" ;;
-    install_ai_tools) echo "setup_nvm_default_node" ;;
+    install_ai_tools) echo "install_min_toolchain" ;;
     set_default_shell_fish) echo "install_os_packages" ;;
     apply_fish_config) echo "prepare_and_clone_repo" ;;
   esac
@@ -1085,6 +1088,42 @@ install_local_bins() {
   chmod u+x "$HOME/.local/bin/rpatool"
 }
 
+# Return 0 (needs install) when node is absent; 1 when already present.
+min_toolchain_needs_node() { ! command -v node >/dev/null 2>&1; }
+# Return 0 (needs install) when npm is absent; 1 when already present.
+min_toolchain_needs_npm()  { ! command -v npm  >/dev/null 2>&1; }
+
+# Install only nodejs+npm for the current Linux distro, mirroring the package
+# names used in install_packages_apt/fedora/pacman.
+install_os_node_npm() {
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get -y install nodejs npm
+  elif command -v dnf >/dev/null 2>&1 && is_fedora; then
+    sudo dnf -y install nodejs
+  elif command -v pacman >/dev/null 2>&1; then
+    sudo pacman -S --noconfirm nodejs npm
+  else
+    printf "${RED}Unsupported OS: cannot install nodejs/npm.${NORMAL}\n"
+    exit 1
+  fi
+}
+
+# Minimal path to a working npm: brew (macOS) + node. Skips anything present.
+install_min_toolchain() {
+  printf "${BLUE}Ensuring minimal toolchain (brew, node, npm)...${NORMAL}\n"
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    if ! find_brew_bin >/dev/null 2>&1; then
+      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    fi
+    setup_brew_env
+    if min_toolchain_needs_node; then brew install node; fi
+  else
+    if min_toolchain_needs_node || min_toolchain_needs_npm; then
+      install_os_node_npm
+    fi
+  fi
+}
+
 # =============================================================================
 # §5  Package registry + literal install_packages_* functions
 #     (literal lists are parsed by verify-quick-install-packages.py — do NOT
@@ -1438,6 +1477,11 @@ setup_ai_tools_node() {
 }
 
 install_ai_tools() {
+  if cli_is_installed claude && cli_is_installed codex; then
+    printf "${YELLOW}Claude Code and Codex already installed; skipping npm install.${NORMAL}\n"
+    seed_ai_config
+    return 0
+  fi
   printf "${BLUE}Installing AI coding tools (Claude Code, Codex)...${NORMAL}\n"
   setup_ai_tools_node
   seed_ai_config
