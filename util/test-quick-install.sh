@@ -496,7 +496,7 @@ command -v expect >/dev/null 2>&1 && _have_expect=1
 command -v script >/dev/null 2>&1 && _have_script=1
 
 if [ "$_have_expect" -eq 1 ]; then
-  _tmpfile=$(mktemp "/private/tmp/claude-501/-Users-leoliang--leos-profiles/fdc5f7ed-5c82-4b03-b034-1a82e5f17335/scratchpad/tui_test_XXXXXX")
+  _tmpfile=$(mktemp "${TMPDIR:-/tmp}/tui_test_XXXXXX")
   INSTALLER="$INSTALLER" expect -f /dev/stdin >"$_tmpfile" 2>&1 <<'EXPECT_EOF'
 set timeout 10
 set inst $env(INSTALLER)
@@ -512,9 +512,11 @@ EXPECT_EOF
   if [ "$_ok" -eq 2 ]; then _pass "$_TNAME"
   else _fail "$_TNAME" "missing \\e[?1049l and/or \\e[?25h in output"; fi
 elif [ "$_have_script" -eq 1 ]; then
-  _tmpfile=$(mktemp "/private/tmp/claude-501/-Users-leoliang--leos-profiles/fdc5f7ed-5c82-4b03-b034-1a82e5f17335/scratchpad/tui_test_XXXXXX")
-  # BSD script (macOS): script -q outputfile command  (stdin piped in)
-  printf 'q' | script -q "$_tmpfile" /bin/bash "$INSTALLER" --silent >/dev/null 2>&1 || true
+  _tmpfile=$(mktemp "${TMPDIR:-/tmp}/tui_test_XXXXXX")
+  # BSD script (macOS): script -q outputfile command  (stdin piped in).
+  # Drive the wizard directly (NOT --silent, which is now an unattended AI run that
+  # would clone/install before failing) so this only exercises terminal restoration.
+  printf 'q' | script -q "$_tmpfile" /bin/bash -c "QUICK_INSTALL_SOURCED=1 source \"$INSTALLER\"; open_interaction_channel; run_wizard" >/dev/null 2>&1 || true
   _out=$(cat "$_tmpfile" 2>/dev/null || true); rm -f "$_tmpfile"
   _ok=0
   case "$_out" in *$'\033[?1049l'*) _ok=$(( _ok + 1 )) ;; esac
