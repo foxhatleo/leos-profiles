@@ -113,6 +113,7 @@ OPT_SKIP_PACKAGES=""
 OPT_NO_FONTS=""
 OPT_HTTPS=""
 OPT_STATE_FILE=""
+OPT_EXEC_STEPS=""
 # Immediate (short-circuit) actions; handle_immediate_flags acts on these.
 OPT_HELP=""
 OPT_VERSION=""
@@ -224,6 +225,10 @@ args_parse() {
       --state-file)
         if [ "$has_val" -eq 0 ]; then val="$2"; shift; fi
         OPT_STATE_FILE="$val"
+        ;;
+      --exec-steps)
+        if [ "$has_val" -eq 0 ]; then val="$2"; shift; fi
+        OPT_EXEC_STEPS="$val"
         ;;
       --)
         shift
@@ -859,6 +864,18 @@ run_step() {
     printf "${YELLOW}Re-run quick-install to continue from this point.${NORMAL}\n"
     return 1
   done
+}
+
+# Internal: run specific step bodies deterministically (used by the AI runbook
+# and by tests). Comma-separated ids, executed in given order.
+exec_steps_run() {
+  local ids="$1" id rc=0 oldifs="$IFS"
+  IFS=,
+  for id in $ids; do
+    run_step "$id" || rc=$?
+  done
+  IFS="$oldifs"
+  return "$rc"
 }
 
 # =============================================================================
@@ -2116,6 +2133,12 @@ main() {
 
   args_parse "$@"
   capture_env
+  if [ -n "$OPT_EXEC_STEPS" ]; then
+    # Internal primitive: deterministic per-step run, no wizard/AI/auth.
+    STATE_ENABLED_STEPS="$(printf '%s' "$OPT_EXEC_STEPS" | tr ',' ' ')"
+    exec_steps_run "$OPT_EXEC_STEPS"
+    exit $?
+  fi
   handle_immediate_flags          # --help/--version/--list-steps/--list-packages exit here
   open_interaction_channel        # sets MODE=wizard|silent, wires fd 3
 

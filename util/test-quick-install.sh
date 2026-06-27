@@ -96,6 +96,7 @@ _reset_opts() {
   OPT_NO_FONTS=""
   OPT_HTTPS=""
   OPT_STATE_FILE=""
+  OPT_EXEC_STEPS=""
   OPT_HELP=""
   OPT_VERSION=""
   OPT_LIST_STEPS=""
@@ -553,6 +554,32 @@ assert_eq "remove_word removes target word"               "$_LIST" "alpha gamma"
 _LIST="alpha beta"
 remove_word _LIST "missing"
 assert_eq "remove_word is no-op when word absent"         "$_LIST" "alpha beta"
+
+# ---------------------------------------------------------------------------
+# Task 1: --exec-steps
+# ---------------------------------------------------------------------------
+printf '\n=== Task 1: --exec-steps ===\n'
+
+_reset_opts; args_parse --exec-steps=install_bun,install_yarn
+assert_eq "exec-steps parses list" "$OPT_EXEC_STEPS" "install_bun,install_yarn"
+
+# exec_steps_run dispatches to run_step for each id (run_step stubbed).
+# Run inside a subshell so the stub does not leak into later tests.
+# We detect assertion failure via a sentinel printed to stdout then checked.
+_exec_dispatch_out=$(
+  _EXEC_CALLS=""
+  run_step() { _EXEC_CALLS="$_EXEC_CALLS $1"; return 0; }
+  exec_steps_run "install_bun,install_yarn"
+  if [ "$_EXEC_CALLS" = " install_bun install_yarn" ]; then
+    printf 'PASS'
+  else
+    printf 'FAIL:%s' "$_EXEC_CALLS"
+  fi
+)
+case "$_exec_dispatch_out" in
+  PASS) _pass "exec_steps_run dispatches in order" ;;
+  *)    _fail "exec_steps_run dispatches in order" "got: ${_exec_dispatch_out#FAIL:}" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Summary
