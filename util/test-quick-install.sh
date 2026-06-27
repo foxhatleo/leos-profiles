@@ -565,43 +565,72 @@ printf '\n=== Task 1: --exec-steps ===\n'
 _reset_opts; args_parse --exec-steps=install_bun,install_yarn
 assert_eq "exec-steps parses list" "$OPT_EXEC_STEPS" "install_bun,install_yarn"
 
-# exec_steps_run dispatches to run_step for each id (run_step stubbed).
-# Run inside a subshell so the stub does not leak into later tests.
-# We detect assertion failure via a sentinel printed to stdout then checked.
-_exec_dispatch_out=$(
-  _EXEC_CALLS=""
-  run_step() { _EXEC_CALLS="$_EXEC_CALLS $1"; return 0; }
-  exec_steps_run "install_bun,install_yarn"
-  if [ "$_EXEC_CALLS" = " install_bun install_yarn" ]; then
-    printf 'PASS'
-  else
-    printf 'FAIL:%s' "$_EXEC_CALLS"
-  fi
-)
-case "$_exec_dispatch_out" in
-  PASS) _pass "exec_steps_run dispatches in order" ;;
-  *)    _fail "exec_steps_run dispatches in order" "got: ${_exec_dispatch_out#FAIL:}" ;;
-esac
+# ---------------------------------------------------------------------------
+# GENUINE C1+C3 coverage: keep run_step REAL so the IFS-leak and set -e bugs
+# are actually exercised. The false-passing predecessors stubbed run_step AND
+# ran exec_steps_run inside $(...) (which suppresses errexit-abort); both hid
+# the bugs. Here run_step is real, only the step BODIES are stubbed, state
+# writes are redirected to a temp file, and exec_steps_run runs as a bare
+# statement inside a subshell that has set -e ON.
+# ---------------------------------------------------------------------------
 
-# exec_steps_run attempts every id but returns the FIRST failure's exit code.
-# Stub run_step: id "a" fails with 7, id "b" succeeds. Run in a subshell so the
-# stub does not leak into later tests. We assert (a) both ids were attempted and
-# (b) the returned code is 7 (the first failure), not the last status.
-_exec_fail_out=$(
-  _EXEC_CALLS=""
-  run_step() { _EXEC_CALLS="$_EXEC_CALLS $1"; if [ "$1" = "a" ]; then return 7; fi; return 0; }
-  exec_steps_run "a,b"
-  _rc=$?
-  if [ "$_EXEC_CALLS" = " a b" ] && [ "$_rc" -eq 7 ]; then
-    printf 'PASS'
-  else
-    printf 'FAIL: calls=[%s] rc=%s' "$_EXEC_CALLS" "$_rc"
-  fi
-)
-case "$_exec_fail_out" in
-  PASS) _pass "exec_steps_run returns first failure code, attempts all" ;;
-  *)    _fail "exec_steps_run returns first failure code, attempts all" "got: ${_exec_fail_out#FAIL: }" ;;
-esac
+# C1: multi-id under real run_step. STATE_ENABLED_STEPS is a SPACE-delimited
+# list; if IFS=, leaks into run_step->contains_word it collapses to one token
+# and every step is judged disabled and skipped -> bodies never run. We assert
+# BOTH bodies ran. (Buggy code: bodies skipped -> NO_BUN/NO_YARN -> FAIL.)
+_exec_state="$(mktemp "${TMPDIR:-/tmp}/qi_exec_state.XXXXXX")"
+_exec_sig="$(mktemp "${TMPDIR:-/tmp}/qi_exec_sig.XXXXXX")"
+(
+  set -e
+  QUICK_INSTALL_STATE_FILE="$_exec_state"
+  STATE_ENABLED_STEPS="install_bun install_yarn"
+  STATE_COMPLETED_STEPS=""
+  STATE_SKIPPED_STEPS=""
+  PKG_SKIP=""
+  _ran=""
+  install_bun()  { _ran="$_ran bun"; }
+  install_yarn() { _ran="$_ran yarn"; }
+  # Bare statement (NOT inside $(...)) so set -e really applies.
+  exec_steps_run "install_bun,install_yarn"
+  printf '%s' "$_ran" > "$_exec_sig"
+) >/dev/null 2>&1 || true   # don't let a buggy-code abort kill the suite
+_exec_ran="$(cat "$_exec_sig" 2>/dev/null || true)"
+if [ "$_exec_ran" = " bun yarn" ]; then
+  _pass "exec_steps_run runs every step body (real run_step, no IFS leak)"
+else
+  _fail "exec_steps_run runs every step body (real run_step, no IFS leak)" \
+    "expected ' bun yarn', got '$_exec_ran'"
+fi
+rm -f "$_exec_state" "$_exec_sig"
+
+# C3: first-non-zero under failure, with real run_step + a failing body for the
+# first id. Under set -e the buggy `run_step "$id"; _r=$?` aborts exec_steps_run
+# mid-loop, so the second body never runs. We assert BOTH bodies were attempted,
+# the return is the FIRST non-zero (run_step yields 1 for a failed step on a
+# non-tty run), AND exec_steps_run did NOT abort the caller (DONE must print).
+# run_step's own diagnostics go to a scratch file so only our sentinel is read.
+_exec_state="$(mktemp "${TMPDIR:-/tmp}/qi_exec_state.XXXXXX")"
+_exec_sig="$(mktemp "${TMPDIR:-/tmp}/qi_exec_sig.XXXXXX")"
+(
+  set -e
+  QUICK_INSTALL_STATE_FILE="$_exec_state"
+  STATE_ENABLED_STEPS="install_bun install_yarn"
+  STATE_COMPLETED_STEPS=""
+  STATE_SKIPPED_STEPS=""
+  PKG_SKIP=""
+  tty_available() { return 1; }   # force non-interactive fail-and-return path
+  _ran=""
+  install_bun()  { _ran="$_ran bun";  return 7; }   # first id fails
+  install_yarn() { _ran="$_ran yarn"; return 0; }   # second id succeeds
+  _rc=0
+  exec_steps_run "install_bun,install_yarn" >/dev/null 2>&1 || _rc=$?
+  # If exec_steps_run aborted the caller under set -e, DONE never prints.
+  printf 'ran=%s rc=%d DONE' "$_ran" "$_rc" > "$_exec_sig"
+) >/dev/null 2>&1 || true   # don't let a buggy-code abort kill the suite
+_exec_res="$(cat "$_exec_sig" 2>/dev/null || true)"
+rm -f "$_exec_state" "$_exec_sig"
+assert_eq "exec_steps_run: attempts all, returns first failure, no set -e abort" \
+  "$_exec_res" "ran= bun yarn rc=1 DONE"
 
 # ---------------------------------------------------------------------------
 # Task 2: --silent=driver + --print-runbook
@@ -1026,24 +1055,56 @@ _t11_silent=$(
 )
 assert_contains "silent codex drove run_agent" "$_t11_silent" "codex exec"
 
-# main_ai_flow, interactive + run_auth_flow rc 10 -> returns 0 without running agent.
-_t11_authgate=$(
-  MODE=interactive; OPT_SILENT=""; DRIVER=""
-  prepare_and_clone_repo() { return 0; }
-  install_min_toolchain() { return 0; }
-  install_ai_tools() { return 0; }
-  run_auth_flow() { return 10; }
-  generate_runbook() { echo RB; }
-  detect_os_key() { echo macos; }
-  resolve_plan() { STATE_ENABLED_STEPS="install_bun"; }
-  sudo_keepalive_start() { return 0; }
-  sudo_keepalive_stop() { return 0; }
-  _RAN="no"
-  RUN_AGENT_CMD() { _RAN="ran"; return 0; }
-  main_ai_flow >/dev/null 2>&1; _rc=$?
-  printf 'rc=%d ran=%s' "$_rc" "$_RAN"
-)
-assert_eq "interactive auth-gate: rc 10 -> return 0, no agent" "$_t11_authgate" "rc=0 ran=no"
+# C2 (GENUINE): main_ai_flow, interactive + run_auth_flow rc 10 -> graceful
+# return 0 without running the agent.
+#
+# run_auth_flow returns 10 BY DESIGN when no CLI is authenticated. The buggy
+# `run_auth_flow; rc=$?` runs as a bare statement under set -e, so the failing
+# return aborts main_ai_flow BEFORE rc is captured: the "No AI CLI authenticated"
+# guidance is dead and the run aborts. The fix is `rc=0; run_auth_flow || rc=$?`.
+#
+# This MUST run at the TOP LEVEL of a freshly-spawned bash that sources the
+# installer normally (its own `set -e` takes effect). errexit-abort of a function
+# return is suppressed when the call is nested inside another function context
+# (as in this harness), so an in-harness subshell would NOT reproduce the abort
+# and would pass falsely (the predecessor's $(...) wrapper had the same blind
+# spot). We spawn a real top-level script and detect the abort two ways:
+#   (1) a POST-main_ai_flow sentinel line that the abort prevents from printing
+#   (2) an agent-marker file that must stay empty (agent never runs)
+_c2_script="$(mktemp "${TMPDIR:-/tmp}/qi_c2_script.XXXXXX")"
+_c2_marker="$(mktemp "${TMPDIR:-/tmp}/qi_c2_marker.XXXXXX")"
+_c2_out="$(mktemp "${TMPDIR:-/tmp}/qi_c2_out.XXXXXX")"
+: > "$_c2_marker"
+cat > "$_c2_script" <<C2EOF
+QUICK_INSTALL_SOURCED=1 source "$INSTALLER" 2>/dev/null
+MODE=interactive; OPT_SILENT=""; DRIVER=""
+resolve_plan() { STATE_ENABLED_STEPS="install_bun"; }
+prepare_and_clone_repo() { return 0; }
+install_min_toolchain() { return 0; }
+install_ai_tools() { return 0; }
+run_auth_flow() { return 10; }            # neither CLI authed (by design)
+detect_os_key() { echo macos; }
+generate_runbook() { echo RB; }
+sudo_keepalive_start() { return 0; }
+sudo_keepalive_stop() { return 0; }
+# Agent seams: if any fires, the install proceeded past the auth gate (a bug).
+run_agent() { echo ran > "$_c2_marker"; return 0; }
+run_agent_with_fallback() { echo ran > "$_c2_marker"; return 0; }
+RUN_AGENT_CMD() { echo ran > "$_c2_marker"; return 0; }
+main_ai_flow
+# Buggy code aborts main_ai_flow under set -e, so this sentinel never prints.
+echo "SENTINEL rc=\$?"
+C2EOF
+bash "$_c2_script" > "$_c2_out" 2>/dev/null || true
+_c2_sentinel="$(grep -c '^SENTINEL rc=0$' "$_c2_out" 2>/dev/null || echo 0)"
+_c2_agent="$(cat "$_c2_marker" 2>/dev/null || true)"
+rm -f "$_c2_script" "$_c2_marker" "$_c2_out"
+if [ "$_c2_sentinel" -eq 1 ] && [ -z "$_c2_agent" ]; then
+  _pass "interactive auth-gate: rc 10 -> graceful return 0, agent never runs (real set -e)"
+else
+  _fail "interactive auth-gate: rc 10 -> graceful return 0, agent never runs (real set -e)" \
+    "sentinel_rc0=$_c2_sentinel (want 1), agent_marker='$_c2_agent' (want empty)"
+fi
 
 # ---------------------------------------------------------------------------
 # Summary

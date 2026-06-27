@@ -902,14 +902,20 @@ run_step() {
 # and by tests). Comma-separated ids, executed in given order.
 exec_steps_run() {
   local ids="$1" id rc=0 _r oldifs="$IFS"
-  IFS=,
-  for id in $ids; do
+  # Split the comma list into positionals with IFS scoped ONLY to the split,
+  # then RESTORE the default IFS before any run_step call. run_step ->
+  # contains_word word-splits the SPACE-delimited STATE_ENABLED_STEPS, so a
+  # leaked IFS=, would collapse it to one token and skip every step. The local
+  # "ids" already saved $1, so clobbering positionals via set -- is safe.
+  IFS=,; set -- $ids; IFS="$oldifs"
+  for id in "$@"; do
     # Attempt every listed step (matching the deterministic loop's behavior),
     # but return the FIRST non-zero status, preserving its real exit code.
-    run_step "$id"; _r=$?
+    # Guard with || so a failing run_step does not abort under set -e.
+    _r=0
+    run_step "$id" || _r=$?
     if [ "$_r" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=$_r; fi
   done
-  IFS="$oldifs"
   return "$rc"
 }
 
@@ -1068,7 +1074,9 @@ main_ai_flow() {
   if [ "$MODE" = interactive ]; then
     install_ai_tools
     local rc
-    run_auth_flow; rc=$?
+    # run_auth_flow returns 10 by design when no CLI is authenticated; guard
+    # with || so set -e does not abort before rc is captured (graceful exit 0).
+    rc=0; run_auth_flow || rc=$?
     if [ "$rc" -eq 10 ]; then
       printf "No AI CLI authenticated. Re-run to authenticate, or --silent=<cli> once set up.\n"
       return 0
@@ -1078,8 +1086,10 @@ main_ai_flow() {
   fi
   sudo_keepalive_start
   local os rb; os="$(detect_os_key)"; rb="$(generate_runbook "$os")"
-  if [ "$MODE" = silent ]; then run_agent_with_fallback "$rb"; else run_agent "$DRIVER" "$rb"; fi
-  local rc=$?
+  # Guard the agent call so a non-zero agent exit does not abort under set -e
+  # before rc is captured and sudo_keepalive_stop runs (cleanup must happen).
+  local rc=0
+  if [ "$MODE" = silent ]; then run_agent_with_fallback "$rb" || rc=$?; else run_agent "$DRIVER" "$rb" || rc=$?; fi
   sudo_keepalive_stop
   return "$rc"
 }
