@@ -81,6 +81,7 @@ assert_word_absent() {
 # ---------------------------------------------------------------------------
 # Source the installer with the guard (defines functions, skips main).
 # ---------------------------------------------------------------------------
+# shellcheck disable=SC1090
 QUICK_INSTALL_SOURCED=1 source "$INSTALLER" 2>/dev/null
 
 # Reset all OPT_* vars to a clean slate before each args_parse call.

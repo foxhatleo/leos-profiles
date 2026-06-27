@@ -1,0 +1,10 @@
+# ShellCheck configuration for Leo's Profiles.
+#
+# SC2034 (variable appears unused): the installer is a step-based state machine
+# that shares many globals across functions (OPT_*/ENV_* parsed in one function,
+# read in resolve_plan/run_wizard/main; STATE_*/PKG_SKIP/RESUMING/WIZARD_RAN
+# likewise). ShellCheck analyses assignments per-construct and reports these as
+# unused even though every one is read elsewhere in the same file (verified).
+# Disabling SC2034 repo-wide avoids a wall of false positives; genuinely dead
+# code is caught in review instead.
+disable=SC2034

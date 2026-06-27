@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: ShellCheck (gating)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint shell scripts
+        run: |
+          shellcheck --version
+          # .shellcheckrc at the repo root tunes the rule set.
+          shellcheck --severity=warning \
+            quick-install.sh \
+            util/quick-install.sh \
+            util/test-quick-install.sh
+
+  tests-bash5:
+    name: Tests (bash 5.x)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run installer unit tests
+        run: bash util/test-quick-install.sh
+
+  tests-bash32:
+    name: Tests (bash 3.2, macOS floor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run installer unit tests under bash 3.2.57
+        run: |
+          # macOS ships bash 3.2; the docker image pins that exact floor so
+          # 3.2-incompatible constructs fail CI even though dev machines run 5.x.
+          docker run --rm -v "$PWD":/work -w /work bash:3.2 \
+            bash util/test-quick-install.sh
+
+  fish-syntax:
+    name: Fish syntax (gating)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fish
+        run: sudo apt-get update && sudo apt-get install -y fish
+      - name: Syntax-check fish files
+        run: |
+          rc=0
+          for f in fish/*.fish fish/path/*.fish; do
+            fish -n "$f" || { echo "syntax error: $f"; rc=1; }
+          done
+          exit "$rc"
+
+  fish-format:
+    name: Fish formatting (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fish
+        run: sudo apt-get update && sudo apt-get install -y fish
+      - name: Report fish_indent drift (non-gating)
+        run: |
+          # Style only — these files predate a fish_indent convention. Reported
+          # for visibility; does not fail the build.
+          for f in fish/*.fish fish/path/*.fish; do
+            fish_indent --check "$f" || echo "would reformat: $f"
+          done
+
+  package-verify:
+    name: Package availability (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zstd (Fedora metadata inspection)
+        run: sudo apt-get update && sudo apt-get install -y zstd
+      - name: Verify installer packages resolve
+        run: |
+          # Live network checks against distro repos — flaky by nature, so this
+          # job is non-gating. Run manually when changing package lists.
+          python3 util/verify-quick-install-packages.py || true

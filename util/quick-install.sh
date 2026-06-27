@@ -29,7 +29,7 @@
 # §0  Terminal colors (only if connected to a TTY that supports them)
 # =============================================================================
 if which tput >/dev/null 2>&1; then
-  ncolors=$(tput colors)
+  ncolors=$(tput colors 2>/dev/null)
 fi
 if [ -t 1 ] && [ -n "${ncolors:-}" ] && [ "$ncolors" -ge 8 ]; then
   RED="$(tput setaf 1)"
@@ -311,6 +311,8 @@ contains_word() {
   local needle="$1"
   shift
   local item
+  # Intentional word-splitting over a space-delimited word list (bash 3.2 idiom).
+  # shellcheck disable=SC2048,SC2086
   for item in $*; do
     if [ "$item" = "$needle" ]; then
       return 0
@@ -488,9 +490,9 @@ step_dependencies() {
 step_default_enabled() {
   case "$1" in
     install_nerd_fonts)
-      if [ -n "${NO_FONTS:-}" ]; then
-        return 1
-      fi
+      # NO_FONTS / --no-fonts are enforced by resolve_plan (env + flag layers)
+      # and the install_nerd_fonts runtime guard; the default here is the
+      # desktop-environment gate only (single source of truth for the override).
       is_desktop_environment
       return $?
       ;;
@@ -1339,6 +1341,9 @@ setup_fish() {
   if [ -n "$INSTALLED_NVM_VERSION" ]; then
     fish -c "set -U nvm_default_version $INSTALLED_NVM_VERSION"
   else
+    # current_version is a fish-local variable inside this fish -c program, not a
+    # bash variable; shellcheck cannot see across the language boundary.
+    # shellcheck disable=SC2154
     fish -c "if set -l current_version (nvm current 2>/dev/null); and test -n \"$current_version\"; and test \"$current_version\" != \"none\"; set -U nvm_default_version $current_version; else; set -Ue nvm_default_version; end"
   fi
 }
@@ -2142,6 +2147,9 @@ main() {
   done
 
   clear_state_file
+
+  # Release the controlling-terminal fd (no-op if it was never opened).
+  exec 3>&- 2>/dev/null || true
 
   printf "${BLUE}Installation finished.${NORMAL}\n"
   printf "${BLUE}Now please configure your rbenv, opam, etc.${NORMAL}\n"
