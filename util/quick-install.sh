@@ -148,16 +148,20 @@ USAGE:
   quick-install.sh [OPTIONS]
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/quick-install.sh)"
 
-By default, on an interactive terminal, a setup wizard lets you choose steps and
-packages and confirm before anything runs. With no terminal (e.g. piped) or with
---silent, sensible defaults run non-interactively.
+Every install is AI-driven: a minimal prereq core runs deterministically, then an
+authenticated AI CLI (claude or codex) drives the rest from a generated runbook.
+On an interactive terminal a setup wizard plus an auth flow run, letting you
+choose steps and packages and authenticate a CLI before anything else runs. With
+no terminal and no --silent the installer ERRORS rather than guess at a mode; use
+--silent for unattended runs (see below).
 
 OPTIONS:
   -h, --help                 Show this help and exit
   -s, --silent[=claude|codex],
-      --non-interactive      Skip the wizard; run the resolved plan with defaults
-                             Optionally drive non-interactive steps via an AI CLI
-                             (requires an already-authenticated claude or codex CLI)
+      --non-interactive      Unattended AI install; assumes an already-authenticated
+                             claude or codex CLI. --silent=claude/--silent=codex picks
+                             one (fails if not set up); bare --silent tries claude then
+                             codex. Never installs or logs in.
       --print-runbook        Print the AI runbook for the resolved plan, then exit
   -y, --yes                  Don't show the confirm screen; proceed once resolved
       --fresh                Ignore any saved resume state; start a clean run
@@ -186,6 +190,8 @@ ENVIRONMENT (still honored; flags take precedence):
 
 EXAMPLES:
   quick-install.sh --silent --skip=install_nerd_fonts
+  quick-install.sh --silent=codex
+  quick-install.sh --print-runbook --silent=claude
   quick-install.sh --only=prepare_and_clone_repo,install_os_packages
   quick-install.sh --silent --packages=core-utils,shell,network --no-fonts
   USE_HTTPS=1 quick-install.sh --silent
@@ -989,11 +995,9 @@ run_auth_flow() {
       printf "${GREEN}%s already authenticated.${NORMAL}\n" "$cli"
       # eval is the bash 3.2 safe way to set a variable whose name is dynamic
       # (no ${var^^} available); the tr produces a safe uppercase ASCII name.
-      # shellcheck disable=SC2046
       eval "AUTHED_$(printf '%s' "$cli" | tr 'a-z' 'A-Z')=1"
     elif prompt_yes_no "Authenticate $cli now?" "yes"; then
       if AUTH_LOGIN_CMD "$cli"; then
-        # shellcheck disable=SC2046
         eval "AUTHED_$(printf '%s' "$cli" | tr 'a-z' 'A-Z')=1"
       fi
     fi

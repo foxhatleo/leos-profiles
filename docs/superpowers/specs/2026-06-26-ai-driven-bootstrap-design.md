@@ -259,8 +259,10 @@ codex)  codex exec --dangerously-bypass-approvals-and-sandbox "$RUNBOOK" ;;
   then continues.
 - Cross-agent recovery (SILENT bare-`--silent`): if Claude fails, Codex resumes via the
   same idempotent runbook.
-- The resume-state records prereq progress, so a killed run resumes prereqs without redoing
-  them.
+- In the AI flow the prereqs run directly (not via `run_step`), so `record_interrupted_run`
+  does NOT capture prereq progress in resume-state. Prereq re-run safety instead comes from
+  each prereq being idempotent/skip-aware (brew/node/npm/CLI/auth checks), so a killed run
+  re-runs the prereqs harmlessly and skips whatever is already in place.
 
 ## 7. Backward compatibility & migration
 

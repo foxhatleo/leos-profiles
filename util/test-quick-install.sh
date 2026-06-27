@@ -677,6 +677,10 @@ assert_exit "claude installed"      0 'cli_is_installed claude'
 assert_exit "claude authed"         0 'cli_is_authenticated claude'
 assert_exit "codex installed"       0 'cli_is_installed codex'
 assert_exit "codex unauthed -> 1"   1 'cli_is_authenticated codex'
+# Unknown CLI name must be rejected (non-zero) by both probes — the case
+# statements fall through to `*) return 1`, never shelling out to a bogus name.
+assert_exit "cli_is_installed unknown -> 1"     1 'cli_is_installed bogus'
+assert_exit "cli_is_authenticated unknown -> 1" 1 'cli_is_authenticated bogus'
 PATH="$_oldpath"; rm -rf "$_stubdir"
 
 # ---------------------------------------------------------------------------
@@ -777,6 +781,21 @@ _t7_rc=0
   run_auth_flow
 ) >/dev/null 2>&1 || _t7_rc=$?
 assert_eq "neither authed -> rc 10" "$_t7_rc" "10"
+
+# Case 3: login-SUCCESS branch. Neither pre-authed; user says yes; AUTH_LOGIN_CMD
+# succeeds for claude (returns 0) -> AUTHED_CLAUDE set -> DRIVER=claude, rc 0.
+# codex login fails so only claude is authed (exercises the single-driver path
+# off a successful interactive login, not a pre-existing auth). Subshell-contained.
+_t7_login="$(
+  cli_is_authenticated() { return 1; }            # nothing pre-authenticated
+  prompt_yes_no()  { return 0; }                  # user agrees to authenticate
+  AUTH_LOGIN_CMD() { [ "$1" = claude ] && return 0; return 1; }  # claude login ok
+  _pick_driver() { echo SHOULD_NOT_RUN; }
+  DRIVER=""; _rc=0
+  run_auth_flow >/dev/null 2>/dev/null || _rc=$?
+  printf 'driver=%s rc=%d' "$DRIVER" "$_rc"
+)"
+assert_eq "login success -> authed, driver set" "$_t7_login" "driver=claude rc=0"
 
 # ---------------------------------------------------------------------------
 # Task 8: generate_runbook
