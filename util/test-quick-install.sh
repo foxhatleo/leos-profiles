@@ -993,6 +993,59 @@ _t10_nofallback_rc=0
 assert_eq "explicit driver: no fallback returns failure" "$_t10_nofallback_rc" "5"
 
 # ---------------------------------------------------------------------------
+# Task 11: sudo keep-alive + main_ai_flow orchestration
+# ---------------------------------------------------------------------------
+printf '\n=== Task 11: sudo keep-alive + main_ai_flow ===\n'
+
+# sudo_keepalive_stop is a no-op when KEEPALIVE_PID is unset (must not error).
+_t11_rc=0
+(
+  unset KEEPALIVE_PID
+  sudo_keepalive_stop
+) >/dev/null 2>&1 || _t11_rc=$?
+assert_eq "keepalive stop no-op when unset" "$_t11_rc" "0"
+
+# main_ai_flow, silent + codex: all heavy ops stubbed; assert codex drove.
+# Subshell-contained so stub overrides don't leak into later tests.
+_t11_silent=$(
+  MODE=silent; OPT_SILENT=1; OPT_SILENT_DRIVER=codex; DRIVER=""
+  cli_is_installed() { return 0; }
+  cli_is_authenticated() { return 0; }
+  prepare_and_clone_repo() { return 0; }
+  install_min_toolchain() { return 0; }
+  generate_runbook() { echo RB; }
+  detect_os_key() { echo macos; }
+  resolve_plan() { STATE_ENABLED_STEPS="install_bun"; }
+  open_interaction_channel() { TTY_OPEN=0; }
+  sudo_keepalive_start() { return 0; }
+  sudo_keepalive_stop() { return 0; }
+  _RAN=""
+  RUN_AGENT_CMD() { _RAN="$*"; return 0; }
+  main_ai_flow >/dev/null 2>&1
+  printf '%s' "$_RAN"
+)
+assert_contains "silent codex drove run_agent" "$_t11_silent" "codex exec"
+
+# main_ai_flow, interactive + run_auth_flow rc 10 -> returns 0 without running agent.
+_t11_authgate=$(
+  MODE=interactive; OPT_SILENT=""; DRIVER=""
+  prepare_and_clone_repo() { return 0; }
+  install_min_toolchain() { return 0; }
+  install_ai_tools() { return 0; }
+  run_auth_flow() { return 10; }
+  generate_runbook() { echo RB; }
+  detect_os_key() { echo macos; }
+  resolve_plan() { STATE_ENABLED_STEPS="install_bun"; }
+  sudo_keepalive_start() { return 0; }
+  sudo_keepalive_stop() { return 0; }
+  _RAN="no"
+  RUN_AGENT_CMD() { _RAN="ran"; return 0; }
+  main_ai_flow >/dev/null 2>&1; _rc=$?
+  printf 'rc=%d ran=%s' "$_rc" "$_RAN"
+)
+assert_eq "interactive auth-gate: rc 10 -> return 0, no agent" "$_t11_authgate" "rc=0 ran=no"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 printf '\n================================================\n'

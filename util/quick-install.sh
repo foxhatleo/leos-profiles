@@ -97,6 +97,8 @@ PKG_SKIP=""
 
 # Interaction mode, resolved by open_interaction_channel: wizard | silent.
 MODE=""
+# PID of the background sudo keep-alive loop (interactive only). Empty when none.
+KEEPALIVE_PID=""
 # Whether the wizard actually ran (so resolve_plan knows to honor its toggles).
 WIZARD_RAN=0
 
@@ -473,6 +475,11 @@ on_signal() {
   local sig="$1"
   # Always restore the terminal first (no-op if the wizard never entered).
   tui_leave
+  # Never leak the background sudo keep-alive loop, whatever phase we're in.
+  if [ -n "${KEEPALIVE_PID:-}" ]; then
+    kill "$KEEPALIVE_PID" 2>/dev/null || true
+    KEEPALIVE_PID=""
+  fi
   case "$sig" in
     INT|TERM)
       record_interrupted_run
@@ -1027,6 +1034,53 @@ run_agent_with_fallback() {
     printf "${YELLOW}%s run failed; retrying with %s...${NORMAL}\n" "$first" "$other" >&2
     run_agent "$other" "$runbook"; return $?
   fi
+  return "$rc"
+}
+
+# =============================================================================
+# §3d  Sudo keep-alive + AI orchestration (main_ai_flow)
+# =============================================================================
+
+# Prime sudo and keep the timestamp warm in the background (interactive only).
+# Silent runs cannot prompt, so they rely on cached/passwordless sudo instead.
+# Sets KEEPALIVE_PID when a keep-alive loop is launched.
+sudo_keepalive_start() {
+  [ -n "$OPT_SILENT" ] && return 0            # cannot prompt unattended
+  sudo -v 2>/dev/null || { printf "${YELLOW}No sudo; sudo steps may fail.${NORMAL}\n"; return 0; }
+  ( while true; do sudo -n true 2>/dev/null; sleep 60; done ) &
+  KEEPALIVE_PID=$!
+}
+
+# Stop the background sudo keep-alive loop. No-op (and never errors) when unset.
+sudo_keepalive_stop() {
+  [ -n "${KEEPALIVE_PID:-}" ] && kill "$KEEPALIVE_PID" 2>/dev/null
+  KEEPALIVE_PID=""
+}
+
+# Orchestrate the AI-driven install: resolve the plan, run the deterministic
+# prereq core (skip-aware), select/verify the driver, then hand the generated
+# runbook to the agent. Returns the agent's exit code, or 0 when the interactive
+# auth flow finds no authenticated CLI (guidance printed; nothing installed).
+main_ai_flow() {
+  resolve_plan                                  # wizard (interactive) or defaults+flags
+  prepare_and_clone_repo
+  install_min_toolchain
+  if [ "$MODE" = interactive ]; then
+    install_ai_tools
+    local rc
+    run_auth_flow; rc=$?
+    if [ "$rc" -eq 10 ]; then
+      printf "No AI CLI authenticated. Re-run to authenticate, or --silent=<cli> once set up.\n"
+      return 0
+    fi
+  else
+    resolve_silent_driver || return 1
+  fi
+  sudo_keepalive_start
+  local os rb; os="$(detect_os_key)"; rb="$(generate_runbook "$os")"
+  if [ "$MODE" = silent ]; then run_agent_with_fallback "$rb"; else run_agent "$DRIVER" "$rb"; fi
+  local rc=$?
+  sudo_keepalive_stop
   return "$rc"
 }
 
@@ -2539,53 +2593,37 @@ run_wizard() {
 # §9  main()
 # =============================================================================
 main() {
-  local step_id
-
   args_parse "$@"
   capture_env
+  handle_immediate_flags          # --help/--version/--list-steps/--list-packages/--print-runbook exit here
+
   if [ -n "$OPT_EXEC_STEPS" ]; then
     # Internal primitive: deterministic per-step run, no wizard/AI/auth.
     STATE_ENABLED_STEPS="$(printf '%s' "$OPT_EXEC_STEPS" | tr ',' ' ')"
     exec_steps_run "$OPT_EXEC_STEPS"
     exit $?
   fi
-  handle_immediate_flags          # --help/--version/--list-steps/--list-packages exit here
-  open_interaction_channel        # sets MODE=wizard|silent, wires fd 3
+
+  open_interaction_channel        # wires fd 3, sets TTY_OPEN (MODE refined below)
+  select_mode || exit 2           # MODE=silent|interactive, or exit 2 with guidance
 
   cd "$HOME"
 
-  if prepare_run_plan; then
-    # Resuming a failed run: reuse the loaded plan (steps + STATE_PKG_SKIP).
-    # Still let flags override on top, then re-close dependencies.
-    resolve_plan
-  else
-    # Fresh run. Wizard mode shows the 3-screen wizard; silent mode resolves
-    # straight from defaults+env+flags.
-    if [ "$MODE" = "wizard" ]; then
-      if ! run_wizard; then
-        printf "${YELLOW}Wizard cancelled. Nothing was installed.${NORMAL}\n"
-        exit 130
-      fi
+  STATE_RUN_STARTED_AT=$(date +%s)
+  INSTALLED_NVM_VERSION=""
+
+  # Interactive + a capable TTY: let the wizard customize the plan before it is
+  # resolved (resolve_plan honors WIZARD_RAN). Silent mode resolves from
+  # defaults+env+flags inside main_ai_flow.
+  if [ "$MODE" = interactive ] && tui_supported; then
+    if ! run_wizard; then
+      printf "${YELLOW}Wizard cancelled. Nothing was installed.${NORMAL}\n"
+      exit 130
     fi
-    STATE_RUN_STARTED_AT=$(date +%s)
-    INSTALLED_NVM_VERSION=""
-    resolve_plan
-    STATE_LAST_STATUS="pending"
   fi
 
-  save_state_file
-
-  for step_id in "${STEP_IDS[@]}"; do
-    run_step "$step_id"
-  done
-
-  clear_state_file
-
-  # Release the controlling-terminal fd (no-op if it was never opened).
-  exec 3>&- 2>/dev/null || true
-
-  printf "${BLUE}Installation finished.${NORMAL}\n"
-  printf "${BLUE}Now please configure your rbenv, opam, etc.${NORMAL}\n"
+  main_ai_flow
+  exit $?
 }
 
 # Single trap dispatcher (composes terminal restore + interrupted-run record).
