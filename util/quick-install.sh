@@ -941,6 +941,56 @@ resolve_silent_driver() {
   return 1
 }
 
+# Real interactive login for a named CLI via the controlling terminal (fd 3).
+# This is a seam: tests override AUTH_LOGIN_CMD as a function to avoid real logins.
+AUTH_LOGIN_CMD() {
+  case "$1" in
+    claude) claude auth login <&3 >&3 2>&3 ;;
+    codex)  codex login        <&3 >&3 2>&3 ;;
+  esac
+}
+
+# Ask which CLI drives setup when both are authenticated. Reads via fd 3.
+# This is a seam: tests override _pick_driver to return a fixed value.
+_pick_driver() {
+  local ans
+  printf "Which should drive setup? [claude/codex] (claude): " >&3
+  IFS= read -r ans <&3 2>/dev/null || ans=""
+  case "$ans" in codex) echo codex ;; *) echo claude ;; esac
+}
+
+# Detect or obtain authentication for claude and codex, then set DRIVER.
+# Sets AUTHED_CLAUDE / AUTHED_CODEX to "1" or "".
+# Returns 0 with DRIVER set, or 10 when neither CLI is authenticated.
+run_auth_flow() {
+  AUTHED_CLAUDE=""; AUTHED_CODEX=""
+  local cli
+  for cli in claude codex; do
+    if cli_is_authenticated "$cli"; then
+      printf "${GREEN}%s already authenticated.${NORMAL}\n" "$cli"
+      # eval is the bash 3.2 safe way to set a variable whose name is dynamic
+      # (no ${var^^} available); the tr produces a safe uppercase ASCII name.
+      # shellcheck disable=SC2046
+      eval "AUTHED_$(printf '%s' "$cli" | tr 'a-z' 'A-Z')=1"
+    elif prompt_yes_no "Authenticate $cli now?" "yes"; then
+      if AUTH_LOGIN_CMD "$cli"; then
+        # shellcheck disable=SC2046
+        eval "AUTHED_$(printf '%s' "$cli" | tr 'a-z' 'A-Z')=1"
+      fi
+    fi
+  done
+  if [ -n "$AUTHED_CLAUDE" ] && [ -n "$AUTHED_CODEX" ]; then
+    DRIVER="$(_pick_driver)"
+  elif [ -n "$AUTHED_CLAUDE" ]; then
+    DRIVER=claude
+  elif [ -n "$AUTHED_CODEX" ]; then
+    DRIVER=codex
+  else
+    return 10
+  fi
+  return 0
+}
+
 # =============================================================================
 # §8  Step bodies (unchanged behavior)
 # =============================================================================

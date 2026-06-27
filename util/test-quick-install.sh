@@ -718,6 +718,38 @@ _t6_out=$(
 assert_eq "explicit codex authed -> ok" "$_t6_out" "codex"
 
 # ---------------------------------------------------------------------------
+# Task 7: run_auth_flow
+# ---------------------------------------------------------------------------
+printf '\n=== Task 7: run_auth_flow ===\n'
+
+# Case 1: both already authenticated -> ask which drives; stub driver pick.
+# Run in subshell to contain stub overrides; suppress run_auth_flow stdout so
+# only the final printf (the DRIVER value) reaches the command-substitution.
+_t7_both_authed=$(
+  AUTH_LOGIN_CMD() { return 0; }
+  prompt_yes_no()  { return 0; }
+  cli_is_authenticated() { return 0; }
+  _pick_driver() { echo claude; }
+  DRIVER=""
+  run_auth_flow >/dev/null 2>/dev/null
+  printf '%s' "$DRIVER"
+)
+assert_eq "both authed -> driver from pick" "$_t7_both_authed" "claude"
+
+# Case 2: neither authed and user declines -> return 10.
+# Run in subshell; capture exit code without aborting the suite.
+_t7_rc=0
+(
+  AUTH_LOGIN_CMD() { return 0; }
+  prompt_yes_no()  { return 1; }    # user declines both
+  cli_is_authenticated() { return 1; }
+  _pick_driver() { echo claude; }
+  DRIVER=""
+  run_auth_flow
+) >/dev/null 2>&1 || _t7_rc=$?
+assert_eq "neither authed -> rc 10" "$_t7_rc" "10"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 printf '\n================================================\n'
