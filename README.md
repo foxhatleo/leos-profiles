@@ -28,7 +28,9 @@ There are two installer entrypoints:
 - [`quick-install.sh`](./quick-install.sh): lightweight bootstrap entrypoint intended for local use or one-line remote install
 - [`util/quick-install.sh`](./util/quick-install.sh): the full installer implementation
 
-The quick installer can:
+Every install is **AI-driven**: the installer bootstraps a minimal prereq core deterministically (clone the repo, ensure Homebrew on macOS, install Node/npm, install and authenticate Claude Code and Codex on interactive runs), then hands the rest of the setup to the chosen AI agent (Claude Code or Codex) running in bypass/no-approval mode. The agent uses a precise runbook generated from your resolved plan, so it knows exactly what to do and can self-recover from errors without improvising.
+
+The quick installer sets up:
 
 - clone the repo into `~/.leos-profiles`
 - install a curated package set for the current OS
@@ -42,14 +44,16 @@ The quick installer can:
 - optionally install Nerd Fonts on desktop systems
 - optionally switch the default shell to Fish
 
-On an interactive terminal the installer shows a **fullscreen setup wizard** (pure bash + ANSI, zero extra dependencies) that lets you choose which steps and package groups to include and review a confirmation screen before anything runs. It accepts CLI flags for scripted and CI use. Run `util/quick-install.sh --help` for the full flag reference.
+On an interactive terminal the installer shows a **fullscreen setup wizard** (pure bash + ANSI, zero extra dependencies) that lets you choose which steps and package groups to include and review a confirmation screen before anything runs. You are then prompted to authenticate the AI CLIs, and the authenticated agent drives the rest. It accepts CLI flags for scripted and CI use. Run `util/quick-install.sh --help` for the full flag reference.
+
+**An authenticated Claude Code or Codex installation is required.** There is no non-AI install mode.
 
 ### Utility scripts
 
 - [`util/rmdsstore.py`](./util/rmdsstore.py): recursively removes `.DS_Store`, `Thumbs.db`, `desktop.ini`, and `$RECYCLE.BIN` artifacts
 - [`util/verify-quick-install-packages.py`](./util/verify-quick-install-packages.py): checks whether packages referenced by the installer exist in official/default package sources across supported platforms
 - [`res/adblock-hosts`](./res/adblock-hosts): hosts-style blocklist resource file
-- [`res/ai/`](./res/ai): starter config templates for the AI coding CLIs, seeded into `~/.claude/` and `~/.codex/` only when those files do not already exist (login/auth stays manual)
+- [`res/ai/`](./res/ai): starter config templates for the AI coding CLIs, seeded into `~/.claude/` and `~/.codex/` only when those files do not already exist (the installer handles auth interactively or requires it to already be in place for silent runs)
 
 ## Repository Layout
 
@@ -95,11 +99,13 @@ Run the public bootstrap entrypoint:
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/quick-install.sh)"
 ```
 
-On an interactive terminal this opens the setup wizard. To run non-interactively with defaults instead:
+On an interactive terminal (including `curl | bash` via `/dev/tty`) this opens the setup wizard, installs Claude Code and Codex, prompts you to authenticate them, then lets the chosen agent drive the rest. If you already have an authenticated Claude Code or Codex and want to run unattended:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/quick-install.sh)" -- --silent
 ```
+
+Running without a terminal and without `--silent` is an error — the installer will print guidance and exit rather than guess at an unattended run.
 
 If you prefer HTTPS cloning instead of SSH:
 
@@ -123,25 +129,44 @@ or invoke the full implementation directly:
 
 ## What The Installer Does
 
-The installer is step-based and records progress in `~/.leos-profiles/quick-install.state` so an interrupted run can resume from the failed step.
+The installer is step-based and records progress in `~/.leos-profiles/quick-install.state` so an interrupted run can resume from the failed step. The flow has two phases:
 
-Default step flow:
+### Phase 1 — Prereq core (deterministic, skips work already present)
+
+Run unconditionally before the AI agent takes over:
 
 1. Prepare and clone repo
-2. Install local bins
-3. Install OS packages
-4. Install `pyenv`
-5. Install `rbenv`
-6. Install `bun`
-7. Install `yarn`
-8. Install latest Node.js LTS with `nvm`
-9. Install AI coding tools (Claude Code, Codex)
-10. Set up Fish plugins and prompt
-11. Install Nerd Fonts when appropriate
-12. Write Fish config
-13. Set default shell to Fish
+2. Ensure minimal toolchain: Homebrew (macOS), Node.js, npm
+3. *(Interactive only)* Install AI coding CLIs (Claude Code, Codex)
+4. *(Interactive only)* Authenticate CLIs — see [Auth flow](#auth-flow) below
 
-On an interactive terminal the wizard lets you toggle steps and package groups before anything runs, then shows a read-only confirmation screen. The wizard pre-seeds its selections from your flags and environment so forced-on or locked choices are clearly marked. After the wizard, the normal scrolling install log runs outside the alternate screen so the output is fully scrollable.
+### Phase 2 — AI-driven setup
+
+After the prereq core, the installer generates a precise runbook from your resolved plan and hands it to the chosen agent (Claude Code or Codex) running in bypass mode. The agent executes each step in order, verifies success, and self-recovers from errors. Default steps driven by the agent:
+
+5. Install local bins
+6. Install OS packages
+7. Install `pyenv`
+8. Install `rbenv`
+9. Install `bun`
+10. Install `yarn`
+11. Install latest Node.js LTS with `nvm`
+12. Set up Fish plugins and prompt
+13. Install Nerd Fonts when appropriate
+14. Write Fish config
+15. Set default shell to Fish
+
+On an interactive terminal the wizard lets you toggle steps and package groups before anything runs, then shows a read-only confirmation screen. The wizard pre-seeds its selections from your flags and environment so forced-on or locked choices are clearly marked. The wizard output feeds the runbook — anything you deselect never appears in the plan the agent receives.
+
+### Auth flow
+
+After installing the AI CLIs, the installer checks whether each is already authenticated. Any already-authed CLI is used as-is. For any that are not, you are asked whether to authenticate now. The result determines which agent drives setup:
+
+- **Neither authenticated:** the installer exits with guidance to re-run after authenticating, or to use `--silent=<cli>` once a CLI is set up.
+- **One authenticated:** that CLI drives.
+- **Both authenticated:** you are prompted to choose which drives.
+
+In silent/unattended mode (`--silent`) the installer never installs or authenticates — it only verifies that a suitable CLI is ready and uses it.
 
 If a step fails during an interactive run, the installer offers `[R]etry / [S]kip / [A]bort` so you can recover without restarting from scratch. Package selections are saved to the resume state, so a re-run after failure restores your previous choices without re-prompting the wizard. Pass `--fresh` to discard saved state and restart cleanly.
 
@@ -154,7 +179,8 @@ If a step fails during an interactive run, the installer offers `[R]etry / [S]ki
 | Flag | Effect |
 | --- | --- |
 | `-h, --help` | Print help and exit |
-| `-s, --silent, --non-interactive` | Skip the wizard; run with flags/env/defaults |
+| `-s, --silent[=claude\|codex], --non-interactive` | Unattended AI install (requires an already-authenticated CLI); optionally pin the driver |
+| `--print-runbook` | Print the AI runbook for the resolved plan, then exit |
 | `-y, --yes` | Skip the confirm screen; proceed once the plan is resolved |
 | `--fresh` | Ignore saved resume state; start a clean run |
 | `--only=IDS` | Run only the listed step ids (comma-separated) |
@@ -169,6 +195,27 @@ If a step fails during an interactive run, the installer offers `[R]etry / [S]ki
 | `--version` | Print installer version and exit |
 
 `--only` and `--skip` are mutually exclusive, as are `--packages` and `--skip-packages`.
+
+#### Silent / unattended mode
+
+`--silent` (or `-s`, or `QUICK_INSTALL_SILENT=1`) runs unattended without the wizard. It assumes Claude Code and/or Codex are **already installed and authenticated** — it never installs or logs in during a silent run.
+
+- **`--silent`** (bare): tries Claude Code first; if unavailable or unauthenticated, falls back to Codex. If neither is ready, exits with an error.
+- **`--silent=claude`**: uses Claude Code exclusively; fails immediately if it is not installed and authenticated.
+- **`--silent=codex`**: uses Codex exclusively; fails immediately if it is not installed and authenticated.
+
+In bare `--silent` mode, if the first agent's run fails, the installer retries with the other authenticated candidate using the same idempotent runbook.
+
+Running with no terminal and without `--silent` is always an error — the installer exits with guidance rather than silently guessing at a mode.
+
+#### Sudo handling
+
+- **Interactive:** the installer runs `sudo -v` once (prompting via the terminal) and keeps the credential alive in the background so the agent does not need to re-prompt mid-run.
+- **Silent / unattended:** no sudo prompt is possible. Rely on cached credentials or passwordless sudo. On Linux, unattended installs that require root (e.g. changing the default shell) need passwordless sudo configured.
+
+#### `--print-runbook`
+
+Prints the runbook the installer would hand to the agent for the resolved plan, then exits — useful for inspecting or auditing what the agent will do before committing to a run.
 
 **Package selection syntax (`SEL`):** comma-separated group names (e.g. `dev-tools`) or `group:item` for a single package (e.g. `media:ffmpeg`). Available groups:
 
@@ -185,14 +232,20 @@ If a step fails during an interactive run, the installer offers `[R]etry / [S]ki
 **Examples:**
 
 ```bash
-# Silent install, skip Nerd Fonts
+# Unattended AI install using whichever CLI is authenticated, skip Nerd Fonts
 util/quick-install.sh --silent --no-fonts
+
+# Pin to Claude Code for an unattended run
+util/quick-install.sh --silent=claude
 
 # Install only the repo clone and OS packages steps
 util/quick-install.sh --only=prepare_and_clone_repo,install_os_packages
 
-# Silent install with a specific package subset
-util/quick-install.sh --silent --packages=core-utils,shell,network --no-fonts
+# Unattended install with a specific package subset driven by Codex
+util/quick-install.sh --silent=codex --packages=core-utils,shell,network --no-fonts
+
+# Preview the runbook before running
+util/quick-install.sh --print-runbook
 
 # See what steps are available
 util/quick-install.sh --list-steps
@@ -217,7 +270,7 @@ All existing env vars are still honored. Flags take precedence over them.
 - `NO_FONTS=1`: skip Nerd Fonts installation
 - `PF=/custom/path`: change the target installation path from the default `~/.leos-profiles`
 - `QUICK_INSTALL_STATE_FILE=/custom/file`: override the resume state file path
-- `QUICK_INSTALL_SILENT=1`: same as `--silent` (useful for CI environments)
+- `QUICK_INSTALL_SILENT=1`: same as bare `--silent` — unattended AI install with Claude-then-Codex fallback
 
 The script also applies a restrictive `umask` to avoid Fish completion permission issues and writes a resume-state file after each step.
 
@@ -306,10 +359,12 @@ If you do not want to use the full bootstrap flow, a minimal manual setup usuall
 
 - If remote bootstrap fails during SSH cloning, rerun with `USE_HTTPS=1` or pass `--https`.
 - If Fish reports missing tools such as `pyenv` or `rbenv`, the profile can silence those warnings with marker files like `~/.lp-nopyenv` and `~/.lp-norbenv`.
-- If a quick-install run is interrupted, rerun the installer and it will offer to continue from the failed step using the same package selections. In an interactive terminal each failing step also offers `[R]etry / [S]kip / [A]bort` inline.
+- If a quick-install run is interrupted, rerun the installer and it will pick up where the AI agent left off — prereq steps are idempotent and already-done steps are skipped. In an interactive terminal each failing prereq step also offers `[R]etry / [S]kip / [A]bort` inline.
 - To discard a saved partial run and start over, pass `--fresh`.
 - If Nerd Fonts are not wanted or you are running on a headless machine, use `NO_FONTS=1` or pass `--no-fonts`.
-- In CI or minimal containers where `/dev/tty` is unavailable, the wizard is skipped automatically and the installer runs non-interactively. Set `QUICK_INSTALL_SILENT=1` or pass `--silent` to make this explicit.
+- In CI or unattended environments, use `--silent[=claude|codex]`. A run with no terminal and no `--silent` flag is always an error — the installer will print guidance and exit rather than guessing at a mode. The `--silent` mode requires Claude Code or Codex to already be installed and authenticated.
+- If a silent run fails because neither CLI is authenticated, authenticate Claude Code (`claude auth login`) or Codex (`codex login`) on an interactive terminal first, then re-run with `--silent`.
+- On Linux, unattended (`--silent`) runs that require root (e.g. changing the default shell) need passwordless or pre-cached sudo since the installer cannot prompt for a password.
 
 ## License
 
