@@ -323,6 +323,12 @@ handle_immediate_flags() {
     list_packages
     exit 0
   fi
+  if [ -n "$OPT_PRINT_RUNBOOK" ]; then
+    # Resolve a default plan (flags already captured; no wizard) then print.
+    resolve_plan
+    generate_runbook "$(detect_os_key)"
+    exit 0
+  fi
 }
 
 # =============================================================================
@@ -1593,6 +1599,212 @@ set_default_shell_fish() {
   fi
   echo "Changing default shell to Fish..."
   chsh -s "$FISH_PATH"
+}
+
+# =============================================================================
+# §8b  Runbook generation
+#      detect_os_key / runbook_step_block / generate_runbook / --print-runbook
+# =============================================================================
+
+# Steps done deterministically in the prereq core — excluded from the runbook.
+PREREQ_STEPS="prepare_and_clone_repo install_min_toolchain install_ai_tools"
+
+# Complex / multi-command / state-sharing steps delegated via --exec-steps.
+DELEGATED_STEPS="setup_nvm_default_node setup_fish set_default_shell_fish"
+
+# Echo macos|apt|fedora|pacman using the same dispatch as install_os_packages.
+detect_os_key() {
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    echo macos
+  elif command -v apt-get >/dev/null 2>&1; then
+    echo apt
+  elif command -v dnf >/dev/null 2>&1 && is_fedora; then
+    echo fedora
+  elif command -v pacman >/dev/null 2>&1; then
+    echo pacman
+  else
+    echo macos
+  fi
+}
+
+# runbook_step_block <id> <os>
+# Emit one STEP block for the given step id on the given OS.
+# Inlined steps show exact commands; delegated steps show --exec-steps=.
+runbook_step_block() {
+  local id="$1" os="$2" label cmd already_done success_check
+
+  label="$(step_label "$id")"
+
+  # Determine if this step is delegated (show --exec-steps) or inlined.
+  if contains_word "$id" "$DELEGATED_STEPS"; then
+    # Group setup_nvm_default_node and setup_fish together when both are enabled,
+    # because setup_fish reads INSTALLED_NVM_VERSION set by setup_nvm_default_node.
+    if [ "$id" = "setup_nvm_default_node" ] && contains_word "setup_fish" "$STATE_ENABLED_STEPS"; then
+      # Emit a combined block for both nvm+fish; setup_fish block will be suppressed.
+      cmd="bash \"\$PF/util/quick-install.sh\" --exec-steps=setup_nvm_default_node,setup_fish"
+      already_done="nvm current >/dev/null 2>&1 && fish -c 'tide --version' >/dev/null 2>&1"
+      success_check="fish -c 'nvm current' && fish -c 'tide --version'"
+      printf 'STEP %s — %s\n' "$id" "$label"
+      printf '  Run exactly:\n    %s\n' "$cmd"
+      printf '  Also covers: setup_fish — Set up fish plugins and prompt\n'
+      printf '  Already-done check: %s\n' "$already_done"
+      printf '  Success check: %s\n\n' "$success_check"
+      return
+    elif [ "$id" = "setup_fish" ] && contains_word "setup_nvm_default_node" "$STATE_ENABLED_STEPS"; then
+      # Suppressed: already emitted as part of the nvm+fish combined block above.
+      return
+    else
+      # Delegated individually.
+      cmd="bash \"\$PF/util/quick-install.sh\" --exec-steps=${id}"
+    fi
+    case "$id" in
+      setup_fish)
+        already_done="fish -c 'tide --version' >/dev/null 2>&1"
+        success_check="fish -c 'tide --version'"
+        ;;
+      setup_nvm_default_node)
+        already_done="fish -c 'nvm current' >/dev/null 2>&1"
+        success_check="fish -c 'nvm current'"
+        ;;
+      set_default_shell_fish)
+        already_done="[ \"\$(basename \"\$SHELL\")\" = fish ]"
+        success_check="echo \$SHELL | grep -q fish"
+        ;;
+      *)
+        already_done="true  # inspect manually"
+        success_check="true  # inspect manually"
+        ;;
+    esac
+  else
+    # Inlined: emit the exact command for this step on this OS.
+    case "$id" in
+      install_os_packages)
+        case "$os" in
+          macos)
+            if pkg_skip_active; then
+              local _pkgs
+              _pkgs="$(pkg_filter_for_os macos "$(pkg_list_for_os macos)")"
+              cmd="brew tap heroku/brew && brew install ${_pkgs}"
+            else
+              cmd="brew tap heroku/brew && brew install bash coreutils diffutils ed ffmpeg findutils fish heroku imagemagick git gnu-indent gnu-sed gnu-tar gnu-which gnutls grep gawk gzip less nano node python rclone ruby smartmontools ssh-copy-id vim wget yt-dlp zsh"
+            fi
+            already_done="brew list bash >/dev/null 2>&1"
+            success_check="brew list fish >/dev/null 2>&1"
+            ;;
+          apt)
+            if pkg_skip_active; then
+              local _pkgs
+              _pkgs="$(pkg_filter_for_os apt "$(pkg_list_for_os apt)")"
+              cmd="sudo apt -y update && sudo apt -y upgrade && sudo apt -y install ${_pkgs}"
+            else
+              cmd="sudo apt -y update && sudo apt -y upgrade && sudo apt -y install bash build-essential clang coreutils diffutils ed ffmpeg findutils fish imagemagick gcc git grep gawk gzip less nano nodejs python-is-python3 rclone ruby smartmontools vim wget yt-dlp zsh"
+            fi
+            already_done="dpkg -l bash >/dev/null 2>&1"
+            success_check="dpkg -l fish | grep -q '^ii'"
+            ;;
+          fedora)
+            if pkg_skip_active; then
+              local _pkgs
+              _pkgs="$(pkg_filter_for_os fedora "$(remove_word_inline "$(pkg_list_for_os fedora)" ffmpeg)")"
+              cmd="sudo dnf -y update && sudo dnf -y group install development-tools && sudo dnf -y install ${_pkgs} && sudo dnf -y install ffmpeg"
+            else
+              cmd="sudo dnf -y update && sudo dnf -y group install development-tools && sudo dnf -y install bash coreutils diffutils ed findutils fish ImageMagick git grep gawk gzip less nano nodejs python-is-python3 rclone ruby smartmontools vim wget yt-dlp zsh && sudo dnf -y install ffmpeg"
+            fi
+            already_done="rpm -q bash >/dev/null 2>&1"
+            success_check="rpm -q fish"
+            ;;
+          pacman)
+            if pkg_skip_active; then
+              local _pkgs
+              _pkgs="$(pkg_filter_for_os pacman "$(pkg_list_for_os pacman)")"
+              cmd="sudo pacman -Syu --noconfirm && sudo pacman -S --noconfirm ${_pkgs}"
+            else
+              cmd="sudo pacman -Syu --noconfirm && sudo pacman -S --noconfirm base-devel bash coreutils diffutils ed ffmpeg findutils fish imagemagick git grep gawk gzip less nano nodejs npm python rclone ruby smartmontools vim wget yt-dlp zsh"
+            fi
+            already_done="pacman -Q bash >/dev/null 2>&1"
+            success_check="pacman -Q fish"
+            ;;
+        esac
+        ;;
+      install_local_bins)
+        cmd="mkdir -p \"\$HOME/.local/bin\" && curl -o \"\$HOME/.local/bin/rpatool\" https://raw.githubusercontent.com/shizmob/rpatool/master/rpatool && chmod u+x \"\$HOME/.local/bin/rpatool\""
+        already_done="[ -x \"\$HOME/.local/bin/rpatool\" ]"
+        success_check="[ -x \"\$HOME/.local/bin/rpatool\" ]"
+        ;;
+      install_pyenv)
+        cmd="git clone https://github.com/pyenv/pyenv.git \"\$HOME/.pyenv\" && (cd \"\$HOME/.pyenv\" && src/configure && make -C src)"
+        already_done="[ -d \"\$HOME/.pyenv\" ]"
+        success_check="[ -d \"\$HOME/.pyenv\" ] && \"\$HOME/.pyenv/bin/pyenv\" --version"
+        ;;
+      install_rbenv)
+        cmd="git clone https://github.com/rbenv/rbenv.git \"\$HOME/.rbenv\" && mkdir -p \"\$(\"\$HOME/.rbenv/bin/rbenv\" root)\"/plugins && git clone https://github.com/rbenv/ruby-build.git \"\$(\"\$HOME/.rbenv/bin/rbenv\" root)/plugins/ruby-build\""
+        already_done="[ -d \"\$HOME/.rbenv\" ]"
+        success_check="[ -d \"\$HOME/.rbenv\" ] && \"\$HOME/.rbenv/bin/rbenv\" --version"
+        ;;
+      install_bun)
+        cmd="curl -fsSL https://bun.com/install | bash"
+        already_done="command -v bun >/dev/null 2>&1"
+        success_check="bun --version"
+        ;;
+      install_yarn)
+        cmd="npm install --global yarn"
+        already_done="command -v yarn >/dev/null 2>&1"
+        success_check="yarn --version"
+        ;;
+      install_nerd_fonts)
+        cmd="git clone https://github.com/ryanoasis/nerd-fonts.git --depth=1 && (cd nerd-fonts && ./install.sh) && rm -rf nerd-fonts fonts"
+        already_done="[ -d \"\$HOME/.local/share/fonts\" ] && ls \"\$HOME/.local/share/fonts/\" | grep -qi nerd"
+        success_check="ls \"\$HOME/.local/share/fonts/\" | grep -qi nerd"
+        ;;
+      apply_fish_config)
+        cmd="mkdir -p \"\$HOME/.config/fish\" && printf '%s\\n' 'if status is-interactive' \"    source \\\"\$HOME/.leos-profiles/fish/start.fish\\\"\" '    set fish_greeting' 'end' > \"\$HOME/.config/fish/config.fish\""
+        already_done="[ -f \"\$HOME/.config/fish/config.fish\" ]"
+        success_check="grep -q leos-profiles \"\$HOME/.config/fish/config.fish\""
+        ;;
+      *)
+        cmd="bash \"\$PF/util/quick-install.sh\" --exec-steps=${id}"
+        already_done="true  # inspect manually"
+        success_check="true  # inspect manually"
+        ;;
+    esac
+  fi
+
+  printf 'STEP %s — %s\n' "$id" "$label"
+  printf '  Run exactly:\n    %s\n' "$cmd"
+  printf '  Already-done check: %s\n' "$already_done"
+  printf '  Success check: %s\n\n' "$success_check"
+}
+
+# generate_runbook <os>
+# Emit the full AI runbook for the resolved plan (STATE_ENABLED_STEPS / PKG_SKIP).
+# Preamble is verbatim from spec §4.1 with <os> and <PF> substituted.
+# Steps appear in STEP_IDS order; prereq steps are excluded.
+generate_runbook() {
+  local os="$1" id
+
+  # Preamble — verbatim from spec §4.1.
+  printf 'You are setting up this machine. Some steps may ALREADY be complete — this machine may be\n'
+  printf 'partially set up. Before running each step, check whether it is already done; if so,\n'
+  printf 'verify and move on. Every command below is safe to re-run (idempotent). Execute the plan\n'
+  printf 'IN ORDER. After each step verify it succeeded. If a command fails, diagnose and fix it\n'
+  printf 'using your full shell access, then continue. Do not improvise beyond making each step'"'"'s\n'
+  printf 'end-state match. Do not re-authenticate, change unrelated config, or install anything not\n'
+  printf 'listed. The target OS is %s. The repo is already cloned at %s.\n\n' "$os" "$PF"
+
+  # One block per enabled step not in the prereq core, in STEP_IDS order.
+  for id in "${STEP_IDS[@]}"; do
+    # Skip if not enabled.
+    if ! contains_word "$id" "$STATE_ENABLED_STEPS"; then
+      continue
+    fi
+    # Skip prereq-core steps.
+    if contains_word "$id" "$PREREQ_STEPS"; then
+      continue
+    fi
+    runbook_step_block "$id" "$os"
+  done
+
+  printf 'When all steps succeed (or were already complete), print: SETUP-COMPLETE.\n'
 }
 
 # =============================================================================

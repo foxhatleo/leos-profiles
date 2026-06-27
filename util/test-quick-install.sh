@@ -750,6 +750,24 @@ _t7_rc=0
 assert_eq "neither authed -> rc 10" "$_t7_rc" "10"
 
 # ---------------------------------------------------------------------------
+# Task 8: generate_runbook
+# ---------------------------------------------------------------------------
+printf '\n=== Task 8: generate_runbook ===\n'
+
+STATE_ENABLED_STEPS="install_os_packages install_bun setup_fish"
+PKG_SKIP=""
+RB="$(generate_runbook macos)"
+assert_contains "runbook has preamble" "$RB" "Some steps may ALREADY be complete"
+assert_contains "runbook inlines bun"  "$RB" "STEP install_bun"
+assert_contains "runbook delegates fish" "$RB" "--exec-steps=setup_fish"
+assert_contains "runbook ends sentinel" "$RB" "SETUP-COMPLETE"
+assert_eq "prereqs excluded" \
+  "$(printf '%s' "$RB" | grep -c 'STEP install_min_toolchain')" "0"
+
+# Reset state after task 8 tests
+_reset_state
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 printf '\n================================================\n'
