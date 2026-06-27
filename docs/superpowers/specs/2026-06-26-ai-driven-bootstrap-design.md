@@ -43,27 +43,32 @@ fallback.
 ```
 main:
   args_parse / capture_env / handle_immediate_flags / open_interaction_channel
-  resolve_plan (wizard or non-interactive) -> STATE_ENABLED_STEPS + PKG_SKIP   [unchanged]
 
-  decide DRIVE_MODE:
+  decide DRIVE_MODE (before the wizard, so it can lock prereqs on the AI path):
     - silent / no-TTY / no-network / --no-ai / agent-unavailable  -> DRIVE=deterministic
     - interactive                                                 -> DRIVE=ai (pending auth)
 
+  resolve_plan (wizard or non-interactive) -> STATE_ENABLED_STEPS + PKG_SKIP
+    - the wizard still lets the user customize WHICH steps/packages to set up; that
+      resolved plan is exactly what generate_runbook consumes (section 4).
+    - on the AI path the prereq steps (prepare_and_clone_repo, install_min_toolchain,
+      install_ai_tools) are shown locked-on, since the agent cannot run without them.
+
   if DRIVE = deterministic:
-     run the existing step loop (today's behavior)                 [unchanged]
+     run the existing step loop (today's behavior, fully customizable)   [unchanged]
      exit
 
   if DRIVE = ai:
-     run PREREQ steps deterministically:
-        prepare_and_clone_repo
-        install_min_toolchain        # brew (macOS) + node + npm
-        install_ai_tools             # npm i -g claude-code + codex  (moved up)
-     run AUTH flow (section 3)
+     run PREREQ steps deterministically, each SKIPPING work already present:
+        prepare_and_clone_repo        # existing guard: skip if repo already cloned
+        install_min_toolchain         # brew + node + npm; skip any already on PATH
+        install_ai_tools              # npm i -g; skip if both claude and codex present
+     run AUTH flow (section 3)         # skip login for any CLI already authenticated
         if neither authed -> print guidance (+ --silent hint) and exit 0
         else select DRIVER cli
      sudo_keepalive_start             # sudo -v + background loop (section 5)
-     RUNBOOK=$(generate_runbook)      # from the resolved plan minus prereqs (section 4)
-     run_agent "$DRIVER" "$RUNBOOK"   # bypass mode (section 4)
+     RUNBOOK=$(generate_runbook)      # from the wizard's resolved plan, minus prereqs
+     run_agent "$DRIVER" "$RUNBOOK"   # bypass mode; preamble notes steps may be pre-done
      sudo_keepalive_stop
      report result; leave resume-state intact if the agent aborted
 ```
@@ -71,10 +76,14 @@ main:
 ### New / changed step ids
 
 - **`install_min_toolchain`** (new): the minimal path to a working `npm` — brew on macOS
-  then `node`; on Linux the OS package manager's `nodejs`+`npm`. Idempotent; overlaps
-  harmlessly with the later full `install_os_packages`.
+  then `node`; on Linux the OS package manager's `nodejs`+`npm`. **Idempotent and
+  skip-aware**: probes `find_brew_bin` / `command -v node` / `command -v npm` first and
+  installs only what is missing (a machine that already has brew+npm does nothing here).
+  Overlaps harmlessly with the later full `install_os_packages`.
 - **`install_ai_tools`** moves into the prereq core (runs before the AI driver), instead
-  of mid-sequence. Its step body is unchanged.
+  of mid-sequence. Its body gains a skip-aware guard: if both `claude` and `codex` are
+  already on PATH it skips the `npm i -g` (the wizard can force a refresh/update). Config
+  seeding (copy-if-absent) is unchanged.
 - The remaining `STEP_IDS` are unchanged; on the AI path they are executed *by the agent*
   via the runbook rather than by the bash loop.
 
@@ -103,11 +112,15 @@ classic path.
 
 ## 3. Auth flow
 
-After `install_ai_tools`:
+After `install_ai_tools`. Each CLI's existing auth state is detected first and a CLI that
+is already authenticated is treated as authed without re-prompting:
 
 ```
-ask "Authenticate Claude Code now? [Y/n]"  -> if yes: run `claude` login (interactive, via fd 3)
-ask "Authenticate Codex now? [Y/n]"        -> if yes: run `codex login`  (interactive, via fd 3)
+for cli in claude codex:
+   if cli_is_authenticated(cli):        # detect via the CLI's own status/config (§3.1)
+      mark authed; print "<cli> already authenticated — skipping login"
+   else:
+      ask "Authenticate <cli> now? [Y/n]" -> if yes: run that CLI's interactive login (fd 3)
 
 authed = {claude?, codex?}
 case authed in
@@ -123,6 +136,14 @@ Auth uses each CLI's own interactive login (browser / device / API-key). Login I
 routed through fd 3 so it works even under `curl | bash`. The script never handles or
 stores credentials itself.
 
+### 3.1 Auth detection (`cli_is_authenticated`)
+
+A best-effort, non-interactive probe per CLI, confirmed against current docs at build
+time (e.g. a `claude`/`codex` status subcommand, or presence of the CLI's credential file
+such as `~/.codex/auth.json` / the Claude Code credentials store). If detection is
+unreliable for a CLI, fall back to asking — but default the prompt to "skip" when a
+credential file is present, so an already-set-up machine is not nagged.
+
 ---
 
 ## 4. Runbook generation + agent invocation
@@ -134,21 +155,29 @@ resolved package list), so it cannot drift from what the deterministic engine wo
 Structure:
 
 ```
-You are setting up this machine. Execute the plan below EXACTLY and IN ORDER.
-After each step, verify it succeeded. If a command fails, diagnose and fix it using
-your full shell access, then continue. Do not improvise beyond making each step's
-end-state match. Do not re-authenticate, change unrelated config, or install anything
-not listed. The target OS is <os>. The repo is already cloned at <PF>.
+You are setting up this machine. Some steps may ALREADY be complete — this machine may be
+partially set up. Before running each step, check whether it is already done; if so,
+verify and move on. Every command below is safe to re-run (idempotent). Execute the plan
+IN ORDER. After each step, verify it succeeded. If a command fails, diagnose and fix it
+using your full shell access, then continue. Do not improvise beyond making each step's
+end-state match. Do not re-authenticate, change unrelated config, or install anything not
+listed. The target OS is <os>. The repo is already cloned at <PF>.
 
 STEP <id> — <label>
   Run exactly:
     <exact command(s) for this step on this OS>
-  Success check: <how to verify>
+  Already-done check: <cheap idempotency probe — skip the run if this passes>
+  Success check: <how to verify the end state>
 
 ... (one block per enabled step not already done in the prereq core) ...
 
-When all steps succeed, print: SETUP-COMPLETE.
+When all steps succeed (or were already complete), print: SETUP-COMPLETE.
 ```
+
+Because the runbook is built only from the **wizard's resolved plan**, any step or package
+group the user deselects in the setup UI simply never appears in the runbook — the agent
+cannot set up something the user opted out of. The wizard is the single control surface for
+"what to install/set up" on both the deterministic and AI paths.
 
 Command sourcing per step, to guarantee fidelity:
 
@@ -244,6 +273,13 @@ sudo_keepalive_stop:
   the deterministic path; interactive + authed selects AI.
 - **Auth-flow tests**: neither-authed exits 0 with guidance; one-authed sets driver; both
   prompts for driver. (CLI logins are stubbed/mocked — no real auth in tests.)
+- **Idempotency / skip-aware tests**: with brew+node+npm stubbed as present,
+  `install_min_toolchain` installs nothing; with `claude`+`codex` stubbed present,
+  `install_ai_tools` skips `npm i -g`; with `cli_is_authenticated` stubbed true, the auth
+  flow skips that CLI's login prompt.
+- **Wizard→runbook tests**: deselecting a step or package group in the resolved plan
+  removes exactly its block/entries from the generated runbook (the UI adjusts the
+  runbook); prereq steps stay locked-on on the AI path.
 - **No real agent run in CI / tests** — agent invocation is behind a seam that tests can
   stub (e.g. `RUN_AGENT_CMD` override) so we assert the command line built, not a live run.
 - Existing suite + shellcheck + bash 3.2 gate stay green.
