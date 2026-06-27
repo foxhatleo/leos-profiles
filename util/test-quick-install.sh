@@ -768,6 +768,178 @@ assert_eq "prereqs excluded" \
 _reset_state
 
 # ---------------------------------------------------------------------------
+# Task 9: runbook/step parity drift guard
+# ---------------------------------------------------------------------------
+printf '\n=== Task 9: runbook/step parity drift guard ===\n'
+
+# §9a  Every enabled non-prereq step appears exactly once in the runbook.
+# Prereq steps (prepare_and_clone_repo, install_min_toolchain,
+# install_ai_tools) must appear zero times.
+#
+# Counting strategy: match "^STEP <id> " (the STEP header line, space-anchored
+# so set_default_shell_fish's exec-steps command line is not double-counted)
+# OR "Also covers: <id> " (for setup_fish when grouped with nvm).
+# This avoids false double-counts from the --exec-steps=<id> command text.
+_t9_enabled=""
+for _s in "${STEP_IDS[@]}"; do
+  append_unique_word _t9_enabled "$_s"
+done
+STATE_ENABLED_STEPS="$_t9_enabled"
+PKG_SKIP=""
+_t9_rb="$(generate_runbook macos)"
+
+_t9_prereqs=" prepare_and_clone_repo install_min_toolchain install_ai_tools "
+for _s in $STATE_ENABLED_STEPS; do
+  _t9_n="$(printf '%s' "$_t9_rb" | grep -cE "(^STEP $_s |Also covers: $_s )" || true)"
+  case "$_t9_prereqs" in
+    *" $_s "*)
+      assert_eq "runbook parity: prereq $_s appears 0 times" "$_t9_n" "0"
+      ;;
+    *)
+      assert_eq "runbook parity: step $_s appears 1 time" "$_t9_n" "1"
+      ;;
+  esac
+done
+_reset_state
+
+# §9b  Package token parity: the runbook's install line contains exactly the
+# packages that pkg_list_for_os (and pkg_filter_for_os) would produce.
+# Strategy: extract every word token from the runbook's install command, then
+# compare sorted sets with the sorted resolved package list.  Any dropped or
+# added token fails the assertion — non-tautological because the runbook's
+# literal list is separate from the registry computation.
+
+# Helper: extract package tokens from an install command line in the runbook.
+# For fedora: the runbook puts all packages on one line as
+#   "... && sudo dnf -y install <main-pkgs> && sudo dnf -y install ffmpeg"
+# We strip the trailing " && sudo dnf -y install ffmpeg" suffix first so that
+# the greedy "##" strips correctly to the main package list, then add ffmpeg.
+_runbook_pkg_tokens() {
+  local rb="$1" os="$2" install_line tokens
+  case "$os" in
+    macos)
+      install_line="$(printf '%s' "$rb" | grep 'brew install')"
+      tokens="${install_line##*brew install}"
+      ;;
+    apt)
+      install_line="$(printf '%s' "$rb" | grep 'apt -y install')"
+      tokens="${install_line##*apt -y install}"
+      ;;
+    fedora)
+      # One long line: "... dnf -y install <main> && sudo dnf -y install ffmpeg"
+      # Strip trailing ffmpeg append, extract main tokens, then add ffmpeg.
+      install_line="$(printf '%s' "$rb" | grep 'dnf -y install')"
+      local _main_part
+      _main_part="${install_line% && sudo dnf -y install ffmpeg*}"
+      tokens="${_main_part##*dnf -y install } ffmpeg"
+      ;;
+    pacman)
+      install_line="$(printf '%s' "$rb" | grep 'pacman -S --noconfirm')"
+      tokens="${install_line##*pacman -S --noconfirm}"
+      ;;
+  esac
+  # Normalize whitespace
+  printf '%s' "$tokens" | tr -s ' \t' ' ' | sed 's/^ //;s/ $//'
+}
+
+# Compare sorted word lists for parity; report first-direction diffs on fail.
+_assert_pkg_parity() {
+  local test_name="$1" resolved="$2" from_runbook="$3"
+  local rs fs
+  rs="$(printf '%s\n' $resolved | sort | tr '\n' ' ' | sed 's/ $//')"
+  fs="$(printf '%s\n' $from_runbook | sort | tr '\n' ' ' | sed 's/ $//')"
+  if [ "$rs" = "$fs" ]; then
+    _pass "$test_name"
+  else
+    local only_reg only_rb
+    only_reg="$(comm -23 <(printf '%s\n' $resolved | sort) <(printf '%s\n' $from_runbook | sort) 2>/dev/null || echo '?')"
+    only_rb="$(comm -13 <(printf '%s\n' $resolved | sort) <(printf '%s\n' $from_runbook | sort) 2>/dev/null || echo '?')"
+    _fail "$test_name" "drift: only in registry=[${only_reg}] only in runbook=[${only_rb}]"
+  fi
+}
+
+for _os in macos apt fedora pacman; do
+  STATE_ENABLED_STEPS="install_os_packages"
+  PKG_SKIP=""
+  _t9_rb="$(generate_runbook "$_os")"
+  _t9_resolved="$(pkg_list_for_os "$_os")"
+  _t9_rb_tokens="$(_runbook_pkg_tokens "$_t9_rb" "$_os")"
+  _assert_pkg_parity "runbook pkg parity: $_os" "$_t9_resolved" "$_t9_rb_tokens"
+  _reset_state
+done
+
+# §9c  nvm+fish grouping: both enabled → combined block appears exactly once;
+# setup_fish is NOT emitted as a standalone block.
+# Only setup_fish enabled → standalone --exec-steps=setup_fish block.
+
+STATE_ENABLED_STEPS="setup_nvm_default_node setup_fish"
+PKG_SKIP=""
+_t9_rb="$(generate_runbook macos)"
+
+# Combined block must appear once
+_t9_n="$(printf '%s' "$_t9_rb" | grep -c 'exec-steps=setup_nvm_default_node,setup_fish' || true)"
+assert_eq "nvm+fish: combined --exec-steps block appears once" "$_t9_n" "1"
+
+# Standalone setup_fish block must NOT appear when nvm is also enabled.
+# A standalone block has --exec-steps=setup_fish with no other id after it
+# (the combined block has ",setup_fish" at the end which is different).
+_t9_n="$(printf '%s' "$_t9_rb" | grep -cE 'exec-steps=setup_fish([^_,]|$)' || true)"
+assert_eq "nvm+fish: no standalone setup_fish block when both enabled" "$_t9_n" "0"
+
+_reset_state
+
+# fish-only: standalone block appears
+STATE_ENABLED_STEPS="setup_fish"
+PKG_SKIP=""
+_t9_rb="$(generate_runbook macos)"
+_t9_n="$(printf '%s' "$_t9_rb" | grep -cE 'exec-steps=setup_fish([^_,]|$)' || true)"
+assert_eq "fish-only: standalone --exec-steps=setup_fish appears" "$_t9_n" "1"
+_reset_state
+
+# §9d  PKG_SKIP path: skipping media group removes those tokens from the
+# runbook install line; a non-skipped token (bash) remains.
+
+STATE_ENABLED_STEPS="install_os_packages"
+PKG_SKIP=""
+for _m in $(pkg_group_members media); do
+  append_unique_word PKG_SKIP "$_m"
+done
+# PKG_SKIP now contains canonical ids: ffmpeg imagemagick yt-dlp
+
+for _os in macos apt; do
+  _t9_rb="$(generate_runbook "$_os")"
+  _t9_rb_tokens="$(_runbook_pkg_tokens "$_t9_rb" "$_os")"
+
+  # Each media package (resolved for this OS) must be ABSENT from the install line
+  for _m in $(pkg_group_members media); do
+    _resolved_m="$(pkg_resolve "$_os" "$_m")"
+    for _rm in $_resolved_m; do
+      case " $_t9_rb_tokens " in
+        *" $_rm "*)
+          _fail "pkg_skip: $_rm absent from $_os runbook after media skip" \
+            "'$_rm' still present in runbook install line"
+          ;;
+        *) _pass "pkg_skip: $_rm absent from $_os runbook after media skip" ;;
+      esac
+    done
+  done
+
+  # A non-skipped package (bash) must remain present
+  _bash_pkg="$(pkg_resolve "$_os" bash)"
+  case " $_t9_rb_tokens " in
+    *" $_bash_pkg "*)
+      _pass "pkg_skip: bash still present in $_os runbook after media skip"
+      ;;
+    *)
+      _fail "pkg_skip: bash still present in $_os runbook after media skip" \
+        "'$_bash_pkg' unexpectedly absent from runbook install line"
+      ;;
+  esac
+done
+
+_reset_state
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 printf '\n================================================\n'
