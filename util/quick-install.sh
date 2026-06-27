@@ -114,6 +114,8 @@ OPT_NO_FONTS=""
 OPT_HTTPS=""
 OPT_STATE_FILE=""
 OPT_EXEC_STEPS=""
+OPT_SILENT_DRIVER=""
+OPT_PRINT_RUNBOOK=""
 # Immediate (short-circuit) actions; handle_immediate_flags acts on these.
 OPT_HELP=""
 OPT_VERSION=""
@@ -149,8 +151,11 @@ packages and confirm before anything runs. With no terminal (e.g. piped) or with
 
 OPTIONS:
   -h, --help                 Show this help and exit
-  -s, --silent,
+  -s, --silent[=claude|codex],
       --non-interactive      Skip the wizard; run the resolved plan with defaults
+                             Optionally drive non-interactive steps via an AI CLI
+                             (requires an already-authenticated claude or codex CLI)
+      --print-runbook        Print the AI runbook for the resolved plan, then exit
   -y, --yes                  Don't show the confirm screen; proceed once resolved
       --fresh                Ignore any saved resume state; start a clean run
       --only=IDS             Run ONLY these steps (comma-separated step ids)
@@ -198,7 +203,17 @@ args_parse() {
 
     case "$arg" in
       -h|--help) OPT_HELP=1 ;;
-      -s|--silent|--non-interactive) OPT_SILENT=1 ;;
+      -s|--non-interactive) OPT_SILENT=1 ;;
+      --silent)
+        OPT_SILENT=1
+        if [ "$has_val" -eq 1 ]; then
+          OPT_SILENT_DRIVER="$val"
+          case "$OPT_SILENT_DRIVER" in
+            claude|codex) ;;
+            *) printf 'Error: --silent driver must be claude or codex\n' >&2; args_synopsis; exit 2 ;;
+          esac
+        fi
+        ;;
       -y|--yes) OPT_YES=1 ;;
       --fresh) OPT_FRESH=1 ;;
       --no-fonts) OPT_NO_FONTS=1 ;;
@@ -230,6 +245,7 @@ args_parse() {
         if [ "$has_val" -eq 0 ]; then val="$2"; shift; fi
         OPT_EXEC_STEPS="$val"
         ;;
+      --print-runbook) OPT_PRINT_RUNBOOK=1 ;;
       --)
         shift
         break

@@ -87,6 +87,8 @@ QUICK_INSTALL_SOURCED=1 source "$INSTALLER" 2>/dev/null
 # Reset all OPT_* vars to a clean slate before each args_parse call.
 _reset_opts() {
   OPT_SILENT=""
+  OPT_SILENT_DRIVER=""
+  OPT_PRINT_RUNBOOK=""
   OPT_YES=""
   OPT_FRESH=""
   OPT_ONLY=""
@@ -600,6 +602,24 @@ case "$_exec_fail_out" in
   PASS) _pass "exec_steps_run returns first failure code, attempts all" ;;
   *)    _fail "exec_steps_run returns first failure code, attempts all" "got: ${_exec_fail_out#FAIL: }" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# Task 2: --silent=driver + --print-runbook
+# ---------------------------------------------------------------------------
+printf '\n=== Task 2: --silent driver + --print-runbook ===\n'
+
+_reset_opts; args_parse --silent
+assert_eq "bare --silent sets flag"   "$OPT_SILENT" "1"
+assert_eq "bare --silent no driver"   "$OPT_SILENT_DRIVER" ""
+_reset_opts; args_parse --silent=codex
+assert_eq "--silent=codex flag"       "$OPT_SILENT" "1"
+assert_eq "--silent=codex driver"     "$OPT_SILENT_DRIVER" "codex"
+_rc=0
+( _reset_opts; args_parse --silent=bogus ) >/dev/null 2>&1 || _rc=$?
+if [ "$_rc" -eq 2 ]; then _pass "--silent=bogus rejected"
+else _fail "--silent=bogus rejected" "expected exit 2, got $_rc"; fi
+_reset_opts; args_parse --print-runbook
+assert_eq "--print-runbook flag"      "$OPT_PRINT_RUNBOOK" "1"
 
 # ---------------------------------------------------------------------------
 # Summary
