@@ -940,6 +940,59 @@ done
 _reset_state
 
 # ---------------------------------------------------------------------------
+# Task 10: run_agent + run_agent_with_fallback
+# ---------------------------------------------------------------------------
+printf '\n=== Task 10: run_agent + run_agent_with_fallback ===\n'
+
+# run_agent: exact argv for claude and codex (RUN_AGENT_CMD seam)
+_t10_out=$(
+  _AGENT_ARGV=""
+  RUN_AGENT_CMD() { _AGENT_ARGV="$*"; return 0; }
+  run_agent claude "RB-TEXT"
+  printf '%s' "$_AGENT_ARGV"
+)
+assert_eq "claude argv" "$_t10_out" "claude -p RB-TEXT --dangerously-skip-permissions"
+
+_t10_out=$(
+  _AGENT_ARGV=""
+  RUN_AGENT_CMD() { _AGENT_ARGV="$*"; return 0; }
+  run_agent codex "RB-TEXT"
+  printf '%s' "$_AGENT_ARGV"
+)
+assert_eq "codex argv" "$_t10_out" \
+  "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check RB-TEXT"
+
+# run_agent: unknown driver -> exit 2
+_t10_rc=0
+( RUN_AGENT_CMD() { return 0; }
+  run_agent bogus "RB-TEXT" ) >/dev/null 2>&1 || _t10_rc=$?
+assert_eq "unknown driver exits 2" "$_t10_rc" "2"
+
+# run_agent_with_fallback: first driver fails, OPT_SILENT_DRIVER empty -> fallback to other
+_t10_fallback=$(
+  _CALLS=""
+  run_agent() { _CALLS="$_CALLS $1"; [ "$1" = claude ] && return 7; return 0; }
+  cli_is_installed() { return 0; }
+  cli_is_authenticated() { return 0; }
+  DRIVER=claude OPT_SILENT_DRIVER=""
+  run_agent_with_fallback "RB-TEXT" >/dev/null 2>&1
+  _rc=$?
+  printf 'calls=%s rc=%d' "$_CALLS" "$_rc"
+)
+assert_eq "fallback: calls+rc on first-fail" "$_t10_fallback" "calls= claude codex rc=0"
+
+# run_agent_with_fallback: OPT_SILENT_DRIVER set -> no fallback, returns failure code
+_t10_nofallback_rc=0
+(
+  run_agent() { [ "$1" = claude ] && return 5; return 0; }
+  cli_is_installed() { return 0; }
+  cli_is_authenticated() { return 0; }
+  DRIVER=claude OPT_SILENT_DRIVER=claude
+  run_agent_with_fallback "RB-TEXT"
+) >/dev/null 2>&1 || _t10_nofallback_rc=$?
+assert_eq "explicit driver: no fallback returns failure" "$_t10_nofallback_rc" "5"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 printf '\n================================================\n'

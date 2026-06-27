@@ -998,6 +998,39 @@ run_auth_flow() {
 }
 
 # =============================================================================
+# §3c  Agent invocation (run_agent / run_agent_with_fallback)
+# =============================================================================
+
+# run_agent <driver> <runbook>
+# Build the exact argv for the given driver and run it (or RUN_AGENT_CMD if set).
+run_agent() {
+  local driver="$1" runbook="$2"
+  case "$driver" in
+    claude) set -- claude -p "$runbook" --dangerously-skip-permissions ;;
+    codex)  set -- codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$runbook" ;;
+    *) printf "${RED}Unknown driver: %s${NORMAL}\n" "$driver" >&2; return 2 ;;
+  esac
+  if command -v RUN_AGENT_CMD >/dev/null 2>&1; then RUN_AGENT_CMD "$@"; return $?; fi
+  "$@"
+}
+
+# run_agent_with_fallback <runbook>
+# Try DRIVER; on failure, if OPT_SILENT_DRIVER is set return the failure code
+# (no fallback). Otherwise try the other authed candidate if available.
+run_agent_with_fallback() {
+  local runbook="$1" first="$DRIVER" other rc
+  run_agent "$first" "$runbook" && return 0
+  rc=$?
+  [ -n "$OPT_SILENT_DRIVER" ] && return "$rc"        # explicit driver: no fallback
+  case "$first" in claude) other=codex ;; codex) other=claude ;; *) return "$rc" ;; esac
+  if cli_is_installed "$other" && cli_is_authenticated "$other"; then
+    printf "${YELLOW}%s run failed; retrying with %s...${NORMAL}\n" "$first" "$other" >&2
+    run_agent "$other" "$runbook"; return $?
+  fi
+  return "$rc"
+}
+
+# =============================================================================
 # §8  Step bodies (unchanged behavior)
 # =============================================================================
 
