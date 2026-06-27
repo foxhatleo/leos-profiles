@@ -869,10 +869,13 @@ run_step() {
 # Internal: run specific step bodies deterministically (used by the AI runbook
 # and by tests). Comma-separated ids, executed in given order.
 exec_steps_run() {
-  local ids="$1" id rc=0 oldifs="$IFS"
+  local ids="$1" id rc=0 _r oldifs="$IFS"
   IFS=,
   for id in $ids; do
-    run_step "$id" || rc=$?
+    # Attempt every listed step (matching the deterministic loop's behavior),
+    # but return the FIRST non-zero status, preserving its real exit code.
+    run_step "$id"; _r=$?
+    if [ "$_r" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=$_r; fi
   done
   IFS="$oldifs"
   return "$rc"

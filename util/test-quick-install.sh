@@ -581,6 +581,26 @@ case "$_exec_dispatch_out" in
   *)    _fail "exec_steps_run dispatches in order" "got: ${_exec_dispatch_out#FAIL:}" ;;
 esac
 
+# exec_steps_run attempts every id but returns the FIRST failure's exit code.
+# Stub run_step: id "a" fails with 7, id "b" succeeds. Run in a subshell so the
+# stub does not leak into later tests. We assert (a) both ids were attempted and
+# (b) the returned code is 7 (the first failure), not the last status.
+_exec_fail_out=$(
+  _EXEC_CALLS=""
+  run_step() { _EXEC_CALLS="$_EXEC_CALLS $1"; if [ "$1" = "a" ]; then return 7; fi; return 0; }
+  exec_steps_run "a,b"
+  _rc=$?
+  if [ "$_EXEC_CALLS" = " a b" ] && [ "$_rc" -eq 7 ]; then
+    printf 'PASS'
+  else
+    printf 'FAIL: calls=[%s] rc=%s' "$_EXEC_CALLS" "$_rc"
+  fi
+)
+case "$_exec_fail_out" in
+  PASS) _pass "exec_steps_run returns first failure code, attempts all" ;;
+  *)    _fail "exec_steps_run returns first failure code, attempts all" "got: ${_exec_fail_out#FAIL: }" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
