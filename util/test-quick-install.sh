@@ -681,6 +681,43 @@ _rc=0; ( select_mode ) >/dev/null 2>&1 || _rc=$?
 assert_eq "no tty no silent -> exit 2" "$_rc" "2"
 
 # ---------------------------------------------------------------------------
+# Task 6: resolve_silent_driver
+# ---------------------------------------------------------------------------
+printf '\n=== Task 6: resolve_silent_driver ===\n'
+
+# Each case is run in a subshell with locally-defined stubs so the overrides
+# do not persist into subsequent tests (bash 3.2 safe: no function-scoped
+# overrides; subshell isolation is the only reliable containment).
+
+# bare silent: both installed, only codex authed -> picks codex
+_t6_out=$(
+  cli_is_installed() { return 0; }
+  cli_is_authenticated() { [ "$1" = codex ]; }
+  OPT_SILENT_DRIVER=""; DRIVER=""
+  resolve_silent_driver
+  printf '%s' "$DRIVER"
+)
+assert_eq "bare silent picks authed codex" "$_t6_out" "codex"
+
+# explicit claude driver, unauthed -> fail (rc 1)
+_rc=0
+( cli_is_installed() { return 0; }
+  cli_is_authenticated() { [ "$1" = codex ]; }
+  OPT_SILENT_DRIVER="claude"; DRIVER=""
+  resolve_silent_driver ) >/dev/null 2>&1 || _rc=$?
+assert_eq "explicit claude unauthed -> fail" "$_rc" "1"
+
+# explicit codex driver, authed -> ok, DRIVER set
+_t6_out=$(
+  cli_is_installed() { return 0; }
+  cli_is_authenticated() { [ "$1" = codex ]; }
+  OPT_SILENT_DRIVER="codex"; DRIVER=""
+  resolve_silent_driver
+  printf '%s' "$DRIVER"
+)
+assert_eq "explicit codex authed -> ok" "$_t6_out" "codex"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 printf '\n================================================\n'

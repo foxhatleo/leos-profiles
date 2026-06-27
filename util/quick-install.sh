@@ -923,6 +923,24 @@ cli_is_authenticated() {
   esac
 }
 
+# Resolve which AI CLI drives silent/unattended setup. Sets DRIVER and returns 0
+# on success, or prints an error to STDERR and returns 1 if no usable driver.
+# Never installs or logs in. Candidates: $OPT_SILENT_DRIVER if set, else
+# "claude codex" in that order (word-split; bash 3.2 idiom).
+resolve_silent_driver() {
+  local candidates c
+  if [ -n "$OPT_SILENT_DRIVER" ]; then candidates="$OPT_SILENT_DRIVER"; else candidates="claude codex"; fi
+  for c in $candidates; do
+    if cli_is_installed "$c" && cli_is_authenticated "$c"; then DRIVER="$c"; return 0; fi
+  done
+  if [ -n "$OPT_SILENT_DRIVER" ]; then
+    printf "${RED}%s is not installed/authenticated.${NORMAL}\n" "$OPT_SILENT_DRIVER" >&2
+  else
+    printf "${RED}Neither Claude nor Codex is set up; cannot run unattended.${NORMAL}\n" >&2
+  fi
+  return 1
+}
+
 # =============================================================================
 # §8  Step bodies (unchanged behavior)
 # =============================================================================
