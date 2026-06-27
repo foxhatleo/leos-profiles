@@ -1765,6 +1765,17 @@ open_interaction_channel() {
   fi
 }
 
+# Decide the run mode based on OPT_SILENT and TTY_OPEN.
+# Sets MODE=silent|interactive and returns 0, or prints guidance to stderr
+# and returns 2 when no TTY is available and --silent was not requested.
+select_mode() {
+  if [ -n "$OPT_SILENT" ]; then MODE=silent; return 0; fi
+  if [ "${TTY_OPEN:-0}" -eq 1 ]; then MODE=interactive; return 0; fi
+  printf "${RED}No terminal available for interactive setup.${NORMAL}\n" >&2
+  printf "Re-run with --silent[=claude|codex] for an unattended install (needs an authed CLI).\n" >&2
+  return 2
+}
+
 # True if fd 3 is a usable terminal for interactive reads.
 tty_available() {
   [ "$TTY_OPEN" -eq 1 ]

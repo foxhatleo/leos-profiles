@@ -670,6 +670,17 @@ assert_exit "npm present -> no need"  1 'min_toolchain_needs_npm'
 PATH="$_oldpath"; rm -rf "$_stubdir"
 
 # ---------------------------------------------------------------------------
+# Task 5: select_mode
+# ---------------------------------------------------------------------------
+printf '\n=== Task 5: select_mode ===\n'
+
+OPT_SILENT=1; TTY_OPEN=0; MODE=""; select_mode; assert_eq "silent flag -> silent" "$MODE" "silent"
+OPT_SILENT="";  TTY_OPEN=1; MODE=""; select_mode; assert_eq "tty -> interactive"  "$MODE" "interactive"
+OPT_SILENT="";  TTY_OPEN=0; MODE=""
+_rc=0; ( select_mode ) >/dev/null 2>&1 || _rc=$?
+assert_eq "no tty no silent -> exit 2" "$_rc" "2"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 printf '\n================================================\n'
