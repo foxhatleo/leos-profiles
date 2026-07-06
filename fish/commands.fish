@@ -60,11 +60,42 @@ function mkcdir
 end
 
 # Clean up and quit the terminal.
+#
+# Options (matched anywhere in the arguments, any combination):
+#   keep-history     Preserve history files instead of clearing them.
+#   non-interactive  Skip package-manager confirmation prompts (brew's ask-mode
+#                    via HOMEBREW_NO_ASK; apt/dnf checkups already run unattended).
+#                    Sudo still asks for a password once up front — unless sudo is
+#                    passwordless or you are root, in which case bye runs silently.
+#   no-exit          Do everything except quitting the terminal at the end.
 function bye
-  puts "Bye!"
-  sudo echo '' > /dev/null
+  set -l keep_history
+  set -l non_interactive
+  set -l no_exit
+  string match -qr 'keep-history'    -- $argv; and set keep_history 1
+  string match -qr 'non-interactive' -- $argv; and set non_interactive 1
+  string match -qr 'no-exit'         -- $argv; and set no_exit 1
 
-  if string match -r ".*keep-history.*" $argv >/dev/null
+  puts "Bye!"
+
+  # Ask for sudo once up front, then keep the credential warm for the whole run
+  # so nothing below prompts for a password again. Run the keep-alive as an
+  # external `fish -c` process (NOT a backgrounded function — fish does not set
+  # $last_pid for those), so we can actually stop it on the way out.
+  set -l sudo_keepalive_pid
+  if sudo -v
+    fish -c 'while true; sudo -n true 2>/dev/null; or break; sleep 50; end' &
+    set sudo_keepalive_pid $last_pid
+  end
+
+  # In non-interactive mode, disable Homebrew's default ask-mode prompt. Use
+  # function scope so it shadows (never clobbers) any existing value and clears
+  # itself when `bye` returns; brew still inherits it as an exported var.
+  if set -q non_interactive[1]
+    set -fx HOMEBREW_NO_ASK 1
+  end
+
+  if set -q keep_history[1]
     puts "History will be preserved."
   end
 
@@ -83,7 +114,7 @@ function bye
     dnf-checkup
   end
 
-  if not string match -r ".*keep-history.*" $argv >/dev/null
+  if not set -q keep_history[1]
     puts "Clear all history files.."
     clear-history
   end
@@ -94,7 +125,13 @@ function bye
     killall Finder Dock SystemUIServer
   end
 
-  if string match -r ".*no-exit.*" $argv
+  # Stop the sudo keep-alive. HOMEBREW_NO_ASK is function-scoped, so it clears
+  # itself when we return — no manual env cleanup needed.
+  if set -q sudo_keepalive_pid[1]
+    kill $sudo_keepalive_pid 2>/dev/null
+  end
+
+  if set -q no_exit[1]
     puts "Skipped exiting."
   else if command -sq /mnt/c/Windows/system32/wsl.exe
     /mnt/c/Windows/system32/wsl.exe --shutdown
@@ -154,6 +191,7 @@ complete -c mkcdir -f -x -a "(__fish_complete_directories)" -d "Directory to cre
 complete -c bye -f -d "Clean up and quit the terminal"
 complete -c bye -f -a "no-exit" -d "Do not quit the terminal"
 complete -c bye -f -a "keep-history" -d "Preserve history files"
+complete -c bye -f -a "non-interactive" -d "Run upgrades without confirmation prompts"
 
 # Upgrade Leo's profiles
 complete -c upgrade-leos-profiles -f -d "Upgrade Leo's profiles"

@@ -5,9 +5,12 @@
 
 if type -q apt-get
     function apt-checkup
-        sudo apt update -y
-        sudo apt upgrade -y
-        sudo apt autoremove --purge -y
-        sudo apt clean -y
+        # DEBIAN_FRONTEND must be set on the sudo command line: sudo's env_reset
+        # strips it from the parent shell's environment otherwise. This keeps the
+        # already-unattended (-y) checkup from stalling on dpkg/debconf prompts.
+        sudo DEBIAN_FRONTEND=noninteractive apt update -y
+        sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y
+        sudo DEBIAN_FRONTEND=noninteractive apt autoremove --purge -y
+        sudo DEBIAN_FRONTEND=noninteractive apt clean -y
     end
 end
