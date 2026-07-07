@@ -44,8 +44,8 @@ You are setting up this machine. Read this whole file first, then execute it.
 - **`sudo`** — on Linux, run `sudo -v` once early so later package steps don't stall; the human may be
   prompted for their password. macOS Homebrew needs no `sudo`.
 - **Target path:** clone into `~/.leos-profiles`. **Repo:** `foxhatleo/leos-profiles`.
-- When every selected step has succeeded or was already complete, print `SETUP-COMPLETE` on its own
-  line, then tell the human to restart their shell (and note if the default shell was changed).
+- When every selected step has succeeded or was already complete, tell the human what you did and to
+  restart their shell (and note if the default shell was changed).
 
 ---
 
@@ -369,8 +369,7 @@ sudo chsh -s "$ZSH_PATH" "$USER"   # sudo uses the primed credential, avoiding a
 
 Re-run each selected step's success check. If all pass (or were already complete), print a concise
 **summary of what you actually did this run** — which steps ran, what was installed or upgraded, what
-was skipped and why (already present, deselected, or gated off), and any self-corrections you made —
-then print `SETUP-COMPLETE` on its own line.
+was skipped and why (already present, deselected, or gated off), and any self-corrections you made.
 
 Then tell the human:
 
