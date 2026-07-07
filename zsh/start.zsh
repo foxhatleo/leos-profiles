@@ -33,8 +33,9 @@ __leos_brew_prefix() {
   "$b" --prefix
 }
 
-export LEOS_PROFILES=$HOME/.leos-profiles
-export LEOS_PROFILES_ZSH=$LEOS_PROFILES/zsh
+# Shell-internal (not exported into child environments — matches fish's `set`).
+typeset -g LEOS_PROFILES=$HOME/.leos-profiles
+typeset -g LEOS_PROFILES_ZSH=$LEOS_PROFILES/zsh
 
 # Source zsh/<name>.zsh; warn unless mode is "optional".
 entry() {

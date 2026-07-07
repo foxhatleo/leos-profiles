@@ -67,7 +67,13 @@ bye() {
     sudo_keepalive_pid=$!
   fi
 
-  [[ -n $non_interactive ]] && export HOMEBREW_NO_ASK=1
+  # Shadow HOMEBREW_NO_ASK for this run, restoring any pre-existing value on the
+  # way out (zsh has no function-local export, so save/restore by hand).
+  local __hna_saved=0 __hna_prev
+  if [[ -n $non_interactive ]]; then
+    [[ -n ${HOMEBREW_NO_ASK+x} ]] && { __hna_saved=1; __hna_prev=$HOMEBREW_NO_ASK; }
+    export HOMEBREW_NO_ASK=1
+  fi
   [[ -n $keep_history    ]] && puts "History will be preserved."
 
   (( $+functions[brew-checkup] )) && { puts "Doing brew checkup...";     brew-checkup; }
@@ -87,7 +93,9 @@ bye() {
   fi
 
   [[ -n $sudo_keepalive_pid ]] && kill $sudo_keepalive_pid 2>/dev/null
-  [[ -n $non_interactive ]] && unset HOMEBREW_NO_ASK
+  if [[ -n $non_interactive ]]; then
+    if (( __hna_saved )); then export HOMEBREW_NO_ASK=$__hna_prev; else unset HOMEBREW_NO_ASK; fi
+  fi
 
   if [[ -n $no_exit ]]; then
     puts "Skipped exiting."

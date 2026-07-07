@@ -1,6 +1,6 @@
 "$schema" = 'https://starship.rs/config-schema.json'
 add_newline = true
-format = "$directory$git_branch$git_status$fill$nodejs$python$ruby$rust$golang$java$php$cmd_duration$jobs$line_break$character"
+format = "$directory$git_branch$git_status$fill$status$username$hostname$direnv$nodejs$python$ruby$rust$golang$java$php$cmd_duration$jobs$line_break$character"
 
 [fill]
 symbol = " "
@@ -22,6 +22,25 @@ disabled = false
 [cmd_duration]
 min_time = 500
 format = "[$duration]($style) "
+
+# Tide "status" right-prompt item — numeric exit code on failure.
+[status]
+disabled = false
+format = "[$status]($style) "
+
+# Tide "context" right-prompt item — user@host, shown for root / SSH sessions.
+[username]
+show_always = false
+format = "[$user]($style)@"
+
+[hostname]
+ssh_only = true
+format = "[$hostname]($style) "
+
+# Tide "direnv" right-prompt item.
+[direnv]
+disabled = false
+format = "[$symbol$loaded/$allowed]($style) "
 
 [nodejs]
 format = "[$symbol($version )]($style)"

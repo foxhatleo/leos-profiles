@@ -18,8 +18,10 @@ autoload -Uz compinit
   fi
 }
 
-_leos_plugin zsh-autosuggestions/zsh-autosuggestions.zsh
+# fzf-tab must load after compinit but BEFORE plugins that wrap ZLE widgets
+# (zsh-autosuggestions), per its docs. Syntax highlighting stays last.
 _leos_plugin fzf-tab/fzf-tab.plugin.zsh
+_leos_plugin zsh-autosuggestions/zsh-autosuggestions.zsh
 _leos_plugin zsh-syntax-highlighting/zsh-syntax-highlighting.zsh   # MUST be last
 
 # Custom completions (after compinit).
