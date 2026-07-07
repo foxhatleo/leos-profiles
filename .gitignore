@@ -1,10 +1,72 @@
-.DS_Store
-ssh-shortcuts.zsh
-__pycache__/
-*.pyc
+# ---- Project-specific ----
 _*
-*.txt
 *.bak
 verify-quick-install-packages-report.md
 quick-install.state
 .omc/
+.ai/
+docs/
+ssh-shortcuts.zsh
+
+# ---- macOS ----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+Icon?
+
+# ---- Linux ----
+*~
+.directory
+.Trash-*
+
+# ---- Windows ----
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---- Editors / IDEs ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+
+# ---- Logs & temp files ----
+*.log
+*.tmp
+*.temp
+*.pid
+*.seed
+*.pid.lock
+
+# ---- Archives ----
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+
+# ---- Env / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Python (in case of helper scripts) ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- Node (in case of tooling) ----
+node_modules/
+npm-debug.log*
+
+# ---- Misc text/scratch ----
+*.txt
