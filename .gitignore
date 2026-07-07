@@ -1,8 +1,6 @@
 # ---- Project-specific ----
 _*
 *.bak
-verify-quick-install-packages-report.md
-quick-install.state
 .omc/
 .ai/
 docs/
