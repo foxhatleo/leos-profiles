@@ -1,7 +1,7 @@
 # Leo's Profiles — Quick Install
 
 This document *is* the installer. It is a runbook for an AI coding agent to set up a machine with
-Leo's Profiles (a Fish-shell dev environment). There is no script to run — an agent reads this file
+Leo's Profiles (a Zsh dev environment). There is no script to run — an agent reads this file
 and does the work.
 
 ---
@@ -78,19 +78,19 @@ default below. Anything the human deselects is simply never executed.
    - Install `bun`
    - Install global `yarn`
    - Install global `pnpm`
-   - Install latest Node.js LTS via `nvm.fish`
-   - Set up Fish plugins + Tide prompt
+   - Install **fnm** + latest Node.js LTS
+   - Set up zsh plugins + Starship prompt
    - Install Nerd Fonts *(default off on a headless/server machine — see the desktop gate)*
-   - Write `~/.config/fish/config.fish`
-   - Set the default shell to Fish
+   - Write `~/.zshrc`
+   - Set the default shell to zsh
 
 5. **Which package groups?** (default: **all checked**, only relevant if "Install OS packages" is on)
    — multi-select: `core-utils`, `shell`, `dev-tools`, `languages`, `media`, `network`, `system`.
 
 **Dependency rule (enforce silently):** some steps need earlier ones. If the human selects a step but
 deselects its prerequisite, run the prerequisite anyway:
-- local bins, Fish config → need the repo cloned (always happens in the prereq core)
-- global `yarn`/`pnpm`, Fish plugins, Node LTS, default-shell → need OS packages (they rely on `node`/`fish`)
+- local bins, zsh config → need the repo cloned (always happens in the prereq core)
+- global `yarn`/`pnpm`, zsh plugins, Node LTS, default-shell → need OS packages (they rely on `node`/`zsh`)
 
 ---
 
@@ -203,7 +203,7 @@ git clone git@github.com:foxhatleo/leos-profiles.git ~/.leos-profiles
 # otherwise HTTPS:
 git clone https://github.com/foxhatleo/leos-profiles ~/.leos-profiles
 ```
-**Success check:** `~/.leos-profiles/fish/start.fish` exists.
+**Success check:** `~/.leos-profiles/zsh/start.zsh` exists.
 
 ---
 
@@ -228,32 +228,32 @@ of this file). If all groups are selected, use the full list verbatim:
 - **macOS:**
   ```bash
   brew tap heroku/brew
-  brew install bash coreutils diffutils ed ffmpeg findutils fish heroku imagemagick git gnu-indent gnu-sed gnu-tar gnu-which gnutls grep gawk gzip less nano node python rclone ruby smartmontools ssh-copy-id vim wget yt-dlp zsh
+  brew install bash coreutils diffutils ed ffmpeg findutils fzf heroku imagemagick git gnu-indent gnu-sed gnu-tar gnu-which gnutls grep gawk gzip less nano node python rclone ruby smartmontools ssh-copy-id vim wget yt-dlp zsh
   ```
-  Success: `brew list fish`
+  Success: `brew list zsh`
 - **Debian/Ubuntu (apt):**
   ```bash
   sudo apt -y update && sudo DEBIAN_FRONTEND=noninteractive apt -y upgrade
-  sudo DEBIAN_FRONTEND=noninteractive apt -y install bash build-essential clang coreutils diffutils ed ffmpeg findutils fish imagemagick gcc git grep gawk gzip less nano nodejs python-is-python3 rclone ruby smartmontools vim wget yt-dlp zsh
+  sudo DEBIAN_FRONTEND=noninteractive apt -y install bash build-essential clang coreutils diffutils ed ffmpeg findutils fzf imagemagick gcc git grep gawk gzip less nano nodejs python-is-python3 rclone ruby smartmontools vim wget yt-dlp zsh
   ```
-  Success: `dpkg -l fish | grep -q '^ii'`
+  Success: `dpkg -l zsh | grep -q '^ii'`
 - **Fedora (dnf):**
   ```bash
   sudo dnf -y update
   sudo dnf -y group install development-tools
   rpm -q rpmfusion-free-release >/dev/null 2>&1 || sudo dnf -y install "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
-  sudo dnf -y install bash coreutils diffutils ed findutils fish ImageMagick git grep gawk gzip less nano nodejs python-unversioned-command rclone ruby smartmontools vim wget yt-dlp zsh
+  sudo dnf -y install bash coreutils diffutils ed findutils fzf ImageMagick git grep gawk gzip less nano nodejs python-unversioned-command rclone ruby smartmontools vim wget yt-dlp zsh
   # ffmpeg via RPM Fusion (swap the stripped -free build if present):
   if rpm -q ffmpeg-free >/dev/null 2>&1; then sudo dnf -y swap ffmpeg-free ffmpeg --allowerasing; else sudo dnf -y install ffmpeg; fi
   ```
-  Success: `rpm -q fish`
+  Success: `rpm -q zsh`
 - **Arch (pacman):**
   ```bash
   sudo pacman -Syu --noconfirm
-  sudo pacman -S --noconfirm base-devel bash coreutils diffutils ed ffmpeg findutils fish imagemagick git grep gawk gzip less nano nodejs npm python rclone ruby smartmontools vim wget yt-dlp zsh
+  sudo pacman -S --noconfirm base-devel bash coreutils diffutils ed ffmpeg findutils fzf imagemagick git grep gawk gzip less nano nodejs npm python rclone ruby smartmontools vim wget yt-dlp zsh
   ```
-  Success: `pacman -Q fish`
-- **Already-done check (any OS):** these installs are idempotent. The per-OS "Success" query (fish
+  Success: `pacman -Q zsh`
+- **Already-done check (any OS):** these installs are idempotent. The per-OS "Success" query (zsh
   present) is a cheap proxy; if you cannot confirm the *entire* selected set is installed, just re-run
   the install command — re-running is safe and cheap.
 
@@ -290,47 +290,39 @@ npm install --global pnpm
 ```
 - **Already-done / success:** `command -v pnpm && pnpm --version`
 
-### 8. Install latest Node.js LTS via nvm.fish
-First ensure fisher + `nvm.fish` are installed (idempotent), then install the LTS and pin it as the
-default:
+### 8. Install fnm + latest Node.js LTS
+Install fnm (fast Node version manager), then the latest LTS, and pin it as the default:
 ```bash
-fish -c "curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher"
-fish -c "fisher install jorgebucaran/nvm.fish"
-fish -c "nvm install lts"
-# pin the installed version as the default (erase any stale pin if none is active):
-fish -c 'if set -l v (nvm current 2>/dev/null); and test -n "$v"; and test "$v" != none; set -U nvm_default_version $v; else; set -Ue nvm_default_version; end'
+command -v fnm >/dev/null 2>&1 || { command -v brew >/dev/null 2>&1 && brew install fnm; } \
+  || curl -fsSL https://fnm.vercel.app/install | bash
+# make fnm available in THIS shell for the install below:
+[ -d "$HOME/.local/share/fnm" ] && export PATH="$HOME/.local/share/fnm:$PATH"
+eval "$(fnm env)" 2>/dev/null || true
+fnm install --lts
+fnm default "$(fnm current)"
 ```
-- **Already-done / success:** `fish -c 'nvm current'` prints a version (not `none`).
+- **Already-done / success:** `fnm current` prints a version (not `none`). fnm reads `.nvmrc` /
+  `.node-version` and (via `--use-on-cd`, wired in the zsh config) auto-switches per directory.
 
-### 9. Set up Fish plugins and Tide prompt
-Install the plugin set and configure Tide **exactly**. This block bootstraps fisher itself, so it is
-self-contained even when step 8 (Node LTS) was not selected:
+### 9. Set up zsh plugins and Starship prompt
+Install Starship, clone the zsh plugins into the repo, and fetch the iTerm2 zsh integration. This step
+is self-contained (it needs nothing from the fnm/Node step):
 ```bash
-fish -c "curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher"
-fish -c "fisher install jorgebucaran/nvm.fish"
-fish -c "fisher install PatrickF1/fzf.fish"
-fish -c "fisher install franciscolourenco/done"
-fish -c "fisher install decors/fish-colored-man"
-fish -c "fisher install gazorby/fish-abbreviation-tips"
-fish -c "fisher install jorgebucaran/autopair.fish"
-fish -c "fisher install IlanCosman/tide@v6"
-fish -c "fisher install lgathy/google-cloud-sdk-fish-completion"
-fish -c "tide configure --auto --style=Rainbow --prompt_colors='True color' --show_time=No --rainbow_prompt_separators=Angled --powerline_prompt_heads=Sharp --powerline_prompt_tails=Flat --powerline_prompt_style='Two lines, character' --prompt_connection=Dotted --powerline_right_prompt_frame=No --prompt_connection_andor_frame_color=Light --prompt_spacing=Sparse --icons='Few icons' --transient=No"
-fish -c "fish_update_completions"
-curl -LsS https://iterm2.com/shell_integration/fish -o "$HOME/.iterm2_shell_integration.fish"
-# Reduce Tide icons that conflict with IntelliJ terminals:
-fish -c "set -U tide_distrobox_icon"
-fish -c "set -U tide_gcloud_icon"
-fish -c "set -U tide_kubectl_icon"
-fish -c "set -U tide_private_mode_icon"
-fish -c "set -U tide_python_icon"
-fish -c "set -U tide_terraform_icon"
-fish -c "set -U tide_right_prompt_items status cmd_duration context jobs direnv node python rustc java php ruby go"
-fish -c "set -U fish_key_bindings fish_default_key_bindings"
-# reconcile the default-node pin so a fish-only run (step 8 skipped) still sets it when a node is active:
-fish -c 'if set -l v (nvm current 2>/dev/null); and test -n "$v"; and test "$v" != none; set -U nvm_default_version $v; else; set -Ue nvm_default_version; end'
+# Starship prompt (package where available, else the official installer):
+command -v starship >/dev/null 2>&1 || { command -v brew >/dev/null 2>&1 && brew install starship; } \
+  || sudo apt-get -y install starship 2>/dev/null || sudo dnf -y install starship 2>/dev/null \
+  || sudo pacman -S --noconfirm starship 2>/dev/null \
+  || curl -fsSL https://starship.rs/install.sh | sh -s -- -y
+# Plain clone-and-source plugins into the repo-managed dir (idempotent):
+mkdir -p ~/.leos-profiles/zsh/plugins
+for repo in zsh-users/zsh-autosuggestions zsh-users/zsh-syntax-highlighting zsh-users/zsh-completions Aloxaf/fzf-tab; do
+  dst=~/.leos-profiles/zsh/plugins/"${repo##*/}"
+  [ -d "$dst" ] || git clone --depth=1 "https://github.com/$repo" "$dst"
+done
+# iTerm2 zsh shell integration:
+curl -LsS https://iterm2.com/shell_integration/zsh -o "$HOME/.iterm2_shell_integration.zsh"
 ```
-- **Already-done / success:** `fish -c 'tide --version'`
+- **Already-done / success:** `command -v starship && [ -d ~/.leos-profiles/zsh/plugins/zsh-syntax-highlighting ]`
 
 ### 10. Install Nerd Fonts
 **Desktop gate:** run only on a desktop. macOS always counts as desktop; on Linux, only if any of
@@ -343,28 +335,33 @@ rm -rf "$tmp"
 ```
 - **Already-done / success:** a Nerd font is present — macOS: `ls ~/Library/Fonts 2>/dev/null | grep -qi nerd`; Linux: `ls ~/.local/share/fonts 2>/dev/null | grep -qi nerd`.
 
-### 11. Write Fish config
-Write `~/.config/fish/config.fish` so the profile loads on interactive shells:
+### 11. Write zsh config
+Write `~/.zshrc` (loads the profile on interactive shells) and a minimal `~/.zshenv`:
 ```bash
-mkdir -p ~/.config/fish
-# Append our loader only if absent — never overwrite an existing user config:
-grep -q 'leos-profiles/fish/start.fish' ~/.config/fish/config.fish 2>/dev/null || cat >> ~/.config/fish/config.fish <<'EOF'
-if status is-interactive
-    source "$HOME/.leos-profiles/fish/start.fish"
-    set fish_greeting
-end
+# ~/.zshrc — append our loader only if absent; never overwrite an existing user config:
+grep -q 'leos-profiles/zsh/start.zsh' ~/.zshrc 2>/dev/null || cat >> ~/.zshrc <<'EOF'
+if [[ -o interactive ]]; then
+    source "$HOME/.leos-profiles/zsh/start.zsh"
+fi
+EOF
+# ~/.zshenv — minimal PATH for login/non-interactive shells:
+grep -q 'leos-profiles zshenv' ~/.zshenv 2>/dev/null || cat >> ~/.zshenv <<'EOF'
+# leos-profiles zshenv
+typeset -U path
+path=("$HOME/.local/bin" $path)
+export PATH
 EOF
 ```
-- **Already-done / success:** `grep -q leos-profiles ~/.config/fish/config.fish`
+- **Already-done / success:** `grep -q leos-profiles ~/.zshrc`
 
-### 12. Set the default shell to Fish
+### 12. Set the default shell to zsh
 ```bash
-FISH_PATH="$(command -v fish)"
-[ -n "$FISH_PATH" ] || { echo "fish is not installed — run the OS packages step first"; exit 1; }
-grep -qxF "$FISH_PATH" /etc/shells || echo "$FISH_PATH" | sudo tee -a /etc/shells >/dev/null
-sudo chsh -s "$FISH_PATH" "$USER"   # sudo uses the primed credential, avoiding an interactive password prompt
+ZSH_PATH="$(command -v zsh)"
+[ -n "$ZSH_PATH" ] || { echo "zsh is not installed — run the OS packages step first"; exit 1; }
+grep -qxF "$ZSH_PATH" /etc/shells || echo "$ZSH_PATH" | sudo tee -a /etc/shells >/dev/null
+sudo chsh -s "$ZSH_PATH" "$USER"   # sudo uses the primed credential, avoiding an interactive password prompt
 ```
-- **Already-done / success:** the login shell is fish — `getent passwd "$USER" 2>/dev/null | cut -d: -f7 | grep -q fish` (Linux) or `dscl . -read /Users/"$USER" UserShell 2>/dev/null | grep -q fish` (macOS). (`$SHELL` only reflects the change on next login.)
+- **Already-done / success:** the login shell is zsh — `getent passwd "$USER" 2>/dev/null | cut -d: -f7 | grep -q zsh` (Linux) or `dscl . -read /Users/"$USER" UserShell 2>/dev/null | grep -q zsh` (macOS). (`$SHELL` only reflects the change on next login; macOS often defaults to zsh already.)
 
 ---
 
@@ -377,7 +374,7 @@ then print `SETUP-COMPLETE` on its own line.
 
 Then tell the human:
 
-- Restart your terminal (or log out/in) to load Fish and the new profile. If the default shell was
+- Restart your terminal (or log out/in) to load zsh and the new profile. If the default shell was
   changed, it applies on the next login.
 - To also set up Leo's own flavors of AI coding environments, see
   [`foxhatleo/leos-claude`](https://github.com/foxhatleo/leos-claude) (Claude Code) and
@@ -393,8 +390,8 @@ members per group:
 | Group | Canonical members |
 | --- | --- |
 | `core-utils` | bash coreutils diffutils ed findutils gnu-indent gnu-sed gnu-tar gnu-which grep gawk gzip less nano |
-| `shell` | fish zsh |
-| `dev-tools` | git vim build-essential clang gcc base-devel |
+| `shell` | zsh |
+| `dev-tools` | git vim fzf build-essential clang gcc base-devel |
 | `languages` | node python ruby |
 | `media` | ffmpeg imagemagick yt-dlp |
 | `network` | wget rclone gnutls heroku ssh-copy-id |
