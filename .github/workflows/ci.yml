@@ -9,33 +9,17 @@ permissions:
   contents: read
 
 jobs:
-  fish-syntax:
-    name: Fish syntax (gating)
+  zsh-syntax:
+    name: Zsh syntax (gating)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install fish
-        run: sudo apt-get update && sudo apt-get install -y fish
-      - name: Syntax-check fish files
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh
+      - name: Syntax-check zsh files
         run: |
           rc=0
-          for f in fish/*.fish fish/path/*.fish; do
-            fish -n "$f" || { echo "syntax error: $f"; rc=1; }
+          for f in zsh/*.zsh zsh/path/*.zsh; do
+            zsh -n "$f" || { echo "syntax error: $f"; rc=1; }
           done
           exit "$rc"
-
-  fish-format:
-    name: Fish formatting (informational)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install fish
-        run: sudo apt-get update && sudo apt-get install -y fish
-      - name: Report fish_indent drift (non-gating)
-        run: |
-          # Style only — these files predate a fish_indent convention. Reported
-          # for visibility; does not fail the build.
-          for f in fish/*.fish fish/path/*.fish; do
-            fish_indent --check "$f" || echo "would reformat: $f"
-          done

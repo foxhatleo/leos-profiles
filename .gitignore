@@ -5,6 +5,7 @@ _*
 .ai/
 docs/
 ssh-shortcuts.zsh
+zsh/plugins/
 
 # ---- macOS ----
 .DS_Store
