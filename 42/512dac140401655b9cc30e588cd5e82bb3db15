@@ -1,0 +1,30 @@
+zsh/entries.zsh
+  s_17d037018b71ea::t_26c1a336ac7788 15
+zsh/path/zoxide.zsh
+  s_17d037018b71ea::t_a61117c415ccef 1-3
+zsh/env.zsh
+  s_17d037018b71ea::t_f6eabd450945b0 16-21
+QUICK-INSTALL.md
+  s_17d037018b71ea::t_3a508010b6458c 402
+  s_17d037018b71ea::t_adad4179159df7 416-421
+  s_17d037018b71ea::t_2a0bbde5d7aefe 231
+  s_17d037018b71ea::t_e589f33f936b3d 237-244
+  s_17d037018b71ea::t_1b233918951d1f 262
+  s_17d037018b71ea::t_0a7c9ced84b121 252-254
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "42512dac140401655b9cc30e588cd5e82bb3db15",
+  "prompts": {},
+  "sessions": {
+    "s_17d037018b71ea": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "875a9a20-4f61-4fe5-baed-50b697e2296f",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": null
+    }
+  }
+}
