@@ -228,13 +228,13 @@ of this file). If all groups are selected, use the full list verbatim:
 - **macOS:**
   ```bash
   brew tap heroku/brew
-  brew install bash coreutils diffutils ed ffmpeg findutils fzf heroku imagemagick git gnu-indent gnu-sed gnu-tar gnu-which gnutls grep gawk gzip less nano node python rclone ruby smartmontools ssh-copy-id vim wget yt-dlp zsh
+  brew install bash coreutils diffutils direnv ed ffmpeg findutils fzf heroku imagemagick git gnu-indent gnu-sed gnu-tar gnu-which gnutls grep gawk gzip less nano node python rclone ruby smartmontools ssh-copy-id vim wget yt-dlp zsh
   ```
   Success: `brew list zsh`
 - **Debian/Ubuntu (apt):**
   ```bash
   sudo apt -y update && sudo DEBIAN_FRONTEND=noninteractive apt -y upgrade
-  sudo DEBIAN_FRONTEND=noninteractive apt -y install bash build-essential clang coreutils diffutils ed ffmpeg findutils fzf imagemagick gcc git grep gawk gzip less nano nodejs python-is-python3 rclone ruby smartmontools vim wget yt-dlp zsh
+  sudo DEBIAN_FRONTEND=noninteractive apt -y install bash build-essential clang coreutils diffutils direnv ed ffmpeg findutils fzf imagemagick gcc git grep gawk gzip less nano nodejs python-is-python3 rclone ruby smartmontools vim wget yt-dlp zsh
   ```
   Success: `dpkg -l zsh | grep -q '^ii'`
 - **Fedora (dnf):**
@@ -242,7 +242,7 @@ of this file). If all groups are selected, use the full list verbatim:
   sudo dnf -y update
   sudo dnf -y group install development-tools
   rpm -q rpmfusion-free-release >/dev/null 2>&1 || sudo dnf -y install "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
-  sudo dnf -y install bash coreutils diffutils ed findutils fzf ImageMagick git grep gawk gzip less nano nodejs python-unversioned-command rclone ruby smartmontools vim wget yt-dlp zsh
+  sudo dnf -y install bash coreutils diffutils direnv ed findutils fzf ImageMagick git grep gawk gzip less nano nodejs python-unversioned-command rclone ruby smartmontools vim wget yt-dlp zsh
   # ffmpeg via RPM Fusion (swap the stripped -free build if present):
   if rpm -q ffmpeg-free >/dev/null 2>&1; then sudo dnf -y swap ffmpeg-free ffmpeg --allowerasing; else sudo dnf -y install ffmpeg; fi
   ```
@@ -250,7 +250,7 @@ of this file). If all groups are selected, use the full list verbatim:
 - **Arch (pacman):**
   ```bash
   sudo pacman -Syu --noconfirm
-  sudo pacman -S --noconfirm base-devel bash coreutils diffutils ed ffmpeg findutils fzf imagemagick git grep gawk gzip less nano nodejs npm python rclone ruby smartmontools vim wget yt-dlp zsh
+  sudo pacman -S --noconfirm base-devel bash coreutils diffutils direnv ed ffmpeg findutils fzf imagemagick git grep gawk gzip less nano nodejs npm python rclone ruby smartmontools vim wget yt-dlp zsh
   ```
   Success: `pacman -Q zsh`
 - **Already-done check (any OS):** these installs are idempotent. The per-OS "Success" query (zsh
@@ -390,7 +390,7 @@ members per group:
 | --- | --- |
 | `core-utils` | bash coreutils diffutils ed findutils gnu-indent gnu-sed gnu-tar gnu-which grep gawk gzip less nano |
 | `shell` | zsh |
-| `dev-tools` | git vim fzf build-essential clang gcc base-devel |
+| `dev-tools` | git vim fzf direnv build-essential clang gcc base-devel |
 | `languages` | node python ruby |
 | `media` | ffmpeg imagemagick yt-dlp |
 | `network` | wget rclone gnutls heroku ssh-copy-id |
