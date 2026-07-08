@@ -1,0 +1,23 @@
+zsh/path/fzf.zsh
+  s_17d037018b71ea::t_4822df3e1f45b5 1-3
+zsh/path/gnu.zsh
+  s_17d037018b71ea::t_e11a4f8c3365dc 14-18
+zsh/entries.zsh
+  s_17d037018b71ea::t_d625d32d250a78 14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d486af4ee1b45ef546853a600073322195d5ee38",
+  "prompts": {},
+  "sessions": {
+    "s_17d037018b71ea": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "875a9a20-4f61-4fe5-baed-50b697e2296f",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Wenhao \"Leo\" Liang <36321327+foxhatleo@users.noreply.github.com>"
+    }
+  }
+}
