@@ -13,7 +13,12 @@ export LS_COLORS='di=36:ln=1;31:so=37:pi=1;33:ex=35:bd=37:cd=37:su=37:sg=37:tw=3
 export EDITOR=nano
 
 # Colorful output (GNU ls/grep; on macOS GNU tools are placed on PATH by path/gnu.zsh)
-alias ls='ls --color=auto'
+if command -v eza >/dev/null 2>&1; then
+  alias ls='eza --color=auto --group-directories-first'
+else
+  alias ls='ls --color=auto'
+fi
+command -v bat >/dev/null 2>&1 && alias cat='bat --style=plain --paging=never'
 alias grep='grep --color=auto'
 alias fgrep='fgrep --color=auto'
 alias egrep='egrep --color=auto'
