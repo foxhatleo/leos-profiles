@@ -1,0 +1,26 @@
+fish/path/apt.fish
+  s_b0bfa9f76e214d::t_b787049e19f6e6 8-14
+fish/commands.fish
+  s_b0bfa9f76e214d::t_20a306b39fbd59 82-84,87,91-93,95
+  s_b0bfa9f76e214d::t_cad4f66a58b715 128-129
+  s_b0bfa9f76e214d::t_3aba76b1b767ad 63-65,70,72-78,81,85-86,88-89,94,96-98,117,130-134
+  s_b0bfa9f76e214d::t_c50c00a497f788 66-69
+  s_b0bfa9f76e214d::t_785c32eda75928 194
+  s_b0bfa9f76e214d::t_bdafdaa3591bb6 90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "67f823a68b3634dbe263f98f154de0b48908246e",
+  "prompts": {},
+  "sessions": {
+    "s_b0bfa9f76e214d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e6e2fcc-431e-4e38-8cb6-ad106e9aa3cf",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Wenhao \"Leo\" Liang <36321327+foxhatleo@users.noreply.github.com>"
+    }
+  }
+}
