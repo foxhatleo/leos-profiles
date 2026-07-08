@@ -27,14 +27,20 @@ alias egrep='egrep --color=auto'
 HISTFILE=$HOME/.zsh_history
 HISTSIZE=100000
 SAVEHIST=100000
-setopt SHARE_HISTORY HIST_IGNORE_ALL_DUPS HIST_IGNORE_SPACE HIST_REDUCE_BLANKS INC_APPEND_HISTORY
+setopt SHARE_HISTORY HIST_IGNORE_ALL_DUPS HIST_IGNORE_SPACE HIST_REDUCE_BLANKS INC_APPEND_HISTORY HIST_VERIFY EXTENDED_HISTORY
 
 # Interactive behavior
-setopt AUTO_CD EXTENDED_GLOB INTERACTIVE_COMMENTS NO_BEEP
+setopt AUTO_CD EXTENDED_GLOB INTERACTIVE_COMMENTS NO_BEEP NO_CASE_GLOB NUMERIC_GLOB_SORT
 
 # Completion styling (compinit itself runs in interactive.zsh)
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'   # case-insensitive
 zstyle ':completion:*' menu select
+zstyle ':completion:*' list-colors ${(s.:.)LS_COLORS}        # colorize menu; also picked up by fzf-tab
+zstyle ':completion:*' rehash true                           # find newly-installed executables without a restart
+zstyle ':completion:*' accept-exact '*(N)'
+zstyle ':completion:*' use-cache on
+mkdir -p "$HOME/.zsh/cache"
+zstyle ':completion:*' cache-path "$HOME/.zsh/cache"
 
 # iTerm2 shell integration
 [[ -e $HOME/.iterm2_shell_integration.zsh ]] && source "$HOME/.iterm2_shell_integration.zsh"
