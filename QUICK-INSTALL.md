@@ -269,9 +269,13 @@ of this file). If all groups are selected, use the full list verbatim:
 ### 3. Install pyenv
 ```bash
 [ -d ~/.pyenv ] || git clone https://github.com/pyenv/pyenv.git ~/.pyenv
+# Build pyenv's optional native extension. `make` no-ops when already up to date, so this is
+# safe to re-run; keep it UNCONDITIONAL — pyenv works uncompiled, so a `pyenv --version` gate
+# here would skip the build on every fresh clone (the extension would never get built).
 (cd ~/.pyenv && src/configure && make -C src)
 ```
-- **Already-done:** `[ -d ~/.pyenv ]` · **Success:** `~/.pyenv/bin/pyenv --version`
+- **Already-done:** `~/.pyenv/bin/pyenv --version` succeeds (better than `[ -d ~/.pyenv ]`, which is
+  also true for an empty/half-cloned dir and would skip the re-clone) · **Success:** `~/.pyenv/bin/pyenv --version`
 
 ### 4. Install rbenv
 ```bash
@@ -279,7 +283,9 @@ of this file). If all groups are selected, use the full list verbatim:
 mkdir -p "$(~/.rbenv/bin/rbenv root)/plugins"
 [ -d "$(~/.rbenv/bin/rbenv root)/plugins/ruby-build" ] || git clone https://github.com/rbenv/ruby-build.git "$(~/.rbenv/bin/rbenv root)/plugins/ruby-build"
 ```
-- **Already-done:** `[ -d ~/.rbenv ]` · **Success:** `~/.rbenv/bin/rbenv --version`
+- **Already-done:** `~/.rbenv/bin/rbenv --version` succeeds AND the `ruby-build` plugin dir exists
+  (NOT just `[ -d ~/.rbenv ]` — a run interrupted before ruby-build was cloned looks "done" but
+  can't install Rubies) · **Success:** `~/.rbenv/bin/rbenv --version`
 
 ### 5. Install bun
 ```bash
@@ -308,7 +314,9 @@ command -v fnm >/dev/null 2>&1 || { command -v brew >/dev/null 2>&1 && brew inst
 [ -d "$HOME/.local/share/fnm" ] && export PATH="$HOME/.local/share/fnm:$PATH"
 eval "$(fnm env)" 2>/dev/null || true
 fnm install --lts
-fnm default "$(fnm current)"
+# `fnm current` prints `none` right after install (nothing active yet), so `fnm default
+# "$(fnm current)"` would fail. Use the built-in lts-latest alias, with a version fallback.
+fnm default lts-latest 2>/dev/null || fnm default "$(fnm ls | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1)"
 ```
 - **Already-done / success:** `fnm current` prints a version (not `none`). fnm reads `.nvmrc` /
   `.node-version` and (via `--use-on-cd`, wired in the zsh config) auto-switches per directory.

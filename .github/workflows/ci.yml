@@ -23,3 +23,28 @@ jobs:
             zsh -n "$f" || { echo "syntax error: $f"; rc=1; }
           done
           exit "$rc"
+
+  install-checks:
+    name: Installer + util checks (gating)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile the sudo-run util script
+        run: python3 -m py_compile util/rmdsstore.py
+      - name: Validate starship TOML
+        run: python3 -c "import tomllib; tomllib.load(open('zsh/starship.toml','rb'))"
+      - name: Syntax-check the installer's fenced bash blocks
+        run: |
+          # The installer IS QUICK-INSTALL.md — bash -n every ```bash block so a syntax
+          # error in the runbook can't ship silently.
+          awk '/^```bash$/{f=1;n++;next} /^```$/{f=0;next} f{print > ("blk-" n ".sh")}' QUICK-INSTALL.md
+          shopt -s nullglob   # zero bash blocks -> empty loop, not a literal "blk-*.sh" false error
+          rc=0
+          for b in blk-*.sh; do
+            bash -n "$b" || { echo "bash syntax error in QUICK-INSTALL.md block: $b"; rc=1; }
+          done
+          rm -f blk-*.sh
+          exit "$rc"

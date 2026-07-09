@@ -1,6 +1,6 @@
 # GNU tools on macOS (replace BSD tools when enabled)
 
-if [[ $(uname -s) == Darwin && ! -f $HOME/.lp-no-gnu ]] && __leos_gnu_prefix=$(__leos_brew_prefix); then
+if [[ $(uname -s) == Darwin && ! -f $HOME/.lp-no-gnu ]] && __leos_gnu_prefix=${HOMEBREW_PREFIX:-$(__leos_brew_prefix)}; then
   add-path "$__leos_gnu_prefix/opt/coreutils/libexec/gnubin"
   add-path "$__leos_gnu_prefix/opt/findutils/libexec/gnubin"
   add-path "$__leos_gnu_prefix/opt/gnu-indent/libexec/gnubin"
