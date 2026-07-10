@@ -27,7 +27,7 @@ for package in "${SELECTED_PACKAGES[@]}"; do
   case $OS_FAMILY in
     macos) brew info "$package" >/dev/null 2>&1 ;;
     apt) apt-cache show "$package" >/dev/null 2>&1 ;;
-    fedora) [[ -n $(dnf -q repoquery "$package" 2>/dev/null) ]] ;;
+    fedora) [[ -n $(dnf -q repoquery --whatprovides "$package" 2>/dev/null) ]] ;;
     arch) pacman -Si "$package" >/dev/null 2>&1 ;;
   esac || { printf 'Unavailable %s package: %s\n' "$OS_FAMILY" "$package" >&2; failures=1; }
 done

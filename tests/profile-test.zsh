@@ -66,6 +66,17 @@ LEOS_TEST_ROOT="$root" zsh -dfc '
   [[ ${loaded[-3]} == commands && ${loaded[-2]} == _private && ${loaded[-1]} == interactive ]]
 '
 
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+  zsh -dfc '
+    setopt err_return no_unset pipe_fail
+    mkdir -p "$HOME/insecure-completions"
+    chmod 777 "$HOME/insecure-completions"
+    fpath=("$HOME/insecure-completions" $fpath)
+    starship() { [[ $1 == init ]] && print -r -- ":"; }
+    source "$LEOS_PROFILES_HOME/zsh/start.zsh" 2>/dev/null
+    (( $+functions[compdef] ))
+  '
+
 HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" PATH=/usr/bin:/bin TERM=xterm-256color \
   zsh -dfc '
     setopt err_return no_unset pipe_fail

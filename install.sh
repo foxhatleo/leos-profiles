@@ -436,7 +436,7 @@ package_installed() {
   case $OS_FAMILY in
     macos) brew list --versions "$package" >/dev/null 2>&1 ;;
     apt) dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -qx 'install ok installed' ;;
-    fedora) rpm -q "$package" >/dev/null 2>&1 ;;
+    fedora) rpm -q --whatprovides "$package" >/dev/null 2>&1 ;;
     arch) pacman -Q "$package" >/dev/null 2>&1 ;;
   esac
 }

@@ -7,11 +7,17 @@ _leos_plugin() { [[ -e $LEOS_PROFILES_ZSH/plugins/$1 ]] && source "$LEOS_PROFILE
 [[ -d $LEOS_PROFILES_ZSH/plugins/zsh-completions/src ]] && \
   fpath=("$LEOS_PROFILES_ZSH/plugins/zsh-completions/src" $fpath)
 
-# compinit — regenerate at most once/day, else fast path.
-autoload -Uz compinit
+# compinit — regenerate at most once/day, else fast path. If the host exposes
+# insecure completion directories, ignore those directories instead of asking
+# an interactive question during shell startup.
+autoload -Uz compinit compaudit
 () {
-  local dump=$HOME/.zcompdump
-  if [[ -n $dump(#qN.mh-24) ]]; then
+  local dump=$HOME/.zcompdump insecure
+  insecure=$(compaudit 2>/dev/null) || true
+  if [[ -n $insecure ]]; then
+    puts-err "Ignoring insecure Zsh completion path(s): ${(j:, :)${(f)insecure}}"
+    compinit -i -d "$dump"
+  elif [[ -n $dump(#qN.mh-24) ]]; then
     compinit -C -d "$dump"
   else
     compinit -d "$dump"
