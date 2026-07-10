@@ -16,12 +16,13 @@ autoload -Uz compinit compaudit
   insecure=$(compaudit 2>/dev/null) || true
   if [[ -n $insecure ]]; then
     puts-err "Ignoring insecure Zsh completion path(s): ${(j:, :)${(f)insecure}}"
-    compinit -i -d "$dump"
+    compinit -i -d "$dump" || { puts-err "Zsh completion initialization failed; continuing without completion."; return 0; }
   elif [[ -n $dump(#qN.mh-24) ]]; then
-    compinit -C -d "$dump"
+    compinit -C -d "$dump" || { puts-err "Cached Zsh completion initialization failed; retrying safely."; compinit -i -d "$dump" || return 0; }
   else
-    compinit -d "$dump"
+    compinit -d "$dump" || { puts-err "Zsh completion initialization failed; continuing without completion."; return 0; }
   fi
+  return 0
 }
 
 # fzf completion and widgets load after compinit, but before fzf-tab.
