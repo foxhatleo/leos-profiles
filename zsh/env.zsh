@@ -1,8 +1,9 @@
 # Leo's Profiles — terminal environment (zsh)
 
-# Locale
-export LC_ALL=C.UTF-8
-export LANG=C.UTF-8
+# Respect an existing locale/editor preference. A deterministic UTF-8 fallback
+# is useful on minimal machines, but forcing LC_ALL changes every child tool.
+[[ -n ${LANG:-} ]] || export LANG=C.UTF-8
+[[ -n ${LC_ALL:-} ]] || export LC_ALL=$LANG
 
 # Term colors
 export CLICOLOR=1
@@ -10,7 +11,7 @@ export LSCOLORS=gxBxhxDxfxhxhxhxhxcxcx
 export LS_COLORS='di=36:ln=1;31:so=37:pi=1;33:ex=35:bd=37:cd=37:su=37:sg=37:tw=32:ow=32'
 
 # Editor
-export EDITOR=nano
+export EDITOR="${EDITOR:-nano}"
 
 # Colorful output (GNU ls/grep; on macOS GNU tools are placed on PATH by path/gnu.zsh)
 if command -v eza >/dev/null 2>&1; then
@@ -42,5 +43,8 @@ zstyle ':completion:*' use-cache on
 mkdir -p "$HOME/.zsh/cache"
 zstyle ':completion:*' cache-path "$HOME/.zsh/cache"
 
-# iTerm2 shell integration
-[[ -e $HOME/.iterm2_shell_integration.zsh ]] && source "$HOME/.iterm2_shell_integration.zsh"
+# iTerm2 integration is deliberately opt-in: it is external shell code and is
+# no longer downloaded by the installer. Install it through iTerm2, then set
+# LEOS_ENABLE_ITERM2_INTEGRATION=1 if you want this profile to source it.
+[[ ${LEOS_ENABLE_ITERM2_INTEGRATION:-0} == 1 && -r $HOME/.iterm2_shell_integration.zsh ]] && \
+  source "$HOME/.iterm2_shell_integration.zsh"

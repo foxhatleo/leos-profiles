@@ -1,57 +1,127 @@
-#!/usr/bin/python3
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
+"""Remove Finder/Windows metadata files from an explicitly chosen tree.
 
+The script is intentionally usable without the zsh profile.  It never follows
+symlinks, will not descend into mounted filesystems below the chosen root, and
+returns a non-zero status when the requested root is invalid or a deletion
+fails.  Use --dry-run to inspect scope before deleting anything.
+"""
+
+from __future__ import annotations
+
+import argparse
 import os
-import sys
 import re
 import shutil
+import sys
+from dataclasses import dataclass
 
-if len(sys.argv) <= 1:
-    print("No argument provided.")
-    exit(1)
 
-IGNORED_DIRS = {'CloudStorage'}
+IGNORED_DIRS = {"CloudStorage"}
+METADATA_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+RECYCLE_BIN = "$RECYCLE.BIN"
 
-def _term_width():
-    # os.get_terminal_size raises OSError when stdout is not a tty (piped/CI runs).
+
+@dataclass
+class Result:
+    removed: int = 0
+    failures: int = 0
+    skipped_mounts: int = 0
+
+
+def _term_width() -> int:
     try:
-        return os.get_terminal_size()[0]
+        return os.get_terminal_size().columns
     except OSError:
         return 80
 
-def make_width(p):
-    return p.ljust(_term_width(), ' ')
 
-def smart_gen_progress(p, prompt='Scanning: {}...', newline=False) :
-    p2 = re.sub('[^ a-zA-Z0-9!@#$%^&*()_+={}[\\]|\\\\:;"\'<>,.?\\/~`-]', '?', p)
-    if p2.startswith(sys.argv[1]):
-        p2 = p2[(len(sys.argv[1]) + 1):]
-    empty = len(prompt) - 2
-    max_allowed = _term_width() - empty
-    sys.stdout.write(make_width(prompt.format(p2[:max_allowed])))
-    if newline:
-        sys.stdout.write('\n')
-    else:
-        sys.stdout.write('\r')
+def _display_path(path: str, root: str) -> str:
+    sanitized = re.sub(r"[^ a-zA-Z0-9!@#$%^&*()_+={}[\]|\\:;\"'<>,.?/\\~`-]", "?", path)
+    sanitized_root = re.sub(r"[^ a-zA-Z0-9!@#$%^&*()_+={}[\]|\\:;\"'<>,.?/\\~`-]", "?", root)
+    if sanitized.startswith(sanitized_root):
+        return sanitized[len(sanitized_root) :].lstrip(os.sep) or "."
+    return sanitized
+
+
+def progress(path: str, root: str, prompt: str = "Scanning: {}...", newline: bool = False) -> None:
+    width = _term_width()
+    rendered = _display_path(path, root)
+    overhead = len(prompt.format(""))
+    allowed = max(0, width - overhead)
+    line = prompt.format(rendered[:allowed])[:width]
+    sys.stdout.write(line.ljust(width))
+    sys.stdout.write("\n" if newline else "\r")
     sys.stdout.flush()
 
-print("Running rmdsstore on \"{}\".".format(sys.argv[1]))
-for root, dirs, files in os.walk(sys.argv[1], followlinks=False):
-    dirs[:] = [d for d in dirs if not d.endswith('.duck') and d not in IGNORED_DIRS]
-    smart_gen_progress(root)
-    for name in dirs:
-        if name == '$RECYCLE.BIN':
-            smart_gen_progress(os.path.join(root, name), prompt='Removing {}...', newline=True)
-            try:
-                shutil.rmtree(os.path.join(root, name), ignore_errors=True)
-            except OSError:
-                smart_gen_progress(os.path.join(root, name), prompt='Could not remove {}.', newline=True)
-    for name in files:
-        if name == '.DS_Store' or name == 'Thumbs.db' or name == 'desktop.ini':
-            smart_gen_progress(os.path.join(root, name), prompt='Removing {}...', newline=True)
-            try:
-                os.remove(os.path.join(root, name))
-            except OSError:
-                smart_gen_progress(os.path.join(root, name), prompt='Could not remove {}.', newline=True)
 
-print("\nFinished.\n")
+def remove_path(path: str, root: str, dry_run: bool, result: Result, is_dir: bool) -> None:
+    verb = "Would remove" if dry_run else "Removing"
+    progress(path, root, prompt=f"{verb} {{}}...", newline=True)
+    if dry_run:
+        result.removed += 1
+        return
+    try:
+        if is_dir:
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        result.removed += 1
+    except OSError as error:
+        result.failures += 1
+        progress(path, root, prompt=f"Could not remove ({{}}): {error}", newline=True)
+
+
+def scan(root: str, dry_run: bool) -> Result:
+    root = os.path.abspath(root)
+    if not os.path.isdir(root):
+        raise ValueError(f"Not a readable directory: {root}")
+
+    result = Result()
+    for current_root, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        progress(current_root, root)
+        retained_dirs = []
+        for name in dirs:
+            candidate = os.path.join(current_root, name)
+            if name.endswith(".duck") or name in IGNORED_DIRS:
+                continue
+            if os.path.ismount(candidate):
+                result.skipped_mounts += 1
+                progress(candidate, root, prompt="Skipping mounted filesystem {}...", newline=True)
+                continue
+            if name == RECYCLE_BIN:
+                remove_path(candidate, root, dry_run, result, is_dir=True)
+                continue
+            retained_dirs.append(name)
+        dirs[:] = retained_dirs
+
+        for name in files:
+            if name in METADATA_FILES:
+                remove_path(os.path.join(current_root, name), root, dry_run, result, is_dir=False)
+    return result
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true", help="report files that would be removed")
+    parser.add_argument("root", help="directory tree to scan")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    root = os.path.abspath(args.root)
+    print(f'Running rmdsstore on "{root}"{" (dry run)" if args.dry_run else ""}.')
+    try:
+        result = scan(root, args.dry_run)
+    except ValueError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+
+    print(f"\nFinished: {result.removed} item(s) {'would be ' if args.dry_run else ''}removed; "
+          f"{result.skipped_mounts} mounted filesystem(s) skipped; {result.failures} failure(s).")
+    return 1 if result.failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

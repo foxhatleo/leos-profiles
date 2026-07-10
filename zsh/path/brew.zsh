@@ -18,7 +18,7 @@ if __leos_brew_bin_path=$(__leos_brew_bin); then
   [[ -f $HOME/.brew-china ]] && export HOMEBREW_BOTTLE_DOMAIN="https://mirrors.ustc.edu.cn/homebrew-bottles"
 
   brew-checkup() {
-    brew update; brew upgrade; brew upgrade --cask; brew cleanup -s
+    brew update && brew upgrade && brew upgrade --cask && brew cleanup -s
   }
 
   brew-china-enable() {

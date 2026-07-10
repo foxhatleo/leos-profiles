@@ -2,7 +2,7 @@
 # Defines helper functions and loads zsh/entries.zsh.
 
 puts()     { print -Pn "%B%F{blue}===>%f%b "; print -r -- "$*"; }
-puts-err() { print -Pn "%B%F{red}===>%f%b ";  print -r -- "$*"; }
+puts-err() { print -Pn "%B%F{red}===>%f%b " >&2; print -r -- "$*" >&2; }
 
 # Prepend $1 to PATH (dedup, move-to-front) if it is a real dir.
 # add-path <dir> [required]  — with "required", warn + return 1 when missing.
@@ -34,7 +34,10 @@ __leos_brew_prefix() {
 }
 
 # Shell-internal (not exported into child environments — matches fish's `set`).
-typeset -g LEOS_PROFILES=$HOME/.leos-profiles
+# Prefer an explicit override, otherwise derive the root from this sourced file.
+# This keeps ~/.leos-profiles as the installer default without requiring it.
+typeset -g __leos_start_file="${(%):-%N}"
+typeset -g LEOS_PROFILES="${LEOS_PROFILES_HOME:-${__leos_start_file:A:h:h}}"
 typeset -g LEOS_PROFILES_ZSH=$LEOS_PROFILES/zsh
 
 # Source zsh/<name>.zsh; warn unless mode is "optional".

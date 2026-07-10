@@ -38,6 +38,12 @@ fi
 
 # Starship prompt.
 if command -v starship >/dev/null 2>&1; then
-  export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship.toml"
+  # Keep Leo's established themed prompt as the default.  The plain prompt is
+  # an explicit fallback for terminals without Nerd Font support.
+  if [[ ${LEOS_PLAIN_PROMPT:-0} == 1 ]]; then
+    export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship-plain.toml"
+  else
+    export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship.toml"
+  fi
   eval "$(starship init zsh)"
 fi

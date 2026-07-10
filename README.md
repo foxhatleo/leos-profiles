@@ -1,213 +1,156 @@
 # Leo's Profiles
 
-Leo's Profiles is a personal shell/bootstrap repository centered around a Zsh setup, an AI-driven
-cross-platform quick installer, and a few utility scripts for day-to-day workstation maintenance.
+Leo's Profiles is a portable, Zsh-centred workstation profile for macOS,
+Debian/Ubuntu, Fedora, and Arch Linux. It combines a relocatable interactive
+shell setup with a deterministic provisioning driver for a new machine.
 
-The repository is designed to bootstrap a new machine into a usable command-line environment with:
+It is intentionally a **power-user setup**. A full installation can install
+packages, upgrade the host, configure Git credentials, change the login shell,
+and write managed blocks to `~/.zshrc` and `~/.zshenv`. Read the plan before
+applying it.
 
-- a Zsh-based interactive shell setup with the Starship prompt
-- package installation for macOS, Debian/Ubuntu, Fedora, and Arch Linux
-- pyenv, rbenv, Bun, Yarn, pnpm, and Node LTS (via fnm) bootstrap helpers
-- terminal quality-of-life functions and completions
-- a couple of local utility scripts for file cleanup and cloud sync
+## Trust and installation model
 
-## What This Repo Contains
+The AI runbook remains the recommended front door, but it delegates machine
+changes to [`install.sh`](./install.sh). The driver is versioned, prints one
+complete plan before mutation, records state atomically, and validates existing
+profile checkouts before it repairs them.
 
-### Zsh shell environment
+Do not give an agent a mutable `master` URL and ask it to execute it. Start
+from a GitHub release or another reviewed **full 40-character commit hash**.
+The corresponding release's `QUICK-INSTALL.md` gives an agent-safe procedure.
+It downloads only `install.sh` and `installer/lock.sh` at that immutable ref,
+then the driver checks out the same ref for the profile.
 
-The Zsh configuration lives under [`zsh/`](./zsh) and is loaded through [`zsh/start.zsh`](./zsh/start.zsh). It sets up:
+The lock file pins every direct third-party executable source used by the
+driver: Git dependencies are checked out at fixed commits; script/archive
+downloads are SHA-256 verified. OS packages remain governed by the selected
+package manager. A direct-source digest mismatch fails closed. Updating a
+locked dependency is a reviewed repository change, not an incidental
+install-time update.
 
-- terminal environment variables, color defaults, and fish-like history/completion behavior
-- helper functions such as `puts`, `puts-err`, `add-path`, and `entry`
-- PATH initialization for tools such as Homebrew, pyenv, rbenv, fnm, Go, Flutter, gcloud, GPG, and local user binaries
-- interactive utility commands like `mkcdir`, `hidden-on`, `hidden-off`, `clear-history`, `bye`, and `upgrade-leos-profiles`
-- the [Starship](https://starship.rs) prompt plus plain-cloned plugins: `zsh-autosuggestions`
-  (ghosted autocomplete), `zsh-syntax-highlighting`, `zsh-completions`, and `fzf-tab` (fzf-powered
-  completion menus)
+## Quick start
 
-### Quick installer
+Pick a reviewed release commit, set it as `REF`, and have the agent follow the
+release copy of [`QUICK-INSTALL.md`](./QUICK-INSTALL.md). The core command is:
 
-Installation is **AI-driven and natural-language**. Instead of running a script, you point an AI
-coding agent at [`QUICK-INSTALL.md`](./QUICK-INSTALL.md) and it performs the entire setup by reading
-and executing that document.
-
-Open an AI coding agent with **full/unrestricted permissions** — Claude Code
-(`--dangerously-skip-permissions`), Codex (`--dangerously-bypass-approvals-and-sandbox`), or OpenCode
-in bypass mode — and tell it:
-
-> Set up my dev environment by following
-> https://raw.githubusercontent.com/foxhatleo/leos-profiles/refs/heads/master/QUICK-INSTALL.md
-
-The agent asks you a handful of decisions up front (SSH vs HTTPS, GPG-signed commits, which steps and
-package groups to run), then works autonomously: it detects your OS, installs a minimal toolchain,
-provisions Git (an SSH key and/or a GPG signing key, uploaded to GitHub via the `gh` CLI), clones the
-repo to `~/.leos-profiles`, and runs the selected setup steps — verifying each and self-recovering
-from errors. The runbook is idempotent, so re-running resumes wherever it left off.
-
-The quick installer sets up:
-
-- clone the repo into `~/.leos-profiles`
-- optionally provision an SSH key and/or a GPG signing key on GitHub via `gh`
-- install a curated package set for the current OS
-- install local helper binaries
-- set up `pyenv` and `rbenv`
-- install `bun`, global `yarn`, and global `pnpm`
-- install `fnm` and the latest Node.js LTS
-- install zsh plugins and configure the Starship prompt
-- write `~/.zshrc` (and a minimal `~/.zshenv`)
-- optionally install Nerd Fonts on desktop systems
-- optionally switch the default shell to zsh
-
-There is no non-AI install mode — the setup is driven entirely by an agent reading `QUICK-INSTALL.md`.
-
-### Utility scripts
-
-- [`util/rmdsstore.py`](./util/rmdsstore.py): recursively removes `.DS_Store`, `Thumbs.db`, `desktop.ini`, and `$RECYCLE.BIN` artifacts
-- [`res/adblock-hosts`](./res/adblock-hosts): hosts-style blocklist resource file
-
-## Repository Layout
-
-```text
-.
-├── zsh/
-│   ├── start.zsh
-│   ├── env.zsh
-│   ├── entries.zsh
-│   ├── commands.zsh
-│   ├── interactive.zsh
-│   ├── starship.toml
-│   └── path/
-├── res/
-│   └── adblock-hosts
-├── util/
-│   └── rmdsstore.py
-└── QUICK-INSTALL.md
+```bash
+bash install.sh --ref "$REF" --target "$HOME/.leos-profiles" --plan
 ```
 
-## Supported Platforms
+After reviewing the resolved plan, run the same command with `--yes` and the
+choices you made up front. Typical optional choices are:
 
-The quick installer currently has package bootstrap logic for:
+```bash
+bash install.sh --ref "$REF" --target "$HOME/.leos-profiles" --yes \
+  --ssh generate --gpg generate --gpg-passphrase empty \
+  --fonts yes --font JetBrainsMono --default-shell yes
+```
 
-- macOS via Homebrew
-- Debian-based systems via `apt`
-- Fedora via `dnf`
-- Arch Linux via `pacman`
+`--ssh reuse` requires an explicit `--ssh-key /path/to/private-key`; the
+installer never picks an arbitrary key. New SSH keys support
+`--ssh-passphrase empty|prompt`. GPG provisioning requires an existing Git
+identity or `--git-name` and `--git-email`; new GPG keys support an empty
+passphrase (the historic Leo default) or an interactive passphrase.
 
-Notes:
+The installer defaults to all package groups and includes full package-manager
+upgrades. This is intentional. Use `--steps`, `--package-groups`, and
+`--plan` to narrow scope. `--dry-run` performs no mutation. Re-run with
+`--repair` only after reviewing an existing, clean target checkout.
 
-- Fedora support intentionally uses RPM Fusion for `ffmpeg` when needed.
-- Nerd Fonts installation is skipped automatically on non-desktop environments, or when you decline it in the setup questions.
+## What is installed
 
-## Quick Start
+The package groups are `core-utils`, `shell`, `dev-tools`, `languages`,
+`media`, `network`, and `system`. Their exact package names are resolved in
+`install.sh` for the selected OS; there is no second hand-maintained package
+table in the documentation.
 
-1. Install and open an AI coding agent (Claude Code, Codex, or OpenCode) with full/unrestricted permissions.
-2. Tell it to follow the raw `QUICK-INSTALL.md` URL (see [Quick installer](#quick-installer) above).
-3. Answer the up-front questions; the agent does the rest.
+The optional profile components include pyenv, rbenv + ruby-build, Bun, fnm +
+Node LTS, Yarn, pnpm, Starship, and four Zsh plugins. Bun, fnm, Starship, and
+the plugins are installed from locked releases/commits. `rpatool` remains
+available through the explicit `bins` step, but is not selected by default
+because its upstream has no stable release artifact. On Debian and Fedora,
+`eza` is not forced from an unreviewed third-party repository; the shell uses
+the normal `ls` fallback when it is unavailable.
 
-If you prefer HTTPS cloning over SSH, say so when the agent asks (or tell it to skip SSH
-provisioning); it will clone `https://github.com/foxhatleo/leos-profiles` instead.
+Nerd Fonts are not bulk-installed. Select a named font with
+`--fonts yes --font <name>` when you want the complete themed prompt. The
+established themed prompt remains the default; terminals without Nerd Font
+support can opt into the readable ASCII fallback by setting
+`LEOS_PLAIN_PROMPT=1`, which uses
+[`zsh/starship-plain.toml`](./zsh/starship-plain.toml).
 
-## What The Installer Does
+## Zsh profile
 
-The agent works in two phases, both idempotent:
+The profile root is derived from the sourced `zsh/start.zsh` file and can be
+overridden with `LEOS_PROFILES_HOME`. `~/.leos-profiles` is only the installer
+default. The installer writes replaceable managed blocks, preserving the rest
+of the user's Zsh files.
 
-**Phase 1 — prereq core (always runs):** detect the OS; ensure a minimal toolchain (Homebrew on
-macOS, Node.js + npm everywhere); if you opted into SSH or GPG signing, install and authenticate the
-GitHub CLI (`gh`), provision the key(s), and upload them to GitHub; clone the repo to
-`~/.leos-profiles`.
-
-**Phase 2 — selected steps (in order):** install local bins, OS packages, `pyenv`, `rbenv`, `bun`,
-`yarn`, `pnpm`, `fnm` + Node LTS, zsh plugins + Starship prompt, Nerd Fonts (desktop only), write the
-zsh config, and set the default shell to zsh — running only the steps and package groups you selected.
-
-Before each step the agent checks whether it is already done and skips it if so, so an interrupted run
-resumes cleanly on the next attempt. If a step fails, the agent diagnoses and fixes it with full shell
-access, then continues. On Linux the agent primes `sudo` early, so you may be prompted for your
-password once.
-
-## Installer Choices
-
-All decisions are asked up front, before any work begins:
-
-- **SSH for GitHub** (default: yes) — provision an SSH key and add it to GitHub, then clone over SSH.
-  Decline to clone over HTTPS instead.
-- **GPG-signed commits** (default: yes) — generate or reuse a GPG key, configure git to sign commits,
-  and upload the public key to GitHub. Commits show as **Verified** when the signing email is a
-  verified email on your GitHub account.
-- **Git identity** — asked only if `user.name` / `user.email` are not already set.
-- **Steps** (default: all) — any subset of the Phase 2 steps above.
-- **Package groups** (default: all) — `core-utils`, `shell`, `dev-tools`, `languages`, `media`,
-  `network`, `system`.
-- **Nerd Fonts** — default on for desktops, off on headless machines.
-
-Tell the agent to "use the defaults" to skip the questions and run the full default plan.
-
-## Zsh Setup
-
-The quick installer appends this loader to `~/.zshrc`:
+For a manual setup, source the profile only from interactive `~/.zshrc`:
 
 ```zsh
 if [[ -o interactive ]]; then
-    source "$HOME/.leos-profiles/zsh/start.zsh"
+  source "${LEOS_PROFILES_HOME:-$HOME/.leos-profiles}/zsh/start.zsh"
 fi
 ```
 
-If you are setting things up manually, placing the same snippet in your `~/.zshrc` is the easiest way
-to load the profile. The prompt is [Starship](https://starship.rs) (configured via
-[`zsh/starship.toml`](./zsh/starship.toml)); per-directory Node switching is handled by
-[fnm](https://github.com/Schniz/fnm)'s `--use-on-cd`.
+`~/.zshenv` should put `~/.local/bin` and `~/.local/npm/bin` on `PATH` for
+non-interactive Zsh invocations. The installer manages this block for you.
 
-## Included Commands
+Optional tool warnings are off by default; set `LEOS_WARN_OPTIONAL_TOOLS=1` to
+see missing pyenv/rbenv warnings. iTerm2 integration is also opt-in: install it
+through iTerm2, then set `LEOS_ENABLE_ITERM2_INTEGRATION=1` to source its local
+file. Private profile additions may live in ignored `zsh/_private.zsh`.
 
-After loading the profile, the repo provides several convenience commands.
+## Maintenance commands
 
-Common examples:
+- `bye [--keep-history] [--non-interactive] [--no-exit]` runs Leo's full
+  maintenance routine. It authenticates sudo, updates the active package
+  manager and AI CLIs, clears history unless retained, and on macOS performs a
+  privileged metadata sweep before restarting Finder, Dock, and SystemUIServer.
+  It is intentionally not a simple alias for `exit`.
+- `rmdsstore [--dry-run] [root ...]` cleans metadata. With no root it scans the
+  standard macOS data-volume roots; it does not run on non-macOS systems. The
+  underlying utility rejects invalid roots, does not cross mounted filesystems,
+  reports failures, and supports dry-run.
+- `upgrade-leos-profiles` updates only a normal branch checkout with
+  `--ff-only`. A release-pinned checkout must be upgraded through a reviewed
+  new ref using `install.sh --repair`.
+- `gui-enable`, `gui-disable`, `gui-start`, and `gui-stop` require systemd and
+  detect `gdm3`, `gdm`, `sddm`, or `lightdm` rather than assuming one distro.
 
-- `mkcdir <dir>`: create a directory and immediately `cd` into it
-- `upgrade-leos-profiles`: pull the latest changes into `~/.leos-profiles` and refresh the cloned zsh plugins
-- `hidden-on` / `hidden-off`: show or hide hidden files in Finder on macOS
-- `clear-history`: remove shell and related history files
-- `bye`: cleanup-oriented shell exit helper
-- `apt-checkup`, `dnf-checkup`, `brew-checkup`: package-manager maintenance helpers when those tools are available
-- `ai-checkup`: update the AI coding CLIs (Claude Code, Codex) via `npm update -g`
-- `brew-china-enable` / `brew-china-disable`: switch Homebrew remotes and bottle mirror settings
-- `enable-gnu` / `disable-gnu`: toggle GNU tool precedence on macOS
-- `rmdsstore`: scan standard macOS filesystem roots and remove Finder/Windows metadata files
+## Static hosts list
 
-## Utility Script Usage
+[`res/adblock-hosts`](./res/adblock-hosts) is a vendored convenience list. It
+is not automatically applied, updated, or represented as a curated security
+feed. Before using it in a system hosts file, review it for your network and
+keep a backup of the original file.
 
-### Remove metadata files
+## Supported platforms and limits
 
-To clean a specific directory tree:
+The provisioning driver supports macOS via Homebrew, Debian/Ubuntu via apt,
+Fedora via dnf, and Arch via pacman, on x86_64 and arm64/aarch64 where a locked
+release asset exists. Linux package operations use `sudo`; macOS Homebrew may
+also request privileged access during its own setup. Windows is not supported
+as a host OS; WSL is only supported to the extent that its Linux distribution
+matches the supported package-manager rules.
+
+No installer can make a package-manager upgrade reversible. Keep backups and
+use `--plan` before applying the full default selection on a machine with
+important state.
+
+## Development and validation
+
+Run the local checks before publishing a release:
 
 ```bash
-python3 util/rmdsstore.py /path/to/scan
+zsh -n zsh/*.zsh zsh/path/*.zsh
+bash -n install.sh installer/lock.sh tests/install-test.sh
+bash tests/install-test.sh
+python3 -m py_compile util/rmdsstore.py
+python3 tests/rmdsstore_test.py
 ```
 
-The `rmdsstore` shell helper wraps this script and scans a set of predefined macOS filesystem roots.
-
-## Manual Installation
-
-If you do not want to use the AI-driven bootstrap flow, a minimal manual setup usually looks like this:
-
-1. Clone the repository to `~/.leos-profiles`.
-2. Install zsh and any package-manager dependencies you care about.
-3. Add the zsh startup snippet shown above to `~/.zshrc`.
-4. Optionally run selected utilities directly from `util/`.
-
-## Development Notes
-
-- Installation is defined entirely by [`QUICK-INSTALL.md`](./QUICK-INSTALL.md); there is no installer script to maintain.
-- This repository appears to be an actively reorganized personal dotfiles/workstation repo, so paths may evolve over time. The current layout is reflected in this README.
-
-## Troubleshooting
-
-- If SSH cloning fails, tell the agent to use HTTPS (decline SSH provisioning), or verify that your SSH key was added to GitHub.
-- If zsh reports missing tools such as `pyenv` or `rbenv`, the profile can silence those warnings with marker files like `~/.lp-nopyenv` and `~/.lp-norbenv`.
-- If a setup run is interrupted, have the agent follow `QUICK-INSTALL.md` again — every step is idempotent and already-completed work is skipped.
-- If you do not want Nerd Fonts, or you are on a headless machine, decline the Nerd Fonts step.
-- On Linux, some steps need `sudo`; the agent primes it early and you may be prompted for your password once.
-
-## License
-
-This project is licensed under the GNU General Public License v3.0. See [`LICENSE`](./LICENSE) for the full text.
+CI additionally validates the Starship TOML and installer blocks. The project
+is licensed under GPL-3.0; see [`LICENSE`](./LICENSE).

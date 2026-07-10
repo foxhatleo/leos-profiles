@@ -1,0 +1,40 @@
+"$schema" = 'https://starship.rs/config-schema.json'
+
+# Used unless LEOS_NERD_FONT=1. Keep the profile readable in a stock terminal
+# or on a headless host where the optional Nerd Font step is skipped.
+format = "$username$directory$git_branch$git_status$nodejs$python$ruby$line_break$character"
+
+[username]
+show_always = true
+format = '[$user@]($style)'
+style_user = 'bold blue'
+style_root = 'bold red'
+
+[directory]
+format = '[$path]($style) '
+style = 'bold yellow'
+truncation_length = 3
+truncate_to_repo = true
+
+[git_branch]
+symbol = 'git:'
+format = '[$symbol$branch]($style) '
+
+[git_status]
+format = '[$all_status$ahead_behind]($style) '
+
+[nodejs]
+symbol = 'node:'
+format = '[$symbol$version]($style) '
+
+[python]
+symbol = 'py:'
+format = '[$symbol$version]($style) '
+
+[ruby]
+symbol = 'rb:'
+format = '[$symbol$version]($style) '
+
+[character]
+success_symbol = '[>](bold green)'
+error_symbol = '[>](bold red)'
