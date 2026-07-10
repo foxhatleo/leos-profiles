@@ -1,7 +1,7 @@
 "$schema" = 'https://starship.rs/config-schema.json'
 
-# Used unless LEOS_NERD_FONT=1. Keep the profile readable in a stock terminal
-# or on a headless host where the optional Nerd Font step is skipped.
+# Explicit fallback when LEOS_PLAIN_PROMPT=1. Keep the profile readable in a
+# stock terminal or on a headless host without a Nerd Font.
 format = "$username$directory$git_branch$git_status$nodejs$python$ruby$line_break$character"
 
 [username]

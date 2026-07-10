@@ -7,7 +7,7 @@ puts-err() { print -Pn "%B%F{red}===>%f%b " >&2; print -r -- "$*" >&2; }
 # Prepend $1 to PATH (dedup, move-to-front) if it is a real dir.
 # add-path <dir> [required]  — with "required", warn + return 1 when missing.
 add-path() {
-  local dir=$1 mode=$2
+  local dir=$1 mode=${2:-}
   if [[ -d $dir ]]; then
     path=("$dir" ${path:#$dir})
     typeset -gU path
@@ -42,7 +42,7 @@ typeset -g LEOS_PROFILES_ZSH=$LEOS_PROFILES/zsh
 
 # Source zsh/<name>.zsh; warn unless mode is "optional".
 entry() {
-  local name=$1 mode=$2
+  local name=$1 mode=${2:-}
   if [[ -e $LEOS_PROFILES_ZSH/$name.zsh ]]; then
     source "$LEOS_PROFILES_ZSH/$name.zsh"
   elif [[ $mode != optional ]]; then
@@ -51,3 +51,5 @@ entry() {
 }
 
 entry entries
+
+:

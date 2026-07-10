@@ -8,3 +8,5 @@ if command -v rbenv >/dev/null 2>&1; then
 elif [[ ${LEOS_WARN_OPTIONAL_TOOLS:-0} == 1 && ! -f $HOME/.lp-norbenv ]]; then
   puts-err "rbenv is not installed. To silence, touch \$HOME/.lp-norbenv." >&2
 fi
+
+:

@@ -16,3 +16,7 @@ fi
 # effect can always be undone with enable-gnu, even after a restart.
 enable-gnu()  { rm -f "$HOME/.lp-no-gnu"; puts "Enabled GNU tools. Restart shell to take effect."; }
 disable-gnu() { touch "$HOME/.lp-no-gnu"; puts "Disabled GNU tools. Restart shell to take effect."; }
+
+unset __leos_gnu_prefix
+
+:

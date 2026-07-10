@@ -4,7 +4,7 @@
 #
 # Update a value only as part of a reviewed dependency update.  Every Git
 # source is checked out at the exact commit below; the Homebrew installer and
-# rpatool download are additionally verified by SHA-256 before execution.
+# rpatool downloads are additionally verified by SHA-256 before execution.
 
 readonly LEOS_PROFILE_REPOSITORY="https://github.com/foxhatleo/leos-profiles.git"
 
@@ -29,11 +29,11 @@ readonly NERD_FONTS_COMMIT="4f133076f3c1ec224745850bdf433d4368bca07e"
 readonly HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/feb6351d0d1a766a281d9691d4269cb026ff8f70/install.sh"
 readonly HOMEBREW_INSTALL_SHA256="99287f194a8b3c9e6b0203a11a5fa54518be57209343e6bb954dec4635796d9d"
 
-# Codeberg currently does not offer a stable release artifact for rpatool. The
-# content digest intentionally makes a changed upstream branch fail closed
-# until this lock is reviewed and updated.
-readonly RPATOOL_URL="https://codeberg.org/shiz/rpatool/raw/branch/master/rpatool"
-readonly RPATOOL_SHA256="92bfad99b733ce0d70b59b85acfaf0977b3a982711f50c20c56a065db9291c39"
+# rpatool has no release tags. Its author's archived GitHub repository provides
+# an immutable copy of the final pre-Codeberg commit; the content is also
+# SHA-256 verified before installation.
+readonly RPATOOL_URL="https://raw.githubusercontent.com/Shizmob/rpatool/74f26d5dfdd645483e02552aa766ca447ad6b191/rpatool"
+readonly RPATOOL_SHA256="d343124cebd832f712540cc6468253f7e303979467e11c7490807f42c13963f1"
 
 readonly BUN_VERSION="1.3.11"
 readonly BUN_DARWIN_AARCH64_URL="https://github.com/oven-sh/bun/releases/download/bun-v1.3.11/bun-darwin-aarch64.zip"
@@ -52,6 +52,13 @@ readonly FNM_LINUX_X64_URL="https://github.com/Schniz/fnm/releases/download/v1.3
 readonly FNM_LINUX_X64_SHA256="7807664f39d39fc518da1c35ba0181e4b3267603c4b1dedeb4b5fc6ae440a224"
 readonly FNM_LINUX_AARCH64_URL="https://github.com/Schniz/fnm/releases/download/v1.39.0/fnm-arm64.zip"
 readonly FNM_LINUX_AARCH64_SHA256="4eaff58b2c5bf30d0934027572dd0b5bbb60d2a1af309230b53662d4b1d45599"
+
+readonly YARN_VERSION="1.22.22"
+readonly YARN_URL="https://registry.npmjs.org/yarn/-/yarn-1.22.22.tgz"
+readonly YARN_SHA256="c17d3797fb9a9115bf375e31bfd30058cac6bc9c3b8807a3d8cb2094794b51ca"
+readonly PNPM_VERSION="11.11.0"
+readonly PNPM_URL="https://registry.npmjs.org/pnpm/-/pnpm-11.11.0.tgz"
+readonly PNPM_SHA256="85ef2eff216a1ae90804c00c8dfbfa6685353644650d10906a893c05aedcd884"
 
 readonly STARSHIP_VERSION="1.26.0"
 readonly STARSHIP_DARWIN_AARCH64_URL="https://github.com/starship/starship/releases/download/v1.26.0/starship-aarch64-apple-darwin.tar.gz"

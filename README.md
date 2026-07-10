@@ -14,7 +14,10 @@ applying it.
 The AI runbook remains the recommended front door, but it delegates machine
 changes to [`install.sh`](./install.sh). The driver is versioned, prints one
 complete plan before mutation, records state atomically, and validates existing
-profile checkouts before it repairs them.
+profile checkouts before it repairs them. A recorded step is skipped only when
+its relevant inputs still have the same SHA-256 state signature **and** its
+installed postconditions pass; deleting a binary or changing a package/font
+selection therefore causes repair rather than a false "complete" result.
 
 Do not give an agent a mutable `master` URL and ask it to execute it. Start
 from a GitHub release or another reviewed **full 40-character commit hash**.
@@ -49,9 +52,12 @@ bash install.sh --ref "$REF" --target "$HOME/.leos-profiles" --yes \
 
 `--ssh reuse` requires an explicit `--ssh-key /path/to/private-key`; the
 installer never picks an arbitrary key. New SSH keys support
-`--ssh-passphrase empty|prompt`. GPG provisioning requires an existing Git
-identity or `--git-name` and `--git-email`; new GPG keys support an empty
-passphrase (the historic Leo default) or an interactive passphrase.
+`--ssh-passphrase empty|prompt`. GPG provisioning requires a Git identity; pass
+`--git-name` and/or `--git-email` for whichever global field is missing. New
+GPG keys support an empty
+passphrase (the historic Leo default) or an interactive passphrase, and do not
+expire. `--gpg reuse` likewise requires an explicit
+`--gpg-key <fingerprint>`.
 
 The installer defaults to all package groups and includes full package-manager
 upgrades. This is intentional. Use `--steps`, `--package-groups`, and
@@ -66,19 +72,24 @@ The package groups are `core-utils`, `shell`, `dev-tools`, `languages`,
 table in the documentation.
 
 The optional profile components include pyenv, rbenv + ruby-build, Bun, fnm +
-Node LTS, Yarn, pnpm, Starship, and four Zsh plugins. Bun, fnm, Starship, and
-the plugins are installed from locked releases/commits. `rpatool` remains
+Node LTS, Yarn, pnpm, Starship, and four Zsh plugins. Bun, fnm, Yarn, pnpm,
+Starship, and the plugins are installed from locked, verified
+archives/releases/commits. `rpatool` remains
 available through the explicit `bins` step, but is not selected by default
-because its upstream has no stable release artifact. On Debian and Fedora,
+because its upstream has no stable release. Its opt-in copy is pinned to the
+author's immutable archived GitHub commit and SHA-256 verified. On Debian and Fedora,
 `eza` is not forced from an unreviewed third-party repository; the shell uses
 the normal `ls` fallback when it is unavailable.
 
-Nerd Fonts are not bulk-installed. Select a named font with
-`--fonts yes --font <name>` when you want the complete themed prompt. The
-established themed prompt remains the default; terminals without Nerd Font
-support can opt into the readable ASCII fallback by setting
+Nerd Fonts are not bulk-installed. The default `--fonts auto` installs only
+`JetBrainsMono` on macOS or a detected Linux desktop and skips fonts on a
+headless Linux machine. Override that with `--fonts yes --font <name>` or
+`--fonts no`. The established themed prompt remains the default; terminals
+without Nerd Font support can opt into the readable ASCII fallback by setting
 `LEOS_PLAIN_PROMPT=1`, which uses
 [`zsh/starship-plain.toml`](./zsh/starship-plain.toml).
+If the Starship binary is missing entirely, the profile emits a diagnostic and
+uses a built-in Zsh prompt instead of silently leaving the prompt blank.
 
 ## Zsh profile
 
@@ -87,21 +98,30 @@ overridden with `LEOS_PROFILES_HOME`. `~/.leos-profiles` is only the installer
 default. The installer writes replaceable managed blocks, preserving the rest
 of the user's Zsh files.
 
-For a manual setup, source the profile only from interactive `~/.zshrc`:
+For a manual setup at the default location, source the profile only from
+interactive `~/.zshrc`:
 
 ```zsh
+if [[ -z ${LEOS_PROFILES_HOME:-} ]]; then
+  LEOS_PROFILES_HOME=$HOME/.leos-profiles
+fi
 if [[ -o interactive ]]; then
-  source "${LEOS_PROFILES_HOME:-$HOME/.leos-profiles}/zsh/start.zsh"
+  source "$LEOS_PROFILES_HOME/zsh/start.zsh"
 fi
 ```
 
 `~/.zshenv` should put `~/.local/bin` and `~/.local/npm/bin` on `PATH` for
-non-interactive Zsh invocations. The installer manages this block for you.
+non-interactive Zsh invocations. Yarn and pnpm are installed into that explicit
+user prefix without rewriting the user's npm configuration. The installer
+manages the PATH block for you.
 
 Optional tool warnings are off by default; set `LEOS_WARN_OPTIONAL_TOOLS=1` to
 see missing pyenv/rbenv warnings. iTerm2 integration is also opt-in: install it
 through iTerm2, then set `LEOS_ENABLE_ITERM2_INTEGRATION=1` to source its local
-file. Private profile additions may live in ignored `zsh/_private.zsh`.
+file. Set `LEOS_DISABLE_ALIASES=1` to keep commands such as `ls`, `cat`, and
+`grep` unaliased. Private profile additions may live in ignored
+`zsh/_private.zsh`; it loads after public commands so intentional private
+overrides win.
 
 ## Maintenance commands
 
@@ -120,12 +140,23 @@ file. Private profile additions may live in ignored `zsh/_private.zsh`.
 - `gui-enable`, `gui-disable`, `gui-start`, and `gui-stop` require systemd and
   detect `gdm3`, `gdm`, `sddm`, or `lightdm` rather than assuming one distro.
 
+`brew-china-enable` is an explicit, separately confirmed convenience command.
+It routes Homebrew Git metadata, API metadata, and bottles through the
+third-party USTC mirror using USTC's current environment-variable method.
+`brew-china-enable --yes` is the non-interactive form;
+`brew-china-disable` restores the official Homebrew remote and variables. The
+choice persists only through `~/.brew-china`; it is never enabled by the
+installer. Review [USTC's Homebrew mirror help](https://mirrors.ustc.edu.cn/help/brew.git.html)
+before trusting that mirror.
+
 ## Static hosts list
 
 [`res/adblock-hosts`](./res/adblock-hosts) is a vendored convenience list. It
 is not automatically applied, updated, or represented as a curated security
-feed. Before using it in a system hosts file, review it for your network and
-keep a backup of the original file.
+feed. Its original source, license, and update date are not recorded in this
+repository, so do not redistribute or treat it as current without establishing
+that provenance. Before using it in a system hosts file, review it for your
+network and keep a backup of the original file.
 
 ## Supported platforms and limits
 
@@ -140,17 +171,41 @@ No installer can make a package-manager upgrade reversible. Keep backups and
 use `--plan` before applying the full default selection on a machine with
 important state.
 
+## Rollback and removal
+
+Before its first managed write to an existing file, the installer creates
+`~/.zshrc.leos-profiles.bak` and `~/.zshenv.leos-profiles.bak` with the original
+permissions. It follows a symlink and updates its target without replacing the
+symlink; in that case the backup sits beside the resolved target. Later runs do
+not overwrite these first-install backups.
+
+To stop loading the profile, restore those backups when present, or manually
+remove only the lines between the matching `leos-profiles loader` and
+`leos-profiles environment` markers. Start a new shell and confirm it no longer
+loads the profile before deleting the profile directory. The resumable state is
+under `${XDG_STATE_HOME:-$HOME/.local/state}/leos-profiles` and may then be
+removed.
+
+The installer intentionally has no blanket package uninstall: package-manager
+upgrades cannot be rolled back safely, and a package may be shared with other
+work. Git identity/signing settings and GitHub SSH/GPG keys are also left in
+place for explicit review and removal by their owner.
+
 ## Development and validation
 
 Run the local checks before publishing a release:
 
 ```bash
 zsh -n zsh/*.zsh zsh/path/*.zsh
-bash -n install.sh installer/lock.sh tests/install-test.sh
+bash -n install.sh installer/lock.sh tests/*.sh
 bash tests/install-test.sh
+shellcheck -s bash install.sh installer/lock.sh tests/install-test.sh tests/package-map-availability.sh tests/locked-artifacts-test.sh
+bash tests/locked-artifacts-test.sh
 python3 -m py_compile util/rmdsstore.py
 python3 tests/rmdsstore_test.py
 ```
 
-CI additionally validates the Starship TOML and installer blocks. The project
-is licensed under GPL-3.0; see [`LICENSE`](./LICENSE).
+CI additionally validates the Starship TOML, installer blocks, and actual
+package-name availability on macOS, Ubuntu, Fedora, and Arch. GitHub Actions
+are pinned to immutable commits. The project is licensed under GPL-3.0; see
+[`LICENSE`](./LICENSE).

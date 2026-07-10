@@ -23,12 +23,19 @@ driver rather than reimplement provisioning from prose.
 5. **Stay within scope.** The approved scope is the selected profile target,
    managed Zsh blocks, selected packages, and explicit credential/default-shell
    choices. Do not alter unrelated configuration.
+6. **Obtain the required execution scope.** The accepted plan necessarily
+   writes outside the checkout (`~/.zshrc`, `~/.zshenv`, user tool directories,
+   package-manager state, and possibly the login shell). Ask for the terminal
+   or filesystem permission needed for that exact plan; do not claim the setup
+   can succeed inside a project-only sandbox.
 
 ## Ask these decisions in one batch
 
 - Release reference: a reviewed tag or full commit hash. Resolve tags to the
   full commit and show it back.
-- Target directory: default `~/.leos-profiles`; another directory is allowed.
+- Target directory: use `~/.leos-profiles` without adding a question unless the
+  human has already requested another absolute path. The profile remains
+  relocatable; this is only the provisioning default.
 - Steps and package groups: default all except the optional `bins` (`rpatool`)
   step. Explain that the full package step upgrades the operating system and,
   for selected Fedora media packages, enables RPM Fusion.
@@ -38,9 +45,10 @@ driver rather than reimplement provisioning from prose.
   Leo's empty-passphrase default or an interactive passphrase.
 - GPG: skip, reuse a matching secret key, or generate one. For a new key ask
   whether it should use Leo's empty-passphrase default or an interactive
-  passphrase.
-- Fonts: skip (default) or install one named Nerd Font, such as
-  `JetBrainsMono`.
+  passphrase. Reuse requires the exact fingerprint (`--gpg-key`); show
+  `gpg --list-secret-keys --keyid-format=long` if the human needs to choose.
+- Fonts: auto (the default: install `JetBrainsMono` on a desktop, skip on a
+  headless Linux host), no, or install one named Nerd Font.
 - Default shell: no, yes, or auto (change only when the login shell is not
   already Zsh).
 
@@ -90,14 +98,23 @@ bash "$driver" --ref "$REF" --target "$HOME/.leos-profiles" --yes \
 ```
 
 For a reused SSH key, include `--ssh reuse --ssh-key /absolute/path/to/key`.
-For GPG, include `--git-name` and `--git-email` when either global Git identity
-field is missing. If SSH or GPG was selected, authenticate `gh` when the driver
-requests it; do not silently continue without GitHub verification.
+For reused GPG, include `--gpg reuse --gpg-key <fingerprint>`. Include
+`--git-name` only when global `user.name` is missing and `--git-email` only
+when global `user.email` is missing. If SSH or GPG was selected, authenticate
+`gh` when the driver requests it; do not silently continue without GitHub
+verification. GitHub CLI initially authenticates over HTTPS so it cannot
+silently select a different SSH key; the driver tests the exact chosen key
+before switching GitHub's Git protocol to SSH.
 
 The driver prints every mutation, verifies locked downloads, uses a state file
-under `${XDG_STATE_HOME:-~/.local/state}/leos-profiles`, and fails on incomplete
-or conflicting targets instead of treating them as complete.
+under `${XDG_STATE_HOME:-$HOME/.local/state}/leos-profiles`, and fails on incomplete
+or conflicting targets instead of treating them as complete. A state row is
+only a resume hint: its input signature and the installed result are both
+verified before a step is skipped.
 
 After success, tell the human to restart their terminal. A default-shell
-change applies at the next login. Keep the temporary checkout only if it is
-useful for auditing; otherwise remove it.
+change applies at the next login. Confirm that the themed Starship prompt is
+active unless the human explicitly set `LEOS_PLAIN_PROMPT=1`. The first managed
+write preserves existing Zsh files as `.leos-profiles.bak`; point the human to
+the README rollback section. Keep the temporary checkout only if it is useful
+for auditing; otherwise remove it.

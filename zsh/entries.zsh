@@ -4,12 +4,12 @@ entry "path/brew"
 entry "path/gnu"
 entry "path/apt"
 entry "path/dnf"
+entry "path/pacman"
 entry "path/node"
 entry "path/pyenv"
 entry "path/rbenv"
 entry "path/fnm"
 entry "path/direnv"
-entry "path/fzf"
 entry "path/zoxide"
 entry "path/go"
 entry "path/flutter"
@@ -22,8 +22,12 @@ entry "path/bin"
 # discovered by Homebrew/local-bin setup are available to env.zsh.
 entry "env"
 
-entry "_private" optional
-
 entry "commands"
 
+# Private definitions load after the public command layer so a machine-specific
+# override can intentionally replace a profile command or alias.
+entry "_private" optional
+
 entry "interactive"
+
+:

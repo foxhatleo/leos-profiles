@@ -78,7 +78,15 @@ def scan(root: str, dry_run: bool) -> Result:
         raise ValueError(f"Not a readable directory: {root}")
 
     result = Result()
-    for current_root, dirs, files in os.walk(root, topdown=True, followlinks=False):
+
+    def walk_error(error: OSError) -> None:
+        result.failures += 1
+        failed_path = error.filename or root
+        progress(failed_path, root, prompt=f"Could not scan ({{}}): {error}", newline=True)
+
+    for current_root, dirs, files in os.walk(
+        root, topdown=True, onerror=walk_error, followlinks=False
+    ):
         progress(current_root, root)
         retained_dirs = []
         for name in dirs:
@@ -109,9 +117,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv or sys.argv[1:])
+    args = parse_args(sys.argv[1:] if argv is None else argv)
     root = os.path.abspath(args.root)
-    print(f'Running rmdsstore on "{root}"{" (dry run)" if args.dry_run else ""}.')
+    print(f'Running rmdsstore on "{root}"{" (dry run)" if args.dry_run else ""}.', flush=True)
     try:
         result = scan(root, args.dry_run)
     except ValueError as error:

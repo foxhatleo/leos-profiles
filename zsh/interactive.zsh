@@ -18,6 +18,9 @@ autoload -Uz compinit
   fi
 }
 
+# fzf completion and widgets load after compinit, but before fzf-tab.
+entry "path/fzf"
+
 # fzf-tab must load after compinit but BEFORE plugins that wrap ZLE widgets
 # (zsh-autosuggestions), per its docs. Syntax highlighting stays last.
 _leos_plugin fzf-tab/fzf-tab.plugin.zsh
@@ -29,12 +32,14 @@ if (( $+functions[compdef] )); then
   compdef _directories mkcdir
   _leos_bye() {
     _values 'option' \
-      'no-exit[Do not quit the terminal]' \
-      'keep-history[Preserve history files]' \
-      'non-interactive[Run upgrades without confirmation prompts]'
+      '--no-exit[Do not quit the terminal]' \
+      '--keep-history[Preserve history files]' \
+      '--non-interactive[Run upgrades without confirmation prompts]'
   }
   compdef _leos_bye bye
 fi
+
+:
 
 # Starship prompt.
 if command -v starship >/dev/null 2>&1; then
@@ -46,4 +51,7 @@ if command -v starship >/dev/null 2>&1; then
     export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship.toml"
   fi
   eval "$(starship init zsh)"
+else
+  puts-err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore the themed prompt."
+  PROMPT='%F{cyan}%n@%m%f %F{blue}%~%f %# '
 fi

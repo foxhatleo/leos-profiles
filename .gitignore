@@ -1,10 +1,10 @@
 # ---- Project-specific ----
-_*
 *.bak
 .omc/
 .ai/
 docs/
 ssh-shortcuts.zsh
+zsh/_private.zsh
 zsh/plugins/
 
 # ---- macOS ----
@@ -66,6 +66,3 @@ venv/
 # ---- Node (in case of tooling) ----
 node_modules/
 npm-debug.log*
-
-# ---- Misc text/scratch ----
-*.txt

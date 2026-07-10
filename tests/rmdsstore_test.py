@@ -8,6 +8,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -44,6 +45,18 @@ class RmdsstoreTest(unittest.TestCase):
 
     def test_invalid_root_is_an_error(self) -> None:
         self.assertEqual(rmdsstore.main(["/definitely-not-a-real-leos-root"]), 2)
+
+    def test_walk_errors_are_reported_as_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def inaccessible_walk(*_args: object, **kwargs: object) -> list[object]:
+                onerror = kwargs["onerror"]
+                assert callable(onerror)
+                onerror(PermissionError(13, "Permission denied", directory))
+                return []
+
+            with mock.patch.object(rmdsstore.os, "walk", side_effect=inaccessible_walk):
+                result = rmdsstore.scan(directory, dry_run=True)
+            self.assertEqual(result.failures, 1)
 
 
 if __name__ == "__main__":

@@ -8,3 +8,5 @@ if command -v pyenv >/dev/null 2>&1; then
 elif [[ ${LEOS_WARN_OPTIONAL_TOOLS:-0} == 1 && ! -f $HOME/.lp-nopyenv ]]; then
   puts-err "pyenv is not installed. To silence, touch \$HOME/.lp-nopyenv." >&2
 fi
+
+:

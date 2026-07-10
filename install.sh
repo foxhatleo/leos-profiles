@@ -16,13 +16,14 @@ DEFAULT_TARGET="${LEOS_PROFILES_HOME:-$HOME/.leos-profiles}"
 TARGET=$DEFAULT_TARGET
 PROFILE_REF=""
 # rpatool remains available as the explicit `bins` step, but is not a default
-# because its upstream does not publish a stable release artifact.
+# because its upstream does not publish a stable release.
 SELECTED_STEPS="packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell"
 SELECTED_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
 SSH_MODE="skip"
 SSH_PASSPHRASE_MODE="empty"
 GPG_MODE="skip"
 GPG_PASSPHRASE_MODE="empty"
+GPG_KEY_ID=""
 INSTALL_FONTS="auto"
 CHANGE_DEFAULT_SHELL="auto"
 DRY_RUN=0
@@ -38,6 +39,7 @@ SSH_KEY_PATH=""
 GIT_NAME=""
 GIT_EMAIL=""
 FONT_NAME=""
+SELECTED_PACKAGES=()
 
 say() { printf '%s\n' "==> $*"; }
 warn() { printf '%s\n' "WARNING: $*" >&2; }
@@ -60,9 +62,10 @@ Options:
   --ssh-key <path>                Required explicit private key when --ssh reuse
   --ssh-passphrase <empty|prompt> New SSH-key passphrase policy
   --gpg <skip|reuse|generate>     Git commit-signing choice
+  --gpg-key <fingerprint>         Required explicit secret key when --gpg reuse
   --gpg-passphrase <empty|prompt> New-key passphrase policy
   --fonts <auto|yes|no>           Nerd Fonts policy
-  --font <name>                   Named Nerd Font when --fonts yes
+  --font <name>                   Nerd Font name (auto defaults to JetBrainsMono)
   --default-shell <auto|yes|no>   Default zsh shell policy
   --git-name <name>               Global Git name when identity is missing
   --git-email <email>             Global Git email when identity is missing
@@ -89,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --ssh-key) require_value "$1" "${2:-}"; SSH_KEY_PATH=$2; shift 2 ;;
     --ssh-passphrase) require_value "$1" "${2:-}"; SSH_PASSPHRASE_MODE=$2; shift 2 ;;
     --gpg) require_value "$1" "${2:-}"; GPG_MODE=$2; shift 2 ;;
+    --gpg-key) require_value "$1" "${2:-}"; GPG_KEY_ID=$2; shift 2 ;;
     --gpg-passphrase) require_value "$1" "${2:-}"; GPG_PASSPHRASE_MODE=$2; shift 2 ;;
     --fonts) require_value "$1" "${2:-}"; INSTALL_FONTS=$2; shift 2 ;;
     --font) require_value "$1" "${2:-}"; FONT_NAME=$2; shift 2 ;;
@@ -108,6 +112,7 @@ done
 valid_csv() {
   local value=$1 allowed=$2 item
   [[ -n $value ]] || return 1
+  [[ $value != ,* && $value != *, && $value != *,,* ]] || return 1
   local old_ifs=$IFS
   IFS=,
   for item in $value; do
@@ -166,7 +171,11 @@ validate_options() {
   [[ $INSTALL_FONTS == auto || $INSTALL_FONTS == yes || $INSTALL_FONTS == no ]] || die "Invalid --fonts value"
   [[ $CHANGE_DEFAULT_SHELL == auto || $CHANGE_DEFAULT_SHELL == yes || $CHANGE_DEFAULT_SHELL == no ]] || die "Invalid --default-shell value"
   [[ $SSH_MODE != reuse || -n $SSH_KEY_PATH ]] || die "--ssh reuse requires --ssh-key <private-key-path>"
+  [[ $GPG_MODE != reuse || -n $GPG_KEY_ID ]] || die "--gpg reuse requires --gpg-key <fingerprint>"
   [[ $INSTALL_FONTS != yes || -n $FONT_NAME ]] || die "--fonts yes requires --font <name>"
+  [[ $TARGET == /* ]] || die "--target must be an absolute path"
+  [[ $SSH_MODE != reuse || $SSH_KEY_PATH == /* ]] || die "--ssh-key must be an absolute path"
+  [[ -z $FONT_NAME || $FONT_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "--font must be a Nerd Fonts directory name"
   if [[ $ALLOW_MUTABLE_REF -eq 0 ]]; then
     [[ $PROFILE_REF =~ ^[0-9a-f]{40}$ ]] || die "--ref must be a full 40-character commit hash"
   fi
@@ -206,27 +215,48 @@ sha256() {
   fi
 }
 
+hash_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
 download_verified() {
   local url=$1 expected=$2 destination=$3 tmp
+  local -a curl_args
   tmp="${destination}.tmp.$$"
   run mkdir -p "$(dirname -- "$destination")"
   if [[ $DRY_RUN -eq 1 ]]; then
     say "Would download and SHA-256 verify $url"
     return 0
   fi
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --output "$tmp" "$url"
+  curl_args=(--fail --location --proto '=https' --tlsv1.2 --retry 3
+    --connect-timeout 15 --silent --show-error --output "$tmp")
+  if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
+    curl_args+=(--retry-all-errors)
+  fi
+  if ! curl "${curl_args[@]}" "$url"; then
+    rm -f "$tmp"
+    die "Download failed: $url"
+  fi
   [[ $(sha256 "$tmp") == "$expected" ]] || { rm -f "$tmp"; die "Digest mismatch for $url"; }
   chmod 700 "$tmp"
   mv -f "$tmp" "$destination"
 }
 
 state_done() {
-  [[ -f $STATE_FILE ]] && awk -F '\t' -v step="$1" -v ref="${PROFILE_REF:-mutable}" '$1 == step && $2 == ref { found=1 } END { exit !found }' "$STATE_FILE"
+  local step=$1 signature
+  signature=$(step_signature "$step")
+  [[ -f $STATE_FILE ]] && awk -F '\t' -v step="$step" -v signature="$signature" \
+    '$1 == step && $2 == signature { found=1 } END { exit !found }' "$STATE_FILE"
 }
 
 mark_done() {
-  local step=$1 tmp
+  local step=$1 signature tmp
   [[ $DRY_RUN -eq 1 ]] && return 0
+  signature=$(step_signature "$step")
   mkdir -p "$STATE_DIR"
   chmod 700 "$STATE_DIR"
   tmp="$STATE_FILE.tmp.$$"
@@ -235,7 +265,7 @@ mark_done() {
   else
     : > "$tmp"
   fi
-  printf '%s\t%s\t%s\n' "$step" "${PROFILE_REF:-mutable}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$tmp"
+  printf '%s\t%s\t%s\n' "$step" "$signature" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$STATE_FILE"
 }
@@ -248,8 +278,16 @@ confirm_plan() {
   say "Package groups: $SELECTED_GROUPS"
   say "SSH: $SSH_MODE; SSH passphrase: $SSH_PASSPHRASE_MODE; GPG: $GPG_MODE; GPG passphrase: $GPG_PASSPHRASE_MODE"
   [[ -z $SSH_KEY_PATH ]] || say "Reused SSH key: $SSH_KEY_PATH"
+  [[ -z $GPG_KEY_ID ]] || say "Reused GPG key: $GPG_KEY_ID"
   [[ -z $FONT_NAME ]] || say "Nerd Font: $FONT_NAME"
   say "Fonts: $INSTALL_FONTS; default shell: $CHANGE_DEFAULT_SHELL"
+  if [[ $INSTALL_FONTS == auto ]]; then
+    if is_desktop; then
+      say "Automatic font decision: install JetBrainsMono (desktop detected)"
+    else
+      say "Automatic font decision: skip (headless host detected)"
+    fi
+  fi
   [[ $DRY_RUN -eq 0 ]] || say "Dry-run: no mutation will occur."
   [[ $PLAN_ONLY -eq 0 ]] || return 0
   [[ $ASSUME_YES -eq 1 ]] && return 0
@@ -269,6 +307,7 @@ ensure_brew() {
   say "Installing Homebrew from a pinned, SHA-256-verified script"
   download_verified "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256" "$installer"
   run /bin/bash "$installer"
+  [[ $DRY_RUN -eq 0 ]] || return 0
   local candidate
   for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
     if [[ -x $candidate ]]; then
@@ -293,7 +332,7 @@ bootstrap_tools() {
     fedora)
       run sudo dnf install -y git curl ca-certificates unzip ;;
     arch)
-      run sudo pacman -Sy --needed --noconfirm git curl ca-certificates unzip ;;
+      run sudo pacman -Syu --needed --noconfirm git curl ca-certificates unzip ;;
   esac
 }
 
@@ -347,28 +386,28 @@ package_list_for_group() {
   case "$OS_FAMILY:$group" in
     macos:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils gnu-indent gnu-sed gnu-tar gnu-which grep gawk gzip less nano' ;;
     macos:shell) printf '%s\n' 'zsh' ;;
-    macos:dev-tools) printf '%s\n' 'bat direnv eza fd fzf git ripgrep vim zoxide' ;;
+    macos:dev-tools) printf '%s\n' 'bat direnv eza fd fzf git pkg-config openssl@3 readline ripgrep sqlite3 tcl-tk vim xz zlib zoxide' ;;
     macos:languages) printf '%s\n' 'node python ruby' ;;
     macos:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
     macos:network) printf '%s\n' 'wget rclone gnutls heroku ssh-copy-id' ;;
     macos:system) printf '%s\n' 'smartmontools' ;;
     apt:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     apt:shell) printf '%s\n' 'zsh' ;;
-    apt:dev-tools) printf '%s\n' 'bat build-essential clang direnv fd-find fzf gcc git ripgrep vim zoxide' ;;
+    apt:dev-tools) printf '%s\n' 'bat build-essential clang direnv fd-find fzf gcc git libbz2-dev libffi-dev liblzma-dev libncursesw5-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-dev libxmlsec1-dev llvm ripgrep tk-dev vim xz-utils zlib1g-dev zoxide' ;;
     apt:languages) printf '%s\n' 'nodejs npm python-is-python3 ruby' ;;
     apt:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
     apt:network) printf '%s\n' 'wget rclone' ;;
     apt:system) printf '%s\n' 'smartmontools' ;;
     fedora:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     fedora:shell) printf '%s\n' 'zsh' ;;
-    fedora:dev-tools) printf '%s\n' 'bat direnv fd-find fzf git ripgrep vim zoxide' ;;
+    fedora:dev-tools) printf '%s\n' 'bat bzip2 bzip2-devel direnv fd-find fzf gcc gdbm-libs git libffi-devel libnsl2 libuuid-devel make openssl-devel patch readline-devel ripgrep sqlite sqlite-devel tk-devel vim xz-devel zlib-devel zoxide' ;;
     fedora:languages) printf '%s\n' 'nodejs python-unversioned-command ruby' ;;
     fedora:media) printf '%s\n' 'ImageMagick ffmpeg yt-dlp' ;;
     fedora:network) printf '%s\n' 'wget rclone' ;;
     fedora:system) printf '%s\n' 'smartmontools' ;;
     arch:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     arch:shell) printf '%s\n' 'zsh' ;;
-    arch:dev-tools) printf '%s\n' 'base-devel bat direnv eza fd fzf git ripgrep vim zoxide' ;;
+    arch:dev-tools) printf '%s\n' 'base-devel bat direnv eza fd fzf git libffi openssl ripgrep tk vim xz zlib zoxide' ;;
     arch:languages) printf '%s\n' 'nodejs npm python ruby' ;;
     arch:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
     arch:network) printf '%s\n' 'wget rclone' ;;
@@ -376,20 +415,44 @@ package_list_for_group() {
   esac
 }
 
-install_os_packages() {
+collect_selected_packages() {
   local group package_list
-  local -a packages group_packages
+  local -a group_packages
   local old_ifs=$IFS
+  SELECTED_PACKAGES=()
   IFS=,
   for group in $SELECTED_GROUPS; do
     package_list=$(package_list_for_group "$group")
     IFS=' '
     read -r -a group_packages <<< "$package_list"
-    packages+=("${group_packages[@]}")
+    SELECTED_PACKAGES+=("${group_packages[@]}")
     IFS=,
   done
   IFS=$old_ifs
-  (( ${#packages[@]} > 0 )) || return 0
+}
+
+package_installed() {
+  local package=$1
+  case $OS_FAMILY in
+    macos) brew list --versions "$package" >/dev/null 2>&1 ;;
+    apt) dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -qx 'install ok installed' ;;
+    fedora) rpm -q "$package" >/dev/null 2>&1 ;;
+    arch) pacman -Q "$package" >/dev/null 2>&1 ;;
+  esac
+}
+
+selected_packages_installed() {
+  local package
+  collect_selected_packages
+  (( ${#SELECTED_PACKAGES[@]} > 0 )) || return 0
+  for package in "${SELECTED_PACKAGES[@]}"; do
+    package_installed "$package" || return 1
+  done
+}
+
+install_os_packages() {
+  collect_selected_packages
+  (( ${#SELECTED_PACKAGES[@]} > 0 )) || return 0
   ensure_sudo
   case $OS_FAMILY in
     macos)
@@ -398,11 +461,11 @@ install_os_packages() {
       run brew update
       run brew upgrade
       run brew upgrade --cask
-      run brew install "${packages[@]}" ;;
+      run brew install "${SELECTED_PACKAGES[@]}" ;;
     apt)
       run sudo apt-get update
       run sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-      run sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+      run sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${SELECTED_PACKAGES[@]}"
       run mkdir -p "$HOME/.local/bin"
       if [[ $DRY_RUN -eq 0 ]]; then
         command -v fd >/dev/null 2>&1 || { command -v fdfind >/dev/null 2>&1 && ln -sf "$(command -v fdfind)" "$HOME/.local/bin/fd"; }
@@ -414,10 +477,14 @@ install_os_packages() {
       if has_csv_item "$SELECTED_GROUPS" media; then
         run sudo dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
       fi
-      run sudo dnf install -y "${packages[@]}" ;;
+      if has_csv_item "$SELECTED_GROUPS" media; then
+        run sudo dnf install -y --allowerasing "${SELECTED_PACKAGES[@]}"
+      else
+        run sudo dnf install -y "${SELECTED_PACKAGES[@]}"
+      fi ;;
     arch)
       run sudo pacman -Syu --noconfirm
-      run sudo pacman -S --needed --noconfirm "${packages[@]}" ;;
+      run sudo pacman -S --needed --noconfirm "${SELECTED_PACKAGES[@]}" ;;
   esac
 }
 
@@ -455,6 +522,9 @@ install_pyenv() {
 install_rbenv() {
   clone_pinned "$RBENV_REPOSITORY" "$RBENV_COMMIT" "$HOME/.rbenv" rbenv
   clone_pinned "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT" "$HOME/.rbenv/plugins/ruby-build" ruby-build
+  if [[ $DRY_RUN -eq 0 && -x $HOME/.rbenv/src/configure ]]; then
+    (cd "$HOME/.rbenv" && src/configure && make -C src)
+  fi
 }
 
 install_plugins() {
@@ -469,40 +539,54 @@ is_desktop() {
   [[ $OS_FAMILY == macos || -n ${DISPLAY:-}${WAYLAND_DISPLAY:-}${XDG_CURRENT_DESKTOP:-} ]]
 }
 
+font_should_install() {
+  [[ $INSTALL_FONTS == yes ]] || { [[ $INSTALL_FONTS == auto ]] && is_desktop; }
+}
+
 install_fonts() {
-  if [[ $INSTALL_FONTS == no ]] || [[ $INSTALL_FONTS == auto ]]; then
+  if ! font_should_install; then
     say "Skipping Nerd Fonts ($INSTALL_FONTS policy)"
     return 0
   fi
+  local font=${FONT_NAME:-JetBrainsMono}
   if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would download pinned Nerd Fonts and install $FONT_NAME"
+    say "Would download pinned Nerd Fonts and install $font"
     return 0
   fi
   local temp
   temp=$(mktemp -d)
   clone_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$temp/nerd-fonts" nerd-fonts
-  run "$temp/nerd-fonts/install.sh" "$FONT_NAME"
+  run "$temp/nerd-fonts/install.sh" "$font"
   rm -rf "$temp"
 }
 
 ensure_user_npm_prefix() {
   local prefix="$HOME/.local/npm"
   if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would configure npm prefix: $prefix"
+    say "Would prepare user-local npm prefix: $prefix"
     return 0
   fi
   mkdir -p "$prefix"
-  npm config set prefix "$prefix"
+}
+
+install_locked_npm_package() {
+  local package=$1 url=$2 expected=$3 temp archive
+  ensure_user_npm_prefix
+  temp=$(mktemp -d)
+  archive="$temp/$package.tgz"
+  download_verified "$url" "$expected" "$archive"
+  run npm install --global --prefix "$HOME/.local/npm" "$archive"
+  rm -rf "$temp"
 }
 
 install_yarn() {
-  ensure_user_npm_prefix
-  run npm install --global yarn
+  install_locked_npm_package yarn "$YARN_URL" "$YARN_SHA256"
+  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/npm/bin/yarn" --version | grep -qx "$YARN_VERSION" || die "Yarn version verification failed"
 }
 
 install_pnpm() {
-  ensure_user_npm_prefix
-  run npm install --global pnpm
+  install_locked_npm_package pnpm "$PNPM_URL" "$PNPM_SHA256"
+  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/npm/bin/pnpm" --version | grep -qx "$PNPM_VERSION" || die "pnpm version verification failed"
 }
 
 machine_arch() {
@@ -532,6 +616,35 @@ platform_asset() {
   esac
 }
 
+step_signature() {
+  local step=$1 material asset
+  material="state-v2|$OS_FAMILY|$step"
+  case $step in
+    bins) material+="|$RPATOOL_URL|$RPATOOL_SHA256" ;;
+    packages)
+      collect_selected_packages
+      material+="|$SELECTED_GROUPS|${SELECTED_PACKAGES[*]}" ;;
+    pyenv) material+="|$PYENV_REPOSITORY|$PYENV_COMMIT" ;;
+    rbenv) material+="|$RBENV_REPOSITORY|$RBENV_COMMIT|$RUBY_BUILD_REPOSITORY|$RUBY_BUILD_COMMIT" ;;
+    bun)
+      asset=$(platform_asset bun)
+      material+="|$BUN_VERSION|$asset" ;;
+    yarn) material+="|$YARN_VERSION|$YARN_URL|$YARN_SHA256|$HOME/.local/npm" ;;
+    pnpm) material+="|$PNPM_VERSION|$PNPM_URL|$PNPM_SHA256|$HOME/.local/npm" ;;
+    fnm)
+      asset=$(platform_asset fnm)
+      material+="|$FNM_VERSION|$asset" ;;
+    plugins)
+      asset=$(platform_asset starship)
+      material+="|$TARGET|$STARSHIP_VERSION|$asset|$ZSH_AUTOSUGGESTIONS_COMMIT|$ZSH_SYNTAX_HIGHLIGHTING_COMMIT|$ZSH_COMPLETIONS_COMMIT|$FZF_TAB_COMMIT" ;;
+    fonts) material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_COMMIT" ;;
+    zsh-config) material+="|loader-v2|$TARGET" ;;
+    default-shell) material+="|$CHANGE_DEFAULT_SHELL" ;;
+    *) die "Cannot compute state signature for unknown step: $step" ;;
+  esac
+  printf '%s' "$material" | hash_text
+}
+
 install_locked_archive_binary() {
   local tool=$1 extension=$2 destination=$3 url sha temp archive binary asset
   asset=$(platform_asset "$tool")
@@ -545,6 +658,7 @@ install_locked_archive_binary() {
     rmdir "$temp" 2>/dev/null || true
     return 0
   fi
+  mkdir -p "$temp/extract"
   case $extension in
     zip) unzip -q "$archive" -d "$temp/extract" ;;
     tar.gz) tar -xzf "$archive" -C "$temp/extract" ;;
@@ -575,36 +689,108 @@ install_starship() {
   [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/starship" --version | grep -q "starship $STARSHIP_VERSION" || die "Starship version verification failed"
 }
 
+resolve_config_path() {
+  local path=$1 link directory hops=0
+  while [[ -L $path ]]; do
+    (( hops += 1 ))
+    (( hops <= 40 )) || die "Too many symbolic-link hops while resolving $1"
+    link=$(readlink "$path")
+    if [[ $link == /* ]]; then
+      path=$link
+    else
+      directory=$(CDPATH='' cd -- "$(dirname -- "$path")" && pwd -P)
+      path="$directory/$link"
+    fi
+  done
+  printf '%s\n' "$path"
+}
+
+managed_block_well_formed() {
+  local file=$1 marker=$2
+  [[ ! -e $file ]] && return 0
+  awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
+    $0 == begin {
+      begins++
+      if (open || begins > 1) invalid=1
+      open=1
+      next
+    }
+    $0 == end {
+      ends++
+      if (!open || ends > 1) invalid=1
+      open=0
+      next
+    }
+    END { exit invalid || open || begins != ends }
+  ' "$file"
+}
+
+managed_block_equals() {
+  local file=$1 marker=$2 expected=$3 actual
+  file=$(resolve_config_path "$file")
+  managed_block_well_formed "$file" "$marker" || return 1
+  [[ -e $file ]] || return 1
+  actual=$(awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
+    $0 == begin { capture=1; found=1; next }
+    $0 == end { capture=0; next }
+    capture { print }
+    END { if (!found) exit 1 }
+  ' "$file") || return 1
+  [[ $actual == "$expected" ]]
+}
+
 install_managed_block() {
-  local file=$1 marker=$2 content=$3 tmp begin_count end_count
+  local file=$1 marker=$2 content=$3 tmp mode backup separator=""
   [[ $DRY_RUN -eq 1 ]] && { say "Would install managed block in $file"; return 0; }
+  file=$(resolve_config_path "$file")
   mkdir -p "$(dirname -- "$file")"
+  managed_block_well_formed "$file" "$marker" || die "Refusing to rewrite malformed managed block in $file"
+  managed_block_equals "$file" "$marker" "$content" && return 0
+  backup="$file.leos-profiles.bak"
+  if [[ -e $file && ! -e $backup ]]; then
+    cp -p "$file" "$backup"
+  fi
   touch "$file"
-  begin_count=$(grep -Fxc "# >>> leos-profiles ${marker} >>>" "$file" || true)
-  end_count=$(grep -Fxc "# <<< leos-profiles ${marker} <<<" "$file" || true)
-  [[ $begin_count == "$end_count" ]] || die "Refusing to rewrite malformed managed block in $file"
+  if [[ $(uname -s) == Darwin ]]; then
+    mode=$(/usr/bin/stat -f '%Lp' "$file")
+  else
+    mode=$(stat -c '%a' "$file")
+  fi
   tmp="$file.leos-profiles.tmp.$$"
   awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
     $0 == begin { skip=1; next }
     $0 == end { skip=0; next }
     !skip { print }
   ' "$file" > "$tmp"
-  printf '\n# >>> leos-profiles %s >>>\n%s\n# <<< leos-profiles %s <<<\n' "$marker" "$content" "$marker" >> "$tmp"
-  chmod --reference="$file" "$tmp" 2>/dev/null || true
+  if [[ -s $tmp ]] && [[ -n $(tail -n 1 "$tmp") ]]; then separator=$'\n'; fi
+  printf '%s# >>> leos-profiles %s >>>\n%s\n# <<< leos-profiles %s <<<\n' "$separator" "$marker" "$content" "$marker" >> "$tmp"
+  chmod "$mode" "$tmp"
   mv -f "$tmp" "$file"
 }
 
-install_zsh_config() {
-  local zshrc_content zshenv_content quoted_target
+zshrc_managed_content() {
+  local quoted_target
   printf -v quoted_target '%q' "$TARGET"
+  printf '%s\n' "if [[ -z \${LEOS_PROFILES_HOME:-} ]]; then
+  LEOS_PROFILES_HOME=$quoted_target
+fi
+if [[ -o interactive ]]; then
+  source \"\$LEOS_PROFILES_HOME/zsh/start.zsh\"
+fi"
+}
+
+zshenv_managed_content() {
+  # These are intentional zsh runtime expansions.
   # shellcheck disable=SC2016
-  zshrc_content='if [[ -o interactive ]]; then
-  source "${LEOS_PROFILES_HOME:-$HOME/.leos-profiles}/zsh/start.zsh"
-fi'
-  zshenv_content="export LEOS_PROFILES_HOME=$quoted_target
-typeset -U path
-path=(\"\$HOME/.local/bin\" \"\$HOME/.local/npm/bin\" \$path)
-export PATH"
+  printf '%s\n' 'typeset -U path
+path=("$HOME/.local/bin" "$HOME/.local/npm/bin" $path)
+export PATH'
+}
+
+install_zsh_config() {
+  local zshrc_content zshenv_content
+  zshrc_content=$(zshrc_managed_content)
+  zshenv_content=$(zshenv_managed_content)
   install_managed_block "$HOME/.zshrc" loader "$zshrc_content"
   install_managed_block "$HOME/.zshenv" environment "$zshenv_content"
 }
@@ -636,25 +822,36 @@ ensure_git_identity() {
   local existing_name existing_email
   existing_name=$(git config --global user.name || true)
   existing_email=$(git config --global user.email || true)
-  if [[ -n $existing_name && -n $existing_email ]]; then return 0; fi
-  [[ -n $GIT_NAME && -n $GIT_EMAIL ]] || die "GPG provisioning needs a Git identity; pass --git-name and --git-email"
-  run git config --global user.name "$GIT_NAME"
-  run git config --global user.email "$GIT_EMAIL"
+  if [[ -z $existing_name ]]; then
+    [[ -n $GIT_NAME ]] || die "GPG provisioning needs a Git name; pass --git-name"
+    run git config --global user.name "$GIT_NAME"
+  fi
+  if [[ -z $existing_email ]]; then
+    [[ -n $GIT_EMAIL ]] || die "GPG provisioning needs a Git email; pass --git-email"
+    run git config --global user.email "$GIT_EMAIL"
+  fi
+}
+
+ssh_public_material() {
+  awk 'NF >= 2 { print $1 " " $2; exit }' "$1"
 }
 
 github_ssh_key_present() {
-  local public_key=$1
-  gh api --paginate user/keys --jq '.[].key' 2>/dev/null | grep -qxF "$(< "$public_key")"
+  local public_key=$1 material
+  material=$(ssh_public_material "$public_key")
+  [[ -n $material ]] || return 1
+  gh api --paginate user/keys --jq '.[].key' 2>/dev/null | \
+    awk 'NF >= 2 { print $1 " " $2 }' | grep -qxF "$material"
 }
 
 ensure_github_auth() {
   gh auth status >/dev/null 2>&1 && return 0
-  if [[ $SSH_MODE == skip ]]; then
-    gh auth login --hostname github.com --web
-  else
-    gh auth login --hostname github.com --git-protocol ssh --web
-  fi
+  gh auth login --hostname github.com --git-protocol https --web
   gh auth status >/dev/null 2>&1 || die "GitHub CLI authentication did not complete"
+}
+
+verify_github_api() {
+  gh api user --jq '.login' >/dev/null 2>&1 || die "GitHub API authentication/connectivity verification failed"
 }
 
 provision_ssh() {
@@ -665,19 +862,25 @@ provision_ssh() {
   fi
   command -v gh >/dev/null 2>&1 || die "SSH provisioning requires gh; install/authenticate it first"
   ensure_github_auth
-  local key=""
+  verify_github_api
+  local key="" existing_generate=0
   if [[ $SSH_MODE == reuse ]]; then
     key=$SSH_KEY_PATH
     [[ -f $key ]] || die "Chosen SSH private key does not exist: $key"
   else
     key="$HOME/.ssh/id_ed25519"
-    [[ ! -e $key && ! -e "$key.pub" ]] || die "Refusing to overwrite existing $key"
-    run mkdir -p "$HOME/.ssh"
-    [[ $DRY_RUN -eq 1 ]] || chmod 700 "$HOME/.ssh"
-    if [[ $SSH_PASSPHRASE_MODE == prompt ]]; then
-      run ssh-keygen -t ed25519 -f "$key"
+    if [[ -e $key || -e $key.pub ]]; then
+      [[ -f $key && -f $key.pub ]] || die "Refusing a partial existing SSH key pair at $key"
+      existing_generate=1
+      say "Found an existing default SSH key pair; it will be reused only if GitHub already has it"
     else
-      run ssh-keygen -t ed25519 -f "$key" -N "" -q
+      run mkdir -p "$HOME/.ssh"
+      [[ $DRY_RUN -eq 1 ]] || chmod 700 "$HOME/.ssh"
+      if [[ $SSH_PASSPHRASE_MODE == prompt ]]; then
+        run ssh-keygen -t ed25519 -f "$key"
+      else
+        run ssh-keygen -t ed25519 -f "$key" -N "" -q
+      fi
     fi
   fi
   local derived_public
@@ -690,23 +893,55 @@ provision_ssh() {
       say "Would derive public key: $key.pub"
     else
       mv -f "$derived_public" "$key.pub"
+      chmod 644 "$key.pub"
       derived_public=""
     fi
-  elif [[ $DRY_RUN -eq 0 ]] && ! cmp -s "$derived_public" "$key.pub"; then
+  elif [[ $DRY_RUN -eq 0 ]] && [[ $(ssh_public_material "$derived_public") != $(ssh_public_material "$key.pub") ]]; then
     rm -f "$derived_public"
     die "Existing public key does not match the selected private key: $key.pub"
   fi
   [[ -z $derived_public ]] || rm -f "$derived_public"
   local title
   title="leos-profiles-$(hostname)-$(date +%Y%m%d)"
+  local key_present=0
+  github_ssh_key_present "$key.pub" && key_present=1
   if [[ $DRY_RUN -eq 1 ]]; then
     say "Would add selected SSH key to GitHub as $title"
-  elif ! github_ssh_key_present "$key.pub"; then
+  elif (( existing_generate && ! key_present )); then
+    die "The existing default SSH key is not on GitHub; use --ssh reuse --ssh-key $key to select it explicitly"
+  elif (( ! key_present )); then
     gh ssh-key add "$key.pub" --title "$title" || die "GitHub rejected SSH-key upload"
   fi
   local ssh_output
-  ssh_output=$(ssh -o StrictHostKeyChecking=accept-new -T git@github.com 2>&1 || true)
+  ssh_output=$(ssh -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -T git@github.com 2>&1 || true)
   grep -q 'successfully authenticated' <<< "$ssh_output" || die "SSH key upload did not produce GitHub authentication"
+  gh config set git_protocol ssh --host github.com
+}
+
+gpg_secret_fingerprint() {
+  gpg --batch --with-colons --list-secret-keys "$1" 2>/dev/null | awk -F: '/^fpr:/{print $10; exit}'
+}
+
+gpg_key_has_email() {
+  local fingerprint=$1 email=$2
+  gpg --batch --with-colons --list-keys "$fingerprint" 2>/dev/null | awk -F: -v email="<$email>" '
+    BEGIN { email=tolower(email) }
+    /^uid:/ && index(tolower($10), email) { found=1 }
+    END { exit !found }
+  '
+}
+
+github_gpg_key_present() {
+  local fingerprint=$1
+  gh api --paginate user/gpg_keys --jq '.[].key_id' 2>/dev/null | awk -v fingerprint="$fingerprint" '
+    BEGIN { fingerprint=toupper(fingerprint) }
+    {
+      remote=toupper($0)
+      if (length(remote) <= length(fingerprint) &&
+          substr(fingerprint, length(fingerprint) - length(remote) + 1) == remote) found=1
+    }
+    END { exit !found }
+  '
 }
 
 provision_gpg() {
@@ -718,53 +953,84 @@ provision_gpg() {
   command -v gpg >/dev/null 2>&1 || die "GPG provisioning requires gpg; install it first"
   command -v gh >/dev/null 2>&1 || die "GPG provisioning requires gh; install/authenticate it first"
   ensure_github_auth
+  verify_github_api
   ensure_git_identity
-  local name email keyid
+  local name email keyid="" candidate creation_output exported_key
   name=$(git config --global user.name || true)
   email=$(git config --global user.email || true)
   [[ -n $name && -n $email ]] || die "Set global git user.name and user.email before GPG provisioning"
-  keyid=$(gpg --list-secret-keys --keyid-format=long --with-colons "<$email>" 2>/dev/null | awk -F: '/^sec:/{print $5; exit}')
-  if [[ $GPG_MODE == generate && -z $keyid ]]; then
-    if [[ $GPG_PASSPHRASE_MODE == prompt ]]; then
-      gpg --quick-generate-key "$name <$email>" ed25519 sign 2y
-    else
-      gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key "$name <$email>" ed25519 sign 2y
+  if [[ $GPG_MODE == reuse ]]; then
+    keyid=$(gpg_secret_fingerprint "$GPG_KEY_ID")
+    [[ -n $keyid ]] || die "The selected GPG secret key was not found: $GPG_KEY_ID"
+  else
+    while IFS= read -r candidate; do
+      if [[ -n $candidate ]] && github_gpg_key_present "$candidate"; then
+        keyid=$candidate
+        say "Reusing an already-provisioned GPG key for $email: $keyid"
+        break
+      fi
+    done < <(gpg --batch --with-colons --list-secret-keys "<$email>" 2>/dev/null | \
+      awk -F: '/^sec:/{want=1; next} want && /^fpr:/{print $10; want=0}')
+    if [[ -z $keyid ]]; then
+      if [[ $GPG_PASSPHRASE_MODE == prompt ]]; then
+        creation_output=$(gpg --status-fd 1 --quick-generate-key "$name <$email>" ed25519 sign never)
+      else
+        creation_output=$(gpg --batch --status-fd 1 --pinentry-mode loopback --passphrase '' --quick-generate-key "$name <$email>" ed25519 sign never)
+      fi
+      keyid=$(awk '$2 == "KEY_CREATED" {print $4; exit}' <<< "$creation_output")
     fi
-    keyid=$(gpg --list-secret-keys --keyid-format=long --with-colons "<$email>" | awk -F: '/^sec:/{print $5; exit}')
   fi
   [[ -n $keyid ]] || die "No matching GPG secret key found"
-  git config --global user.signingkey "$keyid"
-  git config --global commit.gpgsign true
-  git config --global tag.gpgsign true
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would export and add GPG key $keyid to GitHub"
-  else
-    gpg --armor --export "$keyid" | gh gpg-key add - 2>/dev/null || \
-      gh api --paginate user/gpg_keys --jq '.[].key_id' 2>/dev/null | grep -qxF "$keyid" || \
-      die "GitHub rejected GPG-key upload"
-  fi
+  gpg_key_has_email "$keyid" "$email" || die "Selected GPG key has no user ID for the Git email $email"
   local temp_repo
   temp_repo=$(mktemp -d)
-  trap 'rm -rf "$temp_repo"' RETURN
   git -C "$temp_repo" init -q
   git -C "$temp_repo" config user.name "$name"
   git -C "$temp_repo" config user.email "$email"
+  git -C "$temp_repo" config gpg.format openpgp
   git -C "$temp_repo" config user.signingkey "$keyid"
   git -C "$temp_repo" config commit.gpgsign true
-  git -C "$temp_repo" commit --allow-empty -S -m 'Verify Leo profiles signing setup' >/dev/null || die "GPG key cannot sign a Git commit"
-  trap - RETURN
+  if ! git -C "$temp_repo" commit --allow-empty -S -m 'Verify Leo profiles signing setup' >/dev/null; then
+    rm -rf "$temp_repo"
+    die "GPG key cannot sign a Git commit"
+  fi
   rm -rf "$temp_repo"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would export and add GPG key $keyid to GitHub"
+  elif ! github_gpg_key_present "$keyid"; then
+    exported_key=$(mktemp)
+    gpg --armor --export "$keyid" > "$exported_key"
+    if ! gh gpg-key add "$exported_key"; then
+      rm -f "$exported_key"
+      die "GitHub rejected GPG-key upload"
+    fi
+    rm -f "$exported_key"
+  fi
+  git config --global user.signingkey "$keyid"
+  git config --global gpg.format openpgp
+  git config --global commit.gpgsign true
+  git config --global tag.gpgsign true
+}
+
+current_login_shell() {
+  local current_shell
+  current_shell=$(getent passwd "$USER" 2>/dev/null | awk -F: '{print $7}' || true)
+  [[ -n $current_shell ]] || current_shell=$(dscl . -read /Users/"$USER" UserShell 2>/dev/null | awk '{print $2}' || true)
+  printf '%s\n' "$current_shell"
 }
 
 set_default_shell() {
   [[ $CHANGE_DEFAULT_SHELL == no ]] && { say "Skipping default shell (--default-shell no)"; return 0; }
   local zsh_path
   zsh_path=$(command -v zsh || true)
+  if [[ -z $zsh_path && $DRY_RUN -eq 1 ]]; then
+    say "Would configure the zsh path installed by the package step as the login shell"
+    return 0
+  fi
   [[ -n $zsh_path ]] || die "zsh is not installed"
   if [[ $CHANGE_DEFAULT_SHELL == auto ]]; then
     local current_shell
-    current_shell=$(getent passwd "$USER" 2>/dev/null | awk -F: '{print $7}' || true)
-    [[ -n $current_shell ]] || current_shell=$(dscl . -read /Users/"$USER" UserShell 2>/dev/null | awk '{print $2}' || true)
+    current_shell=$(current_login_shell)
     [[ $current_shell == *zsh ]] && { say "Default shell is already zsh"; return 0; }
   fi
   if [[ $OS_FAMILY == macos ]]; then
@@ -776,11 +1042,80 @@ set_default_shell() {
   fi
 }
 
+git_checkout_at() {
+  local directory=$1 repository=$2 commit=$3 origin
+  [[ -d $directory/.git ]] || return 1
+  origin=$(git -C "$directory" remote get-url origin 2>/dev/null || true)
+  [[ $origin == "$repository" ]] || return 1
+  [[ -z $(git -C "$directory" status --porcelain) ]] || return 1
+  [[ $(git -C "$directory" rev-parse HEAD 2>/dev/null || true) == "$commit" ]]
+}
+
+font_is_installed() {
+  local font=${FONT_NAME:-JetBrainsMono} directory
+  if [[ $OS_FAMILY == macos ]]; then
+    directory="$HOME/Library/Fonts"
+  else
+    directory="$HOME/.local/share/fonts"
+  fi
+  [[ -d $directory ]] && find "$directory" -type f -iname "*${font}*NerdFont*" -print -quit | grep -q .
+}
+
+verify_step() {
+  local step=$1 directory
+  case $step in
+    bins)
+      [[ -x $HOME/.local/bin/rpatool ]] && [[ $(sha256 "$HOME/.local/bin/rpatool") == "$RPATOOL_SHA256" ]] ;;
+    packages) selected_packages_installed ;;
+    pyenv)
+      [[ -x $HOME/.pyenv/bin/pyenv ]] && git_checkout_at "$HOME/.pyenv" "$PYENV_REPOSITORY" "$PYENV_COMMIT" ;;
+    rbenv)
+      [[ -x $HOME/.rbenv/bin/rbenv ]] &&
+        git_checkout_at "$HOME/.rbenv" "$RBENV_REPOSITORY" "$RBENV_COMMIT" &&
+        git_checkout_at "$HOME/.rbenv/plugins/ruby-build" "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT" ;;
+    bun)
+      [[ -x $HOME/.local/bin/bun ]] && "$HOME/.local/bin/bun" --version 2>/dev/null | grep -qx "$BUN_VERSION" ;;
+    yarn)
+      [[ -x $HOME/.local/npm/bin/yarn ]] && "$HOME/.local/npm/bin/yarn" --version 2>/dev/null | grep -qx "$YARN_VERSION" ;;
+    pnpm)
+      [[ -x $HOME/.local/npm/bin/pnpm ]] && "$HOME/.local/npm/bin/pnpm" --version 2>/dev/null | grep -qx "$PNPM_VERSION" ;;
+    fnm)
+      [[ -x $HOME/.local/bin/fnm ]] &&
+        "$HOME/.local/bin/fnm" --version 2>/dev/null | grep -qx "fnm $FNM_VERSION" &&
+        [[ -e ${XDG_DATA_HOME:-$HOME/.local/share}/fnm/aliases/default ]] ;;
+    plugins)
+      [[ -x $HOME/.local/bin/starship ]] &&
+        "$HOME/.local/bin/starship" --version 2>/dev/null | sed -n '1p' | grep -qx "starship $STARSHIP_VERSION" &&
+        directory="$TARGET/zsh/plugins" &&
+        git_checkout_at "$directory/zsh-autosuggestions" "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT" &&
+        git_checkout_at "$directory/zsh-syntax-highlighting" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT" &&
+        git_checkout_at "$directory/zsh-completions" "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT" &&
+        git_checkout_at "$directory/fzf-tab" "$FZF_TAB_REPOSITORY" "$FZF_TAB_COMMIT" ;;
+    fonts)
+      ! font_should_install || font_is_installed ;;
+    zsh-config)
+      managed_block_equals "$HOME/.zshrc" loader "$(zshrc_managed_content)" &&
+        managed_block_equals "$HOME/.zshenv" environment "$(zshenv_managed_content)" ;;
+    default-shell)
+      if [[ $CHANGE_DEFAULT_SHELL == no ]]; then
+        return 0
+      elif [[ $CHANGE_DEFAULT_SHELL == auto ]]; then
+        [[ $(current_login_shell) == */zsh ]]
+      else
+        [[ $(current_login_shell) == "$(command -v zsh)" ]]
+      fi ;;
+    *) return 1 ;;
+  esac
+}
+
 run_step() {
   local step=$1
-  if state_done "$step" && [[ $REPAIR -eq 0 ]]; then
-    say "Skipping $step (recorded complete)"
+  if state_done "$step" && [[ $REPAIR -eq 0 ]] && verify_step "$step"; then
+    say "Skipping $step (recorded complete and verified)"
     return 0
+  fi
+  if state_done "$step" && [[ $REPAIR -eq 0 ]]; then
+    warn "$step was recorded complete but failed verification; repairing it"
   fi
   say "Running $step"
   case $step in
@@ -798,6 +1133,7 @@ run_step() {
     default-shell) set_default_shell ;;
     *) die "Unknown step: $step" ;;
   esac
+  [[ $DRY_RUN -eq 1 ]] || verify_step "$step" || die "$step did not pass post-install verification"
   mark_done "$step"
 }
 

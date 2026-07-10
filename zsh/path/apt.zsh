@@ -1,9 +1,11 @@
 # APT checkup
 if command -v apt-get >/dev/null 2>&1; then
   apt-checkup() {
-    sudo DEBIAN_FRONTEND=noninteractive apt update -y &&
-      sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y &&
-      sudo DEBIAN_FRONTEND=noninteractive apt autoremove --purge -y &&
-      sudo DEBIAN_FRONTEND=noninteractive apt clean -y
+    sudo apt-get update &&
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y &&
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y &&
+      sudo apt-get clean
   }
 fi
+
+:

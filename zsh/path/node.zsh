@@ -3,3 +3,5 @@ if command -v yarn >/dev/null 2>&1 && __yarn_bin=$(yarn global bin 2>/dev/null) 
   add-path "$__yarn_bin"
 fi
 unset __yarn_bin
+
+:

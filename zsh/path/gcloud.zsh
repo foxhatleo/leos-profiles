@@ -4,3 +4,7 @@ if __leos_gc_prefix=${HOMEBREW_PREFIX:-$(__leos_brew_prefix)} && [[ -d $__leos_g
   [[ -f $__leos_gc_prefix/share/google-cloud-sdk/completion.zsh.inc ]] && \
     source "$__leos_gc_prefix/share/google-cloud-sdk/completion.zsh.inc"
 fi
+
+unset __leos_gc_prefix
+
+:
