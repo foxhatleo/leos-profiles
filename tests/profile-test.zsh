@@ -91,4 +91,15 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" PATH=/usr/bin:/bin TERM
     [[ $PROMPT == *"%n@%m"* ]]
   ' || fail 'missing-Starship fallback prompt'
 
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$tmp/empty-zsh" LEOS_TEST_ROOT="$root" TERM=xterm-256color \
+  zsh -dfc '
+    setopt err_return no_unset pipe_fail
+    mkdir -p "$LEOS_PROFILES_ZSH"
+    puts-err() { :; }
+    entry() { :; }
+    starship() { [[ $1 == init ]] && print -r -- ":"; }
+    source "$LEOS_TEST_ROOT/zsh/interactive.zsh" 2>/dev/null
+    [[ $STARSHIP_CONFIG == "$LEOS_PROFILES_ZSH/starship.toml" ]]
+  ' || fail 'clean checkout without cloned plugins'
+
 print -r -- 'profile tests: PASS'

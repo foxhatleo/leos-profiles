@@ -1,7 +1,10 @@
 # Leo's Profiles — interactive stack: plugins, completion, Starship.
 # Loaded LAST so zsh-syntax-highlighting is the final plugin sourced.
 
-_leos_plugin() { [[ -e $LEOS_PROFILES_ZSH/plugins/$1 ]] && source "$LEOS_PROFILES_ZSH/plugins/$1"; }
+_leos_plugin() {
+  [[ -e $LEOS_PROFILES_ZSH/plugins/$1 ]] || return 0
+  source "$LEOS_PROFILES_ZSH/plugins/$1"
+}
 
 # zsh-completions must extend fpath BEFORE compinit.
 [[ -d $LEOS_PROFILES_ZSH/plugins/zsh-completions/src ]] && \
