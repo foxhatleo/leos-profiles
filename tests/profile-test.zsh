@@ -13,10 +13,14 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
     setopt err_return no_unset pipe_fail
     starship() { [[ $1 == init ]] && print -r -- ":"; }
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
-    [[ "$LEOS_PROFILES" == "$LEOS_PROFILES_HOME" ]]
-    (( $+functions[bye] ))
-    [[ ${aliases[ls]:-} == "ls --color=auto" || ${aliases[ls]:-} == "ls -G" || ${aliases[ls]:-} == "eza --color=auto --group-directories-first" ]]
-    [[ "$STARSHIP_CONFIG" == "$LEOS_PROFILES_HOME/zsh/starship.toml" ]]
+    [[ "$LEOS_PROFILES" == "$LEOS_PROFILES_HOME" ]] || { print -u2 -r -- "profile root mismatch: $LEOS_PROFILES"; exit 1; }
+    (( $+functions[bye] )) || { print -u2 -r -- "bye function was not loaded"; exit 1; }
+    [[ ${aliases[ls]:-} == "ls --color=auto" || ${aliases[ls]:-} == "ls -G" || ${aliases[ls]:-} == "eza --color=auto --group-directories-first" ]] || {
+      print -u2 -r -- "unexpected ls alias: ${aliases[ls]:-(unset)}"; exit 1
+    }
+    [[ "$STARSHIP_CONFIG" == "$LEOS_PROFILES_HOME/zsh/starship.toml" ]] || {
+      print -u2 -r -- "themed Starship config mismatch: ${STARSHIP_CONFIG:-unset}"; exit 1
+    }
   ' || fail 'default themed profile'
 
 HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" LEOS_PLAIN_PROMPT=1 TERM=xterm-256color \
