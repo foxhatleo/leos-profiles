@@ -82,6 +82,10 @@ jobs:
         run: bash tests/package-map-availability.sh macos
       - name: Verify locked macOS artifacts and digests
         run: bash tests/locked-artifacts-test.sh
+      - name: Run deterministic installer tests
+        run: bash tests/install-test.sh
+      - name: Run Zsh profile tests
+        run: zsh tests/profile-test.zsh
 
   package-map-apt:
     name: Package map / ${{ matrix.runner }} (gating)
