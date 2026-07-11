@@ -1276,19 +1276,40 @@ git_checkout_at() {
 }
 
 font_is_installed() {
-  local font=${FONT_NAME:-JetBrainsMono} directory
+  local font=${FONT_NAME:-JetBrainsMono} installed_family directory
   if [[ $OS_FAMILY == macos ]]; then
     directory="$HOME/Library/Fonts"
   else
     directory="$HOME/.local/share/fonts"
   fi
   [[ -d $directory ]] || return 1
-  # Nerd Fonts renames some families on install (CascadiaCode ships as
-  # CaskaydiaCoveNerdFont-*), so fall back to any patched font. The fonts
-  # state signature pins the requested family, so a changed selection still
-  # re-runs the step.
-  find "$directory" -type f -iname "*${font}*NerdFont*" -print -quit | grep -q . ||
-    find "$directory" -type f -iname "*NerdFont*" -print -quit | grep -q .
+  # Nerd Fonts renames families whose upstream names are reserved. These
+  # aliases match the filenames in the pinned nerd-fonts commit. Keep the
+  # check family-specific: another installed Nerd Font must not satisfy the
+  # requested family's postcondition.
+  case $font in
+    AnonymousPro) installed_family=AnonymicePro ;;
+    AurulentSansMono) installed_family=AurulentSansM ;;
+    BigBlueTerminal) installed_family=BigBlueTerm ;;
+    BitstreamVeraSansMono) installed_family=BitstromWera ;;
+    CascadiaCode) installed_family=CaskaydiaCove ;;
+    DejaVuSansMono) installed_family=DejaVuSansM ;;
+    DroidSansMono) installed_family=DroidSansM ;;
+    FantasqueSansMono) installed_family=FantasqueSansM ;;
+    Go-Mono) installed_family=GoMono ;;
+    Hasklig) installed_family=Hasklug ;;
+    Hermit) installed_family=Hurmit ;;
+    IBMPlexMono) installed_family=BlexMono ;;
+    LiberationMono) installed_family=LiterationMono ;;
+    MPlus) installed_family='M+' ;;
+    NerdFontsSymbolsOnly) installed_family=Symbols ;;
+    ShareTechMono) installed_family=ShureTechMono ;;
+    SourceCodePro) installed_family=SauceCodePro ;;
+    Terminus) installed_family=Terminess ;;
+    iA-Writer) installed_family=iMWriting ;;
+    *) installed_family=$font ;;
+  esac
+  find "$directory" -type f -iname "*${installed_family}*NerdFont*" -print -quit | grep -q .
 }
 
 verify_step() {

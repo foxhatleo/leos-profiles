@@ -209,8 +209,10 @@ test_macos_package_verification_batches_brew_calls() (
   brew() {
     printf '%s\n' "call" >> "$BREW_CALLS_FILE"
     local package
-    # $1=list $2=--versions; packages start at $3
-    for package in "${@:3}"; do printf '%s 1.0\n' "$package"; done
+    # $1=list $2=--versions; shift them explicitly because Bash 3.2 joins
+    # "${@:3}" when the caller uses this test suite's newline-only IFS.
+    shift 2
+    for package in "$@"; do printf '%s 1.0\n' "$package"; done
   }
   selected_packages_installed || fail "installed package set not recognised"
   [[ $(grep -c call "$BREW_CALLS_FILE") == 1 ]] || fail "brew was spawned more than once for verification"
@@ -218,18 +220,42 @@ test_macos_package_verification_batches_brew_calls() (
 )
 
 test_font_verifier_accepts_renamed_families() (
-  local temp
+  local temp pair font filename
   temp=$(mktemp -d)
   HOME="$temp"
   OS_FAMILY=macos
-  FONT_NAME="CascadiaCode"
   mkdir -p "$HOME/Library/Fonts"
-  : > "$HOME/Library/Fonts/CaskaydiaCoveNerdFont-Regular.ttf"
-  font_is_installed || fail "renamed Nerd Font family was not recognised as installed"
-  rm -f "$HOME/Library/Fonts/CaskaydiaCoveNerdFont-Regular.ttf"
-  : > "$HOME/Library/Fonts/SomethingElse-Regular.ttf"
+  for pair in \
+    AnonymousPro:AnonymiceProNerdFont-Regular.ttf \
+    AurulentSansMono:AurulentSansMNerdFont-Regular.otf \
+    BigBlueTerminal:BigBlueTerm437NerdFont-Regular.ttf \
+    BitstreamVeraSansMono:BitstromWeraNerdFont-Regular.ttf \
+    CascadiaCode:CaskaydiaCoveNerdFont-Regular.ttf \
+    DejaVuSansMono:DejaVuSansMNerdFont-Regular.ttf \
+    DroidSansMono:DroidSansMNerdFont-Regular.otf \
+    FantasqueSansMono:FantasqueSansMNerdFont-Regular.ttf \
+    Go-Mono:GoMonoNerdFont-Regular.ttf \
+    Hasklig:HasklugNerdFont-Regular.otf \
+    Hermit:HurmitNerdFont-Regular.otf \
+    IBMPlexMono:BlexMonoNerdFont-Regular.ttf \
+    LiberationMono:LiterationMonoNerdFont-Regular.ttf \
+    MPlus:M+1NerdFont-Regular.ttf \
+    NerdFontsSymbolsOnly:SymbolsNerdFont-Regular.ttf \
+    ShareTechMono:ShureTechMonoNerdFont-Regular.ttf \
+    SourceCodePro:SauceCodeProNerdFont-Regular.ttf \
+    Terminus:TerminessNerdFont-Regular.ttf \
+    iA-Writer:iMWritingDuoNerdFont-Regular.ttf; do
+    font=${pair%%:*}
+    filename=${pair#*:}
+    FONT_NAME=$font
+    : > "$HOME/Library/Fonts/$filename"
+    font_is_installed || fail "renamed Nerd Font family was not recognised: $font"
+    rm -f "$HOME/Library/Fonts/$filename"
+  done
+  FONT_NAME=CascadiaCode
+  : > "$HOME/Library/Fonts/JetBrainsMonoNerdFont-Regular.ttf"
   if font_is_installed; then
-    fail "verifier passed with no patched Nerd Font present"
+    fail "verifier accepted a different installed Nerd Font family"
   fi
   rm -rf "$temp"
 )
