@@ -202,6 +202,21 @@ test_default_font_policy_and_npm_versions_are_locked() {
   [[ $YARN_SHA256 =~ ^[0-9a-f]{64}$ && $PNPM_SHA256 =~ ^[0-9a-f]{64}$ ]] || fail "npm tarball digest is invalid"
 }
 
+test_macos_package_verification_batches_brew_calls() (
+  OS_FAMILY=macos
+  SELECTED_GROUPS=core-utils
+  BREW_CALLS_FILE=$(mktemp)
+  brew() {
+    printf '%s\n' "call" >> "$BREW_CALLS_FILE"
+    local package
+    # $1=list $2=--versions; packages start at $3
+    for package in "${@:3}"; do printf '%s 1.0\n' "$package"; done
+  }
+  selected_packages_installed || fail "installed package set not recognised"
+  [[ $(grep -c call "$BREW_CALLS_FILE") == 1 ]] || fail "brew was spawned more than once for verification"
+  rm -f "$BREW_CALLS_FILE"
+)
+
 test_font_verifier_accepts_renamed_families() (
   local temp
   temp=$(mktemp -d)
@@ -496,6 +511,7 @@ test_tar_archive_install_creates_extraction_directory
 test_platform_assets_are_locked
 test_package_maps_cover_every_supported_os
 test_default_font_policy_and_npm_versions_are_locked
+test_macos_package_verification_batches_brew_calls
 test_font_verifier_accepts_renamed_families
 test_ssh_public_material_ignores_comments
 test_github_key_checks_fail_closed_on_api_errors

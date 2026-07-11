@@ -551,9 +551,16 @@ package_installed() {
 }
 
 selected_packages_installed() {
-  local package
+  local package installed_lines
   collect_selected_packages
   (( ${#SELECTED_PACKAGES[@]} > 0 )) || return 0
+  if [[ $OS_FAMILY == macos ]]; then
+    # One brew invocation: it prints one line per installed formula among
+    # the arguments (aliases resolve to their real names).
+    installed_lines=$(brew list --versions "${SELECTED_PACKAGES[@]}" 2>/dev/null | grep -c . || true)
+    (( installed_lines == ${#SELECTED_PACKAGES[@]} ))
+    return
+  fi
   for package in "${SELECTED_PACKAGES[@]}"; do
     package_installed "$package" || return 1
   done
