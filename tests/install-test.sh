@@ -268,6 +268,22 @@ test_auto_shell_verifier_accepts_an_existing_zsh() (
   verify_step default-shell || fail "auto shell policy rejected an existing zsh login shell"
 )
 
+test_shell_matchers_agree_on_non_zsh_shells() (
+  CHANGE_DEFAULT_SHELL=auto
+  # tzsh ends in "zsh" — the old skip matcher (*zsh) accepts it, which is
+  # the divergence that hard-failed installs. Both matchers must reject it.
+  current_login_shell() { printf '%s\n' /usr/local/bin/tzsh; }
+  if verify_step default-shell; then
+    fail "verifier accepted a non-zsh login shell (tzsh)"
+  fi
+  current_login_shell() { printf '%s\n' /bin/zsh; }
+  verify_step default-shell || fail "verifier rejected a real zsh login shell"
+  # A bare 'zsh' entry has no slash: the old verifier (*/zsh) rejects it
+  # while the old skip matcher accepts it — this is the failing case pre-fix.
+  current_login_shell() { printf '%s\n' zsh; }
+  verify_step default-shell || fail "verifier rejected a bare zsh login shell"
+)
+
 test_git_identity_only_fills_missing_fields() (
   local temp
   temp=$(mktemp -d)
@@ -485,6 +501,7 @@ test_ssh_public_material_ignores_comments
 test_github_key_checks_fail_closed_on_api_errors
 test_github_key_checks_still_match_present_keys
 test_auto_shell_verifier_accepts_an_existing_zsh
+test_shell_matchers_agree_on_non_zsh_shells
 test_git_identity_only_fills_missing_fields
 test_profile_round_trip_and_control_character_rejection
 test_local_migration_and_conflict_detection

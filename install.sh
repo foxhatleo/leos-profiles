@@ -1256,7 +1256,7 @@ set_default_shell() {
   if [[ $CHANGE_DEFAULT_SHELL == auto ]]; then
     local current_shell
     current_shell=$(current_login_shell)
-    [[ $current_shell == *zsh ]] && { say "Default shell is already zsh"; return 0; }
+    [[ ${current_shell##*/} == zsh ]] && { say "Default shell is already zsh"; return 0; }
   fi
   if [[ $OS_FAMILY == macos ]]; then
     grep -qxF "$zsh_path" /etc/shells || run_shell "Add $zsh_path to /etc/shells" "printf '%s\\n' '$zsh_path' | sudo tee -a /etc/shells >/dev/null"
@@ -1333,7 +1333,9 @@ verify_step() {
       if [[ $CHANGE_DEFAULT_SHELL == no ]]; then
         return 0
       elif [[ $CHANGE_DEFAULT_SHELL == auto ]]; then
-        [[ $(current_login_shell) == */zsh ]]
+        local current_shell
+        current_shell=$(current_login_shell)
+        [[ ${current_shell##*/} == zsh ]]
       else
         [[ $(current_login_shell) == "$(command -v zsh)" ]]
       fi ;;
