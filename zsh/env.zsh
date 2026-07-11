@@ -5,8 +5,10 @@
 if [[ -z ${LANG:-} ]]; then
   if locale -a 2>/dev/null | command grep -qEi '^C\.(UTF-8|utf8)$'; then
     export LANG=C.UTF-8
-  else
+  elif locale -a 2>/dev/null | command grep -qEi '^en_US\.(UTF-8|utf8)$'; then
     export LANG=en_US.UTF-8
+  else
+    export LANG=C
   fi
 fi
 

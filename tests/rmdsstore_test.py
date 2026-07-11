@@ -32,16 +32,31 @@ class RmdsstoreTest(unittest.TestCase):
             (recycle / "item").write_text("metadata", encoding="utf-8")
 
             dry_result = rmdsstore.scan(str(root), dry_run=True)
-            self.assertEqual(dry_result.removed, 4)
+            self.assertEqual(dry_result.removed, 3)
             self.assertTrue((root / ".DS_Store").exists())
             self.assertTrue(recycle.exists())
 
             result = rmdsstore.scan(str(root), dry_run=False)
-            self.assertEqual(result.removed, 4)
+            self.assertEqual(result.removed, 3)
             self.assertFalse((root / ".DS_Store").exists())
             self.assertFalse((nested / "Thumbs.db").exists())
             self.assertFalse((nested / "desktop.ini").exists())
+            self.assertTrue(recycle.exists())
+
+            purge = rmdsstore.scan(str(root), dry_run=False, purge_recycle_bins=True)
+            self.assertEqual(purge.removed, 1)
             self.assertFalse(recycle.exists())
+
+    def test_symlink_root_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "target"
+            target.mkdir()
+            link = pathlib.Path(directory) / "link"
+            link.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                rmdsstore.scan(str(link), dry_run=True)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                rmdsstore.scan(f"{link}/", dry_run=True)
 
     def test_invalid_root_is_an_error(self) -> None:
         self.assertEqual(rmdsstore.main(["/definitely-not-a-real-leos-root"]), 2)

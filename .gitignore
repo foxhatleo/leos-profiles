@@ -6,6 +6,7 @@ docs/
 ssh-shortcuts.zsh
 zsh/_private.zsh
 zsh/plugins/
+local/
 
 # ---- macOS ----
 .DS_Store

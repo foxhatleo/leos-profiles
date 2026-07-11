@@ -4,6 +4,8 @@ on:
   push:
     branches: [master]
   pull_request:
+  schedule:
+    - cron: "23 8 * * 1"
 
 permissions:
   contents: read
@@ -47,13 +49,12 @@ jobs:
       - name: Verify locked Linux artifacts and digests
         run: bash tests/locked-artifacts-test.sh
       - name: Lint deterministic installer
-        run: shellcheck -s bash install.sh installer/lock.sh tests/install-test.sh tests/package-map-availability.sh tests/locked-artifacts-test.sh
+        run: shellcheck -s bash -x install.sh installer/lock.sh tests/*.sh
       - name: Validate starship TOML
         run: python3 -c "import tomllib; tomllib.load(open('zsh/starship.toml','rb')); tomllib.load(open('zsh/starship-plain.toml','rb'))"
       - name: Syntax-check the installer's fenced bash blocks
         run: |
-          # The installer IS QUICK-INSTALL.md — bash -n every ```bash block so a syntax
-          # error in the runbook can't ship silently.
+          # Validate every deterministic bootstrap snippet in the AI runbook.
           awk '/^```bash$/{f=1;n++;next} /^```$/{f=0;next} f{print > ("blk-" n ".sh")}' QUICK-INSTALL.md
           shopt -s nullglob   # zero bash blocks -> empty loop, not a literal "blk-*.sh" false error
           rc=0
@@ -62,11 +63,17 @@ jobs:
           done
           rm -f blk-*.sh
           exit "$rc"
+      - name: Clone locked plugins and source their combined Zsh integration
+        run: bash tests/locked-plugins-test.sh
 
   package-map-macos:
-    name: Package map / macOS (gating)
-    runs-on: macos-latest
+    name: Package map / ${{ matrix.runner }} (gating)
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15, macos-15-intel, macos-26, macos-26-intel]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Refresh formula metadata and tap Heroku
@@ -77,9 +84,13 @@ jobs:
         run: bash tests/locked-artifacts-test.sh
 
   package-map-apt:
-    name: Package map / Ubuntu (gating)
-    runs-on: ubuntu-latest
+    name: Package map / ${{ matrix.runner }} (gating)
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Refresh package metadata
@@ -88,16 +99,27 @@ jobs:
         run: bash tests/package-map-availability.sh apt
 
   package-map-container:
-    name: Package map / ${{ matrix.family }} (gating)
+    name: Package map / ${{ matrix.label }} (gating)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
+          - family: apt
+            label: Debian 12
+            image: debian:12
+          - family: apt
+            label: Debian 13
+            image: debian:13
           - family: fedora
-            image: fedora:latest
+            label: Fedora 43
+            image: fedora:43
+          - family: fedora
+            label: Fedora 44
+            image: fedora:44
           - family: arch
+            label: Arch latest x86_64
             image: archlinux:latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -106,7 +128,12 @@ jobs:
           FAMILY: ${{ matrix.family }}
           IMAGE: ${{ matrix.image }}
         run: |
-          if [[ $FAMILY == fedora ]]; then
+          if [[ $FAMILY == apt ]]; then
+            docker run --rm -v "$PWD:/repo:ro" "$IMAGE" bash -lc '
+              apt-get update && apt-get install -y ca-certificates &&
+              bash /repo/tests/package-map-availability.sh apt
+            '
+          elif [[ $FAMILY == fedora ]]; then
             docker run --rm -v "$PWD:/repo:ro" "$IMAGE" bash -lc '
               dnf install -y findutils grep rpm ca-certificates &&
               dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" &&
@@ -118,3 +145,12 @@ jobs:
               bash /repo/tests/package-map-availability.sh arch
             '
           fi
+
+  locked-linux-arm64:
+    name: Locked Linux arm64 artifacts (gating)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Verify every locked Linux arm64 binary and digest
+        run: bash tests/locked-artifacts-test.sh

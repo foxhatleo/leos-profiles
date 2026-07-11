@@ -6,8 +6,6 @@
 # source is checked out at the exact commit below; the Homebrew installer and
 # rpatool downloads are additionally verified by SHA-256 before execution.
 
-readonly LEOS_PROFILE_REPOSITORY="https://github.com/foxhatleo/leos-profiles.git"
-
 readonly PYENV_REPOSITORY="https://github.com/pyenv/pyenv.git"
 readonly PYENV_COMMIT="e4c462dc70951c8714d069522448c9583a38c913"
 readonly RBENV_REPOSITORY="https://github.com/rbenv/rbenv.git"

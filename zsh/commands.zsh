@@ -6,7 +6,7 @@ __rmdsstore() {
     return 1
   fi
   if (( $# == 0 )); then
-    puts-err "Usage: rmdsstore [--dry-run] <root>."
+    puts-err "Usage: rmdsstore [--dry-run] [--purge-recycle-bins] <root>."
     return 2
   fi
   local python
@@ -17,12 +17,17 @@ __rmdsstore() {
 
 # Remove all .DS_Store and sibling metadata files under standard macOS roots.
 rmdsstore() {
-  local root exit_code=0
+  local root arg exit_code=0
   local -a options
-  if [[ ${1:-} == --dry-run ]]; then
-    options=(--dry-run)
-    shift
-  fi
+  while (( $# > 0 )); do
+    arg=$1
+    case $arg in
+      --dry-run|--purge-recycle-bins) options+=("$arg"); shift ;;
+      --) shift; break ;;
+      -*) puts-err "Usage: rmdsstore [--dry-run] [--purge-recycle-bins] [root ...]"; return 2 ;;
+      *) break ;;
+    esac
+  done
   if (( $# > 0 )); then
     for root in "$@"; do
       __rmdsstore "${options[@]}" "$root" || exit_code=1
@@ -40,17 +45,27 @@ rmdsstore() {
   return $exit_code
 }
 
-# Clear history files.
+# Clear known history files. The aggressive mode adds the legacy broad globs,
+# but still never recursively deletes a matched directory.
 clear-history() {
-  local f exit_code=0
-  for f in $HOME/.*history(N) $HOME/.zcompdump*(N) \
-           $HOME/.oracle_jre_usage(N) $HOME/.*hsts(N); do
-    rm -rf "$f" || exit_code=1
+  local aggressive=${1:-} f exit_code=0
+  local -a candidates
+  candidates=("$HOME/.zsh_history" "$HOME/.bash_history" "$HOME/.python_history"
+              "$HOME/.node_repl_history" "$HOME/.lesshst")
+  if [[ $aggressive == --aggressive ]]; then
+    candidates+=($HOME/.*history(N) $HOME/.zcompdump*(N) \
+                 $HOME/.oracle_jre_usage(N) $HOME/.*hsts(N))
+  fi
+  for f in "${candidates[@]}"; do
+    [[ -f $f || -L $f ]] || continue
+    rm -f -- "$f" || exit_code=1
   done
   : > "$HISTFILE" 2>/dev/null || exit_code=1
   fc -p "$HISTFILE" 2>/dev/null || exit_code=1
   if [[ -d $HOME/.lldb ]]; then
-    for f in $HOME/.lldb/*history(N); do rm -rf "$f" || exit_code=1; done
+    for f in $HOME/.lldb/*history(N); do
+      if [[ -f $f || -L $f ]]; then rm -f -- "$f" || exit_code=1; fi
+    done
   fi
   if command -v powershell.exe >/dev/null 2>&1; then
     powershell.exe -Command "Remove-Item (Get-PSReadlineOption).HistorySavePath" || exit_code=1
@@ -82,17 +97,28 @@ mkcdir() {
 # Clean up and quit the terminal. This intentionally performs the full Leo's
 # maintenance routine: package updates, AI CLI updates, history cleanup, and
 # on macOS a privileged metadata sweep plus Finder/Dock restart.
-# Options are exact: --keep-history, --non-interactive, --no-exit.
+# Options are exact; destructive extensions are explicit opt-ins.
 bye() {
-  local keep_history non_interactive no_exit arg exit_code=0
+  local keep_history non_interactive no_exit aggressive_history purge_recycle_bins shutdown_wsl arg exit_code=0
   for arg in "$@"; do
     case $arg in
       --keep-history|keep-history) keep_history=1 ;;
       --non-interactive|non-interactive) non_interactive=1 ;;
       --no-exit|no-exit) no_exit=1 ;;
-      *) puts-err "Usage: bye [--keep-history] [--non-interactive] [--no-exit]"; return 2 ;;
+      --aggressive-history) aggressive_history=1 ;;
+      --purge-recycle-bins) purge_recycle_bins=1 ;;
+      --shutdown-wsl) shutdown_wsl=1 ;;
+      *) puts-err "Usage: bye [--keep-history] [--non-interactive] [--no-exit] [--aggressive-history] [--purge-recycle-bins] [--shutdown-wsl]"; return 2 ;;
     esac
   done
+  if [[ -n $shutdown_wsl && -n $no_exit ]]; then
+    puts-err "--shutdown-wsl and --no-exit are contradictory."
+    return 2
+  fi
+  if [[ -n $keep_history && -n $aggressive_history ]]; then
+    puts-err "--keep-history and --aggressive-history are contradictory."
+    return 2
+  fi
 
   puts "Bye!"
 
@@ -112,43 +138,68 @@ bye() {
 
   if [[ -z $keep_history ]]; then
     puts "Clear all history files.."
-    clear-history || exit_code=1
+    if [[ -n $aggressive_history ]]; then
+      clear-history --aggressive || exit_code=1
+    else
+      clear-history || exit_code=1
+    fi
   fi
 
   if [[ $(uname -s) == Darwin ]]; then
     puts "Restarting Finder, Dock, SystemUIServer..."
-    rmdsstore || exit_code=1
+    if [[ -n $purge_recycle_bins ]]; then rmdsstore --purge-recycle-bins || exit_code=1; else rmdsstore || exit_code=1; fi
     killall Finder Dock SystemUIServer || exit_code=1
   fi
 
   if [[ -n $no_exit ]]; then
     puts "Skipped exiting."
     return $exit_code
-  elif command -v /mnt/c/Windows/system32/wsl.exe >/dev/null 2>&1; then
+  elif [[ -n $shutdown_wsl ]] && command -v /mnt/c/Windows/system32/wsl.exe >/dev/null 2>&1; then
     /mnt/c/Windows/system32/wsl.exe --shutdown
   else
     exit $exit_code
   fi
 }
 
-# Upgrade Leo's Profiles (repo + cloned zsh plugins).
+# Fast-forward the configured profile upstream, then run the newly pulled
+# deterministic reconciler against the saved local profile.
 upgrade-leos-profiles() {
-  local branch
+  local branch upstream
+  local -a reconcile_args
+  reconcile_args=(reconcile --yes)
+  if (( $# > 1 )) || [[ $# == 1 && $1 != --full-upgrade ]]; then
+    puts-err "Usage: upgrade-leos-profiles [--full-upgrade]"
+    return 2
+  fi
+  [[ ${1:-} != --full-upgrade ]] || reconcile_args+=(--full-upgrade)
   branch=$(git -C "$LEOS_PROFILES" symbolic-ref --quiet --short HEAD) || {
-    puts-err "This is a pinned checkout. Upgrade with a reviewed release ref via install.sh --repair."
+    puts-err "The profile checkout must be on a branch."
     return 1
   }
+  upstream=$(git -C "$LEOS_PROFILES" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) || {
+    puts-err "Branch $branch has no configured upstream."
+    return 1
+  }
+  if [[ -n $(git -C "$LEOS_PROFILES" status --porcelain --untracked-files=normal) ]]; then
+    puts-err "Refusing to pull because the profile checkout has local changes. Commit or stash them first."
+    return 1
+  fi
   git -C "$LEOS_PROFILES" pull --ff-only || return $?
-  puts "Updated $LEOS_PROFILES on $branch. Plugin revisions remain locked until the next profile release."
+  puts "Updated $LEOS_PROFILES from $upstream; reconciling the saved setup."
+  command bash "$LEOS_PROFILES/install.sh" "${reconcile_args[@]}"
 }
 
-# Update AI coding CLIs.
+# Update only installed AI coding CLIs using their supported native updaters.
 ai-checkup() {
-  if ! command -v npm >/dev/null 2>&1; then
-    puts-err "npm is not available; cannot update AI tools."; return 1
+  local found=0 exit_code=0
+  if command -v claude >/dev/null 2>&1; then
+    found=1; puts "Updating Claude Code..."; claude update || exit_code=1
   fi
-  puts "Updating Claude Code and Codex..."
-  npm update -g @anthropic-ai/claude-code @openai/codex
+  if command -v codex >/dev/null 2>&1; then
+    found=1; puts "Updating Codex..."; codex update || exit_code=1
+  fi
+  (( found )) || puts "No supported installed AI CLI was detected; nothing to update."
+  return $exit_code
 }
 
 # Linux GUI toggles. Detect a known display-manager service instead of assuming

@@ -67,9 +67,21 @@ LEOS_TEST_ROOT="$root" zsh -dfc '
   setopt err_return no_unset pipe_fail
   typeset -a loaded
   entry() { loaded+=("$1"); }
+  LEOS_PROFILES="$LEOS_TEST_ROOT"
   source "$LEOS_TEST_ROOT/zsh/entries.zsh"
-  [[ ${loaded[-3]} == commands && ${loaded[-2]} == _private && ${loaded[-1]} == interactive ]]
+  [[ ${loaded[-2]} == commands && ${loaded[-1]} == interactive ]]
 ' || fail 'private override load order'
+
+mkdir -p "$tmp/profile/local" "$tmp/profile/zsh"
+cp "$root/zsh/entries.zsh" "$tmp/profile/zsh/entries.zsh"
+print -r -- 'typeset -g LEOS_PRIVATE_LOADED=yes' > "$tmp/profile/local/private.zsh"
+LEOS_TEST_ROOT="$tmp/profile" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  entry() { :; }
+  LEOS_PROFILES="$LEOS_TEST_ROOT"
+  source "$LEOS_TEST_ROOT/zsh/entries.zsh"
+  [[ $LEOS_PRIVATE_LOADED == yes ]]
+' || fail 'local private override'
 
 HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
   zsh -dfc '
@@ -101,5 +113,54 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$tmp/empty-zsh" LEOS_TEST_ROOT="$r
     source "$LEOS_TEST_ROOT/zsh/interactive.zsh" 2>/dev/null
     [[ $STARSHIP_CONFIG == "$LEOS_PROFILES_ZSH/starship.toml" ]]
   ' || fail 'clean checkout without cloned plugins'
+
+HOME="$tmp/history-home" LEOS_TEST_ROOT="$root" zsh -dfc '
+  setopt err_return no_unset pipe_fail extended_glob
+  mkdir -p "$HOME/.directory_history"
+  : > "$HOME/.zsh_history"
+  : > "$HOME/.legacy_history"
+  HISTFILE="$HOME/.zsh_history"
+  puts() { :; }; puts-err() { :; }; fc() { :; }
+  source "$LEOS_TEST_ROOT/zsh/commands.zsh"
+  clear-history
+  [[ ! -s $HOME/.zsh_history && -e $HOME/.legacy_history && -d $HOME/.directory_history ]]
+  clear-history --aggressive
+  [[ ! -e $HOME/.legacy_history && -d $HOME/.directory_history ]]
+' || fail 'safe and aggressive history boundaries'
+
+HOME="$tmp/ai-home" LEOS_TEST_ROOT="$root" AI_LOG="$tmp/ai-log" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  claude() { print -r -- "claude $*" >> "$AI_LOG"; }
+  codex() { print -r -- "codex $*" >> "$AI_LOG"; }
+  npm() { print -r -- BAD >> "$AI_LOG"; return 1; }
+  source "$LEOS_TEST_ROOT/zsh/commands.zsh"
+  ai-checkup
+  [[ "$(<$AI_LOG)" == $'"'"'claude update\ncodex update'"'"' ]]
+  ! bye --shutdown-wsl --no-exit >/dev/null 2>&1
+' || fail 'native AI updates and contradictory bye options'
+
+mkdir -p "$tmp/updater-profile" "$tmp/fake-bin"
+: > "$tmp/updater-profile/install.sh"
+print -rl -- '#!/bin/sh' 'printf "%s\n" "$*" > "$UPGRADE_LOG"' > "$tmp/fake-bin/bash"
+chmod +x "$tmp/fake-bin/bash"
+HOME="$tmp/updater-home" PATH="$tmp/fake-bin:$PATH" LEOS_TEST_ROOT="$root" LEOS_PROFILES="$tmp/updater-profile" UPGRADE_LOG="$tmp/upgrade-log" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  git() {
+    case "$*" in
+      *"symbolic-ref --quiet --short HEAD"*) print -r -- feature ;;
+      *"rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) print -r -- fork/feature ;;
+      *"status --porcelain"*) [[ -z ${DIRTY:-} ]] || print -r -- " M local-edit"; return 0 ;;
+      *"pull --ff-only"*) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  source "$LEOS_TEST_ROOT/zsh/commands.zsh"
+  upgrade-leos-profiles --full-upgrade
+  [[ "$(<$UPGRADE_LOG)" == "$LEOS_PROFILES/install.sh reconcile --yes --full-upgrade" ]]
+  DIRTY=1
+  ! upgrade-leos-profiles >/dev/null 2>&1
+' || fail 'configured-upstream reconciliation'
 
 print -r -- 'profile tests: PASS'

@@ -31,11 +31,9 @@ autoload -Uz compinit compaudit
 # fzf completion and widgets load after compinit, but before fzf-tab.
 entry "path/fzf"
 
-# fzf-tab must load after compinit but BEFORE plugins that wrap ZLE widgets
-# (zsh-autosuggestions), per its docs. Syntax highlighting stays last.
+# fzf-tab must load after compinit but BEFORE plugins that wrap ZLE widgets.
 _leos_plugin fzf-tab/fzf-tab.plugin.zsh
 _leos_plugin zsh-autosuggestions/zsh-autosuggestions.zsh
-_leos_plugin zsh-syntax-highlighting/zsh-syntax-highlighting.zsh   # MUST be last
 
 # Custom completions (after compinit).
 if (( $+functions[compdef] )); then
@@ -44,10 +42,17 @@ if (( $+functions[compdef] )); then
     _values 'option' \
       '--no-exit[Do not quit the terminal]' \
       '--keep-history[Preserve history files]' \
-      '--non-interactive[Run upgrades without confirmation prompts]'
+      '--non-interactive[Run upgrades without confirmation prompts]' \
+      '--aggressive-history[Also remove legacy history and HSTS matches]' \
+      '--purge-recycle-bins[Permit removal of macOS recycle-bin directories]' \
+      '--shutdown-wsl[Shut down WSL after maintenance]'
   }
   compdef _leos_bye bye
 fi
+
+# Syntax highlighting must be the final interactive plugin action, after
+# completion definitions and prompt widget setup.
+_leos_plugin zsh-syntax-highlighting/zsh-syntax-highlighting.zsh   # MUST be last
 
 :
 

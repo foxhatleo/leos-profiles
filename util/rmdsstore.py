@@ -62,7 +62,7 @@ def remove_path(path: str, root: str, dry_run: bool, result: Result, is_dir: boo
         result.removed += 1
         return
     try:
-        if is_dir:
+        if is_dir and not os.path.islink(path):
             shutil.rmtree(path)
         else:
             os.remove(path)
@@ -72,8 +72,10 @@ def remove_path(path: str, root: str, dry_run: bool, result: Result, is_dir: boo
         progress(path, root, prompt=f"Could not remove ({{}}): {error}", newline=True)
 
 
-def scan(root: str, dry_run: bool) -> Result:
-    root = os.path.abspath(root)
+def scan(root: str, dry_run: bool, purge_recycle_bins: bool = False) -> Result:
+    root = os.path.abspath(os.path.normpath(root))
+    if os.path.islink(root):
+        raise ValueError(f"Scan root must not be a symbolic link: {root}")
     if not os.path.isdir(root):
         raise ValueError(f"Not a readable directory: {root}")
 
@@ -98,7 +100,8 @@ def scan(root: str, dry_run: bool) -> Result:
                 progress(candidate, root, prompt="Skipping mounted filesystem {}...", newline=True)
                 continue
             if name == RECYCLE_BIN:
-                remove_path(candidate, root, dry_run, result, is_dir=True)
+                if purge_recycle_bins:
+                    remove_path(candidate, root, dry_run, result, is_dir=True)
                 continue
             retained_dirs.append(name)
         dirs[:] = retained_dirs
@@ -112,6 +115,11 @@ def scan(root: str, dry_run: bool) -> Result:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="report files that would be removed")
+    parser.add_argument(
+        "--purge-recycle-bins",
+        action="store_true",
+        help="also remove directories named $RECYCLE.BIN and their contents",
+    )
     parser.add_argument("root", help="directory tree to scan")
     return parser.parse_args(argv)
 
@@ -121,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     root = os.path.abspath(args.root)
     print(f'Running rmdsstore on "{root}"{" (dry run)" if args.dry_run else ""}.', flush=True)
     try:
-        result = scan(root, args.dry_run)
+        result = scan(root, args.dry_run, args.purge_recycle_bins)
     except ValueError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

@@ -24,9 +24,9 @@ entry "env"
 
 entry "commands"
 
-# Private definitions load after the public command layer so a machine-specific
-# override can intentionally replace a profile command or alias.
-entry "_private" optional
+# Private definitions live outside version control and load after the public
+# command layer so a machine-specific override can intentionally win.
+[[ ! -r $LEOS_PROFILES/local/private.zsh ]] || source "$LEOS_PROFILES/local/private.zsh"
 
 entry "interactive"
 

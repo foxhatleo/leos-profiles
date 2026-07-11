@@ -22,17 +22,21 @@ test_dependency_normalisation() (
   assert_contains "$SELECTED_GROUPS" "shell"
 )
 
+test_package_group_selection_is_whole_and_executable() (
+  SELECTED_STEPS=""
+  SELECTED_GROUPS=media
+  normalise_dependencies
+  assert_equals "$SELECTED_STEPS" packages
+  SELECTED_STEPS=""
+  SELECTED_GROUPS=""
+  validate_options
+)
+
 test_default_does_not_include_unreleased_local_bin() {
   [[ $SELECTED_STEPS != *bins* ]] || fail "rpatool bins step must be opt-in"
 }
 
-test_option_validation_rejects_ambiguous_paths_and_csv() (
-  ALLOW_MUTABLE_REF=1
-  TARGET=relative-profile
-  if (validate_options) >/dev/null 2>&1; then
-    fail "relative profile target was accepted"
-  fi
-  TARGET="$HOME/.leos-profiles"
+test_option_validation_rejects_bad_csv_and_implicit_keys() (
   SELECTED_STEPS='packages,,plugins'
   if (validate_options) >/dev/null 2>&1; then
     fail "CSV with an empty item was accepted"
@@ -48,18 +52,15 @@ test_option_validation_rejects_ambiguous_paths_and_csv() (
 test_state_is_input_specific() (
   local temp first_signature
   temp=$(mktemp -d)
-  STATE_DIR="$temp/state"
-  STATE_FILE="$STATE_DIR/install-state.tsv"
+  LOCAL_DIR="$temp/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
   OS_FAMILY=macos
   SELECTED_GROUPS=core-utils
-  PROFILE_REF="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   DRY_RUN=0
   mark_done packages
   state_done packages || fail "state was not recorded"
   first_signature=$(awk -F '\t' '$1 == "packages" { print $2 }' "$STATE_FILE")
   [[ $first_signature =~ ^[0-9a-f]{64}$ ]] || fail "state did not record an input signature"
-  PROFILE_REF="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-  state_done packages || fail "an unrelated profile ref invalidated package state"
   SELECTED_GROUPS=shell
   ! state_done packages || fail "state leaked across different package selections"
   rm -rf "$temp"
@@ -68,8 +69,8 @@ test_state_is_input_specific() (
 test_recorded_state_must_pass_verification() (
   local temp installed=0
   temp=$(mktemp -d)
-  STATE_DIR="$temp/state"
-  STATE_FILE="$STATE_DIR/install-state.tsv"
+  LOCAL_DIR="$temp/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
   OS_FAMILY=macos
   DRY_RUN=0
   step_signature() { printf '%064d\n' 1; }
@@ -229,9 +230,192 @@ test_git_identity_only_fills_missing_fields() (
   rm -rf "$temp"
 )
 
+test_profile_round_trip_and_control_character_rejection() (
+  local temp mode
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
+  DRY_RUN=0
+  SELECTED_STEPS='packages,bun'
+  SELECTED_GROUPS='core-utils,languages'
+  SAVED_FULL_UPGRADE=yes
+  GIT_NAME='Leo Liang'
+  SSH_KEY_PATH='/tmp/id test'
+  write_profile
+  mode=$(stat -f '%Lp' "$PROFILE_FILE" 2>/dev/null || stat -c '%a' "$PROFILE_FILE")
+  assert_equals "$mode" 600
+  SELECTED_STEPS=fonts
+  GIT_NAME=changed
+  read_profile
+  assert_equals "$SELECTED_STEPS" 'packages,bun'
+  assert_equals "$GIT_NAME" 'Leo Liang'
+  if (validate_tsv_value git-name $'bad\tname') >/dev/null 2>&1; then
+    fail "TSV control character was accepted"
+  fi
+  printf 'groups\tfonts\n' >> "$PROFILE_FILE"
+  if (read_profile) >/dev/null 2>&1; then
+    fail "duplicate profile key was accepted"
+  fi
+  rm -rf "$temp"
+)
+
+test_local_migration_and_conflict_detection() (
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  LOCAL_DIR="$TARGET/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
+  LEGACY_STATE_FILE="$temp/legacy/install-state.tsv"
+  mkdir -p "$TARGET/zsh" "$HOME" "$(dirname "$LEGACY_STATE_FILE")"
+  printf '%s\n' legacy > "$TARGET/zsh/_private.zsh"
+  printf '%s\n' state > "$LEGACY_STATE_FILE"
+  DRY_RUN=0
+  migrate_local_state
+  [[ -f $LOCAL_DIR/private.zsh && -f $STATE_FILE ]] || fail "legacy local data was not migrated"
+  printf '%s\n' old > "$HOME/.lp-no-gnu"
+  printf '%s\n' new > "$LOCAL_DIR/flags/no-gnu"
+  if (migrate_local_state) >/dev/null 2>&1; then
+    fail "conflicting local marker values were accepted"
+  fi
+  rm -rf "$temp"
+)
+
+test_concurrent_lock_rejection() (
+  local temp
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  LOCK_DIR="$LOCAL_DIR/.install.lock"
+  DRY_RUN=0
+  LOCK_HELD=0
+  prepare_local_dir
+  mkdir "$LOCK_DIR"
+  printf '%s\n' $$ > "$LOCK_DIR/pid"
+  if (acquire_lock) >/dev/null 2>&1; then
+    fail "concurrent live lock was accepted"
+  fi
+  rm -rf "$temp"
+)
+
+test_equivalent_github_origins() {
+  github_origins_equivalent 'git@github.com:Owner/Repo.git' 'https://github.com/owner/repo' || fail "SSH/HTTPS origins were not normalized"
+  github_origins_equivalent 'ssh://git@github.com/OWNER/REPO' 'https://github.com/owner/repo.git' || fail "ssh URL origin was not normalized"
+  ! github_origins_equivalent 'https://github.com/owner/other' 'https://github.com/owner/repo' || fail "different origins were accepted"
+}
+
+test_recommended_and_whole_group_closure() (
+  [[ $SELECTED_STEPS == 'packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
+  [[ $SELECTED_GROUPS == 'core-utils,shell,dev-tools,languages,media,network,system' ]] || fail "Recommended package groups changed"
+  SELECTED_STEPS=bun
+  SELECTED_GROUPS=core-utils
+  normalise_dependencies
+  assert_contains "$SELECTED_STEPS" packages
+  assert_contains "$SELECTED_GROUPS" languages
+)
+
+test_node_lts_is_resolved_once_per_run() (
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME/.local/bin"
+  curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv22.1.0\tx\tx\tx\tx\tx\tx\tx\tx\tIron\tfalse\n'; }
+  RESOLVED_NODE_VERSION=""
+  resolve_node_lts
+  assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
+  curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv24.2.0\tx\tx\tx\tx\tx\tx\tx\tx\tKrypton\tfalse\n'; }
+  resolve_node_lts
+  assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
+  RESOLVED_NODE_VERSION=""
+  resolve_node_lts
+  assert_equals "$RESOLVED_NODE_VERSION" v24.2.0
+  rm -rf "$temp"
+)
+
+test_node_verifier_checks_the_real_executable() (
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME/.local/bin"
+  printf '%s\n' '#!/bin/sh' \
+    'case "$1" in' \
+    '  --version) printf "fnm 1.39.0\\n" ;;' \
+    '  default) printf "v22.1.0\\n" ;;' \
+    '  exec) printf "%s\\n" "${FAKE_NODE_VERSION:-v22.1.0}" ;;' \
+    'esac' > "$HOME/.local/bin/fnm"
+  chmod +x "$HOME/.local/bin/fnm"
+  RESOLVED_NODE_VERSION=v22.1.0
+  verify_step fnm || fail "valid default Node executable was rejected"
+  export FAKE_NODE_VERSION=v20.0.0
+  ! verify_step fnm || fail "wrong actual Node executable version was accepted"
+  rm -rf "$temp"
+)
+
+test_inspection_schema_and_membership() (
+  local output
+  OS_FAMILY=macos
+  SELECTED_STEPS=bun
+  SELECTED_GROUPS=core-utils
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  normalise_dependencies
+  order_selected_steps
+  resolve_node_lts() { RESOLVED_NODE_VERSION=v22.1.0; }
+  verify_step() { return 1; }
+  output=$(inspect_tsv)
+  assert_contains "$output" $'meta\tschema\t1'
+  assert_contains "$output" $'group\tcomponent\tbun\tselected'
+  assert_contains "$output" $'group\tcomponent\tpackages\timplied'
+  assert_contains "$output" $'group\tpackage\tlanguages\timplied'
+  assert_contains "$output" $'package\tmacos\tnode'
+  assert_contains "$output" $'artifact\tdirect\tbun\t'
+)
+
+test_empty_custom_selection_is_inspectable() (
+  local output
+  OS_FAMILY=macos
+  SELECTED_STEPS=""
+  SELECTED_GROUPS=""
+  REQUESTED_STEPS=""
+  REQUESTED_GROUPS=""
+  output=$(inspect_tsv)
+  assert_contains "$output" $'group\tinternal\tbootstrap\tselected'
+  [[ $output != *$'package\tmacos\t'* ]] || fail "empty selection emitted a package"
+)
+
+test_runtime_and_signing_invariants() {
+  [[ $(grep '^_leos_plugin ' "$ROOT/zsh/interactive.zsh" | tail -n 1) == *zsh-syntax-highlighting* ]] || fail "syntax highlighting is not the last plugin action"
+  ! grep -q 'tag\.gpgsign' "$ROOT/install.sh" || fail "installer modifies tag signing"
+  ! grep -Eq 'npm (install|update).*(claude|codex)|(@anthropic-ai/claude-code|@openai/codex)' "$ROOT/zsh/commands.zsh" || fail "AI updater contains an npm fallback"
+}
+
+test_reconcile_upgrade_policy_and_cleanup() (
+  local temp
+  temp=$(mktemp -d)
+  COMMAND=""
+  FULL_UPGRADE=1
+  ASSUME_YES=0
+  parse_args reconcile --yes
+  assert_equals "$FULL_UPGRADE" 0
+  COMMAND=""
+  parse_args reconcile --yes --full-upgrade
+  assert_equals "$FULL_UPGRADE" 1
+
+  LOCAL_DIR="$temp/local"
+  LOCK_DIR="$LOCAL_DIR/.install.lock"
+  mkdir -p "$LOCK_DIR"
+  printf '%s\n' $$ > "$LOCK_DIR/pid"
+  LOCK_HELD=1
+  TEMP_PATHS=("$temp/injected-failure.tmp")
+  : > "${TEMP_PATHS[0]}"
+  cleanup
+  [[ ! -e ${TEMP_PATHS[0]} && ! -e $LOCK_DIR ]] || fail "cleanup left temporary or lock paths"
+  rm -rf "$temp"
+)
+
 test_default_does_not_include_unreleased_local_bin
-test_option_validation_rejects_ambiguous_paths_and_csv
+test_option_validation_rejects_bad_csv_and_implicit_keys
 test_dependency_normalisation
+test_package_group_selection_is_whole_and_executable
 test_state_is_input_specific
 test_recorded_state_must_pass_verification
 test_managed_blocks_are_safe_and_reversible
@@ -243,4 +427,15 @@ test_default_font_policy_and_npm_versions_are_locked
 test_ssh_public_material_ignores_comments
 test_auto_shell_verifier_accepts_an_existing_zsh
 test_git_identity_only_fills_missing_fields
+test_profile_round_trip_and_control_character_rejection
+test_local_migration_and_conflict_detection
+test_concurrent_lock_rejection
+test_equivalent_github_origins
+test_recommended_and_whole_group_closure
+test_node_lts_is_resolved_once_per_run
+test_node_verifier_checks_the_real_executable
+test_inspection_schema_and_membership
+test_empty_custom_selection_is_inspectable
+test_runtime_and_signing_invariants
+test_reconcile_upgrade_policy_and_cleanup
 printf '%s\n' 'install tests: PASS'

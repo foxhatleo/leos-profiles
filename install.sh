@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Leo's Profiles deterministic installer.
 #
-# This script is designed to be driven by QUICK-INSTALL.md or invoked directly.
-# It is intentionally conservative about mutable repositories, partial state,
-# and configuration writes.  Run `bash install.sh --help` for supported flags.
+# This is the deterministic execution engine for the AI-led QUICK-INSTALL.md.
+# The checkout containing this file is the profile being installed.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -12,9 +11,14 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=installer/lock.sh
 source "$SCRIPT_DIR/installer/lock.sh"
 
-DEFAULT_TARGET="${LEOS_PROFILES_HOME:-$HOME/.leos-profiles}"
-TARGET=$DEFAULT_TARGET
-PROFILE_REF=""
+TARGET=$SCRIPT_DIR
+LOCAL_DIR="$TARGET/local"
+PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
+STATE_FILE="$LOCAL_DIR/install-state.tsv"
+LOCK_DIR="$LOCAL_DIR/.install.lock"
+LEGACY_STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/leos-profiles/install-state.tsv"
+
+COMMAND=""
 # rpatool remains available as the explicit `bins` step, but is not a default
 # because its upstream does not publish a stable release.
 SELECTED_STEPS="packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell"
@@ -28,18 +32,20 @@ INSTALL_FONTS="auto"
 CHANGE_DEFAULT_SHELL="auto"
 DRY_RUN=0
 ASSUME_YES=0
-ALLOW_MUTABLE_REF=0
-REPAIR=0
-PLAN_ONLY=0
-
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/leos-profiles"
-STATE_FILE="$STATE_DIR/install-state.tsv"
+FULL_UPGRADE=1
+SAVED_FULL_UPGRADE=yes
 OS_FAMILY=""
 SSH_KEY_PATH=""
 GIT_NAME=""
 GIT_EMAIL=""
 FONT_NAME=""
+RESOLVED_NODE_VERSION=""
+NODE_CHANNEL="current-lts"
+AI_CLI_UPDATE_CHANNEL="native"
+PACKAGE_CHANNEL="system"
 SELECTED_PACKAGES=()
+TEMP_PATHS=()
+LOCK_HELD=0
 
 say() { printf '%s\n' "==> $*"; }
 warn() { printf '%s\n' "WARNING: $*" >&2; }
@@ -47,17 +53,14 @@ die() { printf '%s\n' "ERROR: $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-Usage: bash install.sh --ref <40-hex-commit> [options]
-
-The ref is required by default so the target repository is checked out at an
-immutable commit.  `--allow-mutable-ref` is available only for local
-development and should not be used in published instructions.
+Usage:
+  bash install.sh inspect [options]
+  bash install.sh apply --yes [options]
+  bash install.sh reconcile --yes [--full-upgrade]
 
 Options:
-  --target <path>                 Target profile directory (default ~/.leos-profiles)
-  --ref <commit>                  Exact 40-character Git commit to install
-  --steps <csv>                   bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell
-  --package-groups <csv>          core-utils,shell,dev-tools,languages,media,network,system
+  --groups <csv|none>             bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell
+  --package-groups <csv|none>     core-utils,shell,dev-tools,languages,media,network,system
   --ssh <skip|reuse|generate>     GitHub SSH-key provisioning choice
   --ssh-key <path>                Required explicit private key when --ssh reuse
   --ssh-passphrase <empty|prompt> New SSH-key passphrase policy
@@ -69,12 +72,14 @@ Options:
   --default-shell <auto|yes|no>   Default zsh shell policy
   --git-name <name>               Global Git name when identity is missing
   --git-email <email>             Global Git email when identity is missing
-  --repair                        Repair a validated existing target checkout
+  --full-upgrade                  Run the host package-manager upgrade phase
+  --no-full-upgrade               Install/reconcile packages without a host upgrade
   --dry-run                       Print mutations without performing them
-  --plan                          Print resolved work and exit
-  --yes                           Do not ask the final plan confirmation
-  --allow-mutable-ref             Development-only escape hatch
+  --yes                           Confirm that the AI-presented plan was approved
   --help                          Show this help
+
+The AI runbook is the supported user interface. `inspect` emits typed TSV for
+agents and diagnostics; `apply` and `reconcile` never ask setup questions.
 EOF
 }
 
@@ -82,12 +87,32 @@ require_value() {
   [[ $# -ge 2 && -n $2 ]] || die "$1 requires a value"
 }
 
-while [[ $# -gt 0 ]]; do
+parse_args() {
+  [[ $# -gt 0 ]] || { usage >&2; exit 2; }
   case $1 in
-    --target) require_value "$1" "${2:-}"; TARGET=$2; shift 2 ;;
-    --ref) require_value "$1" "${2:-}"; PROFILE_REF=$2; shift 2 ;;
-    --steps) require_value "$1" "${2:-}"; SELECTED_STEPS=$2; shift 2 ;;
-    --package-groups) require_value "$1" "${2:-}"; SELECTED_GROUPS=$2; shift 2 ;;
+    inspect|apply|reconcile) COMMAND=$1; shift ;;
+    --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
+      die "$1 belongs to the retired ref/target CLI; use the AI runbook with this local checkout" ;;
+    --help|-h) usage; exit 0 ;;
+    *) die "Expected inspect, apply, or reconcile; the AI runbook is the setup interface" ;;
+  esac
+  if [[ $COMMAND == reconcile ]]; then FULL_UPGRADE=0; fi
+  while [[ $# -gt 0 ]]; do
+    if [[ $COMMAND == reconcile ]]; then
+      case $1 in
+        --full-upgrade) FULL_UPGRADE=1; shift ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        --yes) ASSUME_YES=1; shift ;;
+        --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
+          die "$1 belongs to the retired ref/target CLI; use reconcile with the saved local profile" ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "reconcile reads the saved local profile and only accepts --yes, --full-upgrade, or --dry-run" ;;
+      esac
+      continue
+    fi
+    case $1 in
+    --groups) require_value "$1" "${2:-}"; SELECTED_STEPS=$2; [[ $SELECTED_STEPS != none ]] || SELECTED_STEPS=""; shift 2 ;;
+    --package-groups) require_value "$1" "${2:-}"; SELECTED_GROUPS=$2; [[ $SELECTED_GROUPS != none ]] || SELECTED_GROUPS=""; shift 2 ;;
     --ssh) require_value "$1" "${2:-}"; SSH_MODE=$2; shift 2 ;;
     --ssh-key) require_value "$1" "${2:-}"; SSH_KEY_PATH=$2; shift 2 ;;
     --ssh-passphrase) require_value "$1" "${2:-}"; SSH_PASSPHRASE_MODE=$2; shift 2 ;;
@@ -99,15 +124,17 @@ while [[ $# -gt 0 ]]; do
     --default-shell) require_value "$1" "${2:-}"; CHANGE_DEFAULT_SHELL=$2; shift 2 ;;
     --git-name) require_value "$1" "${2:-}"; GIT_NAME=$2; shift 2 ;;
     --git-email) require_value "$1" "${2:-}"; GIT_EMAIL=$2; shift 2 ;;
-    --repair) REPAIR=1; shift ;;
+    --full-upgrade) FULL_UPGRADE=1; shift ;;
+    --no-full-upgrade) FULL_UPGRADE=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
-    --plan) PLAN_ONLY=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
-    --allow-mutable-ref) ALLOW_MUTABLE_REF=1; shift ;;
+    --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
+      die "$1 belongs to the retired ref/target CLI; use the AI runbook with this local checkout" ;;
     --help|-h) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
-  esac
-done
+    esac
+  done
+}
 
 valid_csv() {
   local value=$1 allowed=$2 item
@@ -129,16 +156,19 @@ has_csv_item() {
 add_csv_item() {
   local variable_name=$1 item=$2 current
   current=${!variable_name}
-  has_csv_item "$current" "$item" || printf -v "$variable_name" '%s,%s' "$current" "$item"
+  has_csv_item "$current" "$item" || printf -v "$variable_name" '%s' "${current:+$current,}$item"
 }
 
 normalise_dependencies() {
+  # Selecting any package group selects the package executor itself.
+  [[ -z $SELECTED_GROUPS ]] || add_csv_item SELECTED_STEPS packages
   if has_csv_item "$SELECTED_STEPS" pyenv || has_csv_item "$SELECTED_STEPS" rbenv; then
     add_csv_item SELECTED_STEPS packages
     add_csv_item SELECTED_GROUPS dev-tools
   fi
   if has_csv_item "$SELECTED_STEPS" yarn || has_csv_item "$SELECTED_STEPS" pnpm || \
-     has_csv_item "$SELECTED_STEPS" bun || has_csv_item "$SELECTED_STEPS" fnm; then
+     has_csv_item "$SELECTED_STEPS" bun || has_csv_item "$SELECTED_STEPS" fnm || \
+     has_csv_item "$SELECTED_STEPS" bins; then
     add_csv_item SELECTED_STEPS packages
     add_csv_item SELECTED_GROUPS languages
   fi
@@ -162,8 +192,8 @@ order_selected_steps() {
 }
 
 validate_options() {
-  valid_csv "$SELECTED_STEPS" "bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell" || die "Invalid --steps value"
-  valid_csv "$SELECTED_GROUPS" "core-utils,shell,dev-tools,languages,media,network,system" || die "Invalid --package-groups value"
+  [[ -z $SELECTED_STEPS ]] || valid_csv "$SELECTED_STEPS" "bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell" || die "Invalid --groups value"
+  [[ -z $SELECTED_GROUPS ]] || valid_csv "$SELECTED_GROUPS" "core-utils,shell,dev-tools,languages,media,network,system" || die "Invalid --package-groups value"
   [[ $SSH_MODE == skip || $SSH_MODE == reuse || $SSH_MODE == generate ]] || die "Invalid --ssh value"
   [[ $SSH_PASSPHRASE_MODE == empty || $SSH_PASSPHRASE_MODE == prompt ]] || die "Invalid --ssh-passphrase value"
   [[ $GPG_MODE == skip || $GPG_MODE == reuse || $GPG_MODE == generate ]] || die "Invalid --gpg value"
@@ -173,12 +203,158 @@ validate_options() {
   [[ $SSH_MODE != reuse || -n $SSH_KEY_PATH ]] || die "--ssh reuse requires --ssh-key <private-key-path>"
   [[ $GPG_MODE != reuse || -n $GPG_KEY_ID ]] || die "--gpg reuse requires --gpg-key <fingerprint>"
   [[ $INSTALL_FONTS != yes || -n $FONT_NAME ]] || die "--fonts yes requires --font <name>"
-  [[ $TARGET == /* ]] || die "--target must be an absolute path"
   [[ $SSH_MODE != reuse || $SSH_KEY_PATH == /* ]] || die "--ssh-key must be an absolute path"
   [[ -z $FONT_NAME || $FONT_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "--font must be a Nerd Fonts directory name"
-  if [[ $ALLOW_MUTABLE_REF -eq 0 ]]; then
-    [[ $PROFILE_REF =~ ^[0-9a-f]{40}$ ]] || die "--ref must be a full 40-character commit hash"
+  [[ $NODE_CHANNEL == current-lts ]] || die "Unsupported Node channel in saved profile: $NODE_CHANNEL"
+  [[ $AI_CLI_UPDATE_CHANNEL == native ]] || die "Unsupported AI CLI update channel in saved profile: $AI_CLI_UPDATE_CHANNEL"
+  [[ $PACKAGE_CHANNEL == system ]] || die "Unsupported package channel in saved profile: $PACKAGE_CHANNEL"
+  [[ $SAVED_FULL_UPGRADE == yes || $SAVED_FULL_UPGRADE == no ]] || die "Invalid saved full-upgrade preference: $SAVED_FULL_UPGRADE"
+  validate_tsv_value groups "$SELECTED_STEPS"
+  validate_tsv_value package-groups "$SELECTED_GROUPS"
+  validate_tsv_value ssh-key "$SSH_KEY_PATH"
+  validate_tsv_value gpg-key "$GPG_KEY_ID"
+  validate_tsv_value git-name "$GIT_NAME"
+  validate_tsv_value git-email "$GIT_EMAIL"
+  validate_tsv_value profile-root "$TARGET"
+}
+
+validate_tsv_value() {
+  local label=$1 value=$2
+  [[ $value != *$'\t'* && $value != *$'\n'* && $value != *$'\r'* ]] ||
+    die "$label may not contain tabs or newlines"
+}
+
+prepare_local_dir() {
+  [[ $DRY_RUN -eq 0 ]] || return 0
+  mkdir -p "$LOCAL_DIR/flags"
+  chmod 700 "$LOCAL_DIR" "$LOCAL_DIR/flags"
+}
+
+track_temp() { TEMP_PATHS+=("$1"); }
+
+cleanup() {
+  local path
+  for path in "${TEMP_PATHS[@]-}"; do [[ -z $path ]] || rm -rf -- "$path"; done
+  if [[ $LOCK_HELD -eq 1 && -d $LOCK_DIR ]]; then rm -rf -- "$LOCK_DIR"; fi
+}
+
+acquire_lock() {
+  [[ $DRY_RUN -eq 0 ]] || return 0
+  prepare_local_dir
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    chmod 600 "$LOCK_DIR/pid"
+    LOCK_HELD=1
+    return 0
   fi
+  local owner=""
+  [[ -f $LOCK_DIR/pid ]] && owner=$(sed -n '1p' "$LOCK_DIR/pid")
+  if [[ $owner =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+    rm -rf -- "$LOCK_DIR"
+    mkdir "$LOCK_DIR"
+    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    chmod 600 "$LOCK_DIR/pid"
+    LOCK_HELD=1
+    return 0
+  fi
+  die "Another Leo's Profiles operation is running${owner:+ (PID $owner)}"
+}
+
+write_profile() {
+  [[ $DRY_RUN -eq 0 ]] || return 0
+  local tmp
+  prepare_local_dir
+  tmp=$(mktemp "$LOCAL_DIR/.install-profile.tmp.XXXXXX")
+  track_temp "$tmp"
+  {
+    printf 'schema\t1\n'
+    printf 'groups\t%s\n' "$SELECTED_STEPS"
+    printf 'package-groups\t%s\n' "$SELECTED_GROUPS"
+    printf 'full-upgrade\t%s\n' "$SAVED_FULL_UPGRADE"
+    printf 'fonts\t%s\n' "$INSTALL_FONTS"
+    printf 'font\t%s\n' "$FONT_NAME"
+    printf 'default-shell\t%s\n' "$CHANGE_DEFAULT_SHELL"
+    printf 'git-name\t%s\n' "$GIT_NAME"
+    printf 'git-email\t%s\n' "$GIT_EMAIL"
+    printf 'ssh\t%s\n' "$SSH_MODE"
+    printf 'ssh-key\t%s\n' "$SSH_KEY_PATH"
+    printf 'ssh-passphrase\t%s\n' "$SSH_PASSPHRASE_MODE"
+    printf 'gpg\t%s\n' "$GPG_MODE"
+    printf 'gpg-key\t%s\n' "$GPG_KEY_ID"
+    printf 'gpg-passphrase\t%s\n' "$GPG_PASSPHRASE_MODE"
+    printf 'node-channel\t%s\n' "$NODE_CHANNEL"
+    printf 'ai-cli-update-channel\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
+    printf 'package-channel\t%s\n' "$PACKAGE_CHANNEL"
+  } > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$PROFILE_FILE"
+}
+
+read_profile() {
+  [[ -f $PROFILE_FILE ]] || die "No saved install profile. Run the AI setup flow first: $PROFILE_FILE"
+  local key value extra schema="" seen=","
+  while IFS=$'\t' read -r key value extra || [[ -n $key ]]; do
+    [[ -z ${extra:-} ]] || die "Malformed install profile row: $key"
+    validate_tsv_value "$key" "${value:-}"
+    [[ $seen != *",$key,"* ]] || die "Duplicate install profile key: $key"
+    seen+="$key,"
+    case $key in
+      schema) schema=$value ;;
+      groups) SELECTED_STEPS=$value ;;
+      package-groups) SELECTED_GROUPS=$value ;;
+      full-upgrade) SAVED_FULL_UPGRADE=$value ;;
+      fonts) INSTALL_FONTS=$value ;;
+      font) FONT_NAME=$value ;;
+      default-shell) CHANGE_DEFAULT_SHELL=$value ;;
+      git-name) GIT_NAME=$value ;;
+      git-email) GIT_EMAIL=$value ;;
+      ssh) SSH_MODE=$value ;;
+      ssh-key) SSH_KEY_PATH=$value ;;
+      ssh-passphrase) SSH_PASSPHRASE_MODE=$value ;;
+      gpg) GPG_MODE=$value ;;
+      gpg-key) GPG_KEY_ID=$value ;;
+      gpg-passphrase) GPG_PASSPHRASE_MODE=$value ;;
+      node-channel) NODE_CHANNEL=$value ;;
+      ai-cli-update-channel) AI_CLI_UPDATE_CHANNEL=$value ;;
+      package-channel) PACKAGE_CHANNEL=$value ;;
+      '') ;;
+      *) die "Unknown install profile key: $key" ;;
+    esac
+  done < "$PROFILE_FILE"
+  [[ $schema == 1 ]] || die "Unsupported install profile schema: ${schema:-missing}"
+}
+
+migrate_one_local_file() {
+  local legacy=$1 destination=$2
+  [[ -e $legacy || -L $legacy ]] || return 0
+  if [[ -e $destination || -L $destination ]]; then
+    cmp -s "$legacy" "$destination" || die "Conflicting local settings: $legacy and $destination"
+    rm -f -- "$legacy"
+    return 0
+  fi
+  mkdir -p "$(dirname -- "$destination")"
+  mv -- "$legacy" "$destination"
+  chmod 600 "$destination"
+}
+
+migrate_local_state() {
+  [[ $DRY_RUN -eq 0 ]] || return 0
+  prepare_local_dir
+  if [[ -f $LEGACY_STATE_FILE && ! -e $STATE_FILE ]]; then
+    cp -p "$LEGACY_STATE_FILE" "$STATE_FILE"
+    chmod 600 "$STATE_FILE"
+    rm -f "$LEGACY_STATE_FILE"
+  elif [[ -f $LEGACY_STATE_FILE && -f $STATE_FILE ]]; then
+    cmp -s "$LEGACY_STATE_FILE" "$STATE_FILE" ||
+      die "Conflicting installer state: $LEGACY_STATE_FILE and $STATE_FILE"
+    rm -f "$LEGACY_STATE_FILE"
+  fi
+  migrate_one_local_file "$TARGET/zsh/_private.zsh" "$LOCAL_DIR/private.zsh"
+  migrate_one_local_file "$HOME/.brew-china" "$LOCAL_DIR/flags/brew-china"
+  migrate_one_local_file "$HOME/.lp-no-gnu" "$LOCAL_DIR/flags/no-gnu"
+  migrate_one_local_file "$HOME/.lp-nobrew" "$LOCAL_DIR/flags/no-brew"
+  migrate_one_local_file "$HOME/.lp-nopyenv" "$LOCAL_DIR/flags/no-pyenv"
+  migrate_one_local_file "$HOME/.lp-norbenv" "$LOCAL_DIR/flags/no-rbenv"
 }
 
 run() {
@@ -226,12 +402,13 @@ hash_text() {
 download_verified() {
   local url=$1 expected=$2 destination=$3 tmp
   local -a curl_args
-  tmp="${destination}.tmp.$$"
   run mkdir -p "$(dirname -- "$destination")"
   if [[ $DRY_RUN -eq 1 ]]; then
     say "Would download and SHA-256 verify $url"
     return 0
   fi
+  tmp=$(mktemp "$(dirname -- "$destination")/.$(basename -- "$destination").tmp.XXXXXX")
+  track_temp "$tmp"
   curl_args=(--fail --location --proto '=https' --tlsv1.2 --retry 3
     --connect-timeout 15 --silent --show-error --output "$tmp")
   if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
@@ -254,46 +431,21 @@ state_done() {
 }
 
 mark_done() {
-  local step=$1 signature tmp
+  local step=$1 signature tmp detail=""
   [[ $DRY_RUN -eq 1 ]] && return 0
   signature=$(step_signature "$step")
-  mkdir -p "$STATE_DIR"
-  chmod 700 "$STATE_DIR"
-  tmp="$STATE_FILE.tmp.$$"
+  prepare_local_dir
+  tmp=$(mktemp "$LOCAL_DIR/.install-state.tmp.XXXXXX")
+  track_temp "$tmp"
   if [[ -f $STATE_FILE ]]; then
     awk -F '\t' -v step="$step" '$1 != step' "$STATE_FILE" > "$tmp"
   else
     : > "$tmp"
   fi
-  printf '%s\t%s\t%s\n' "$step" "$signature" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$tmp"
+  [[ $step != fnm ]] || detail=$RESOLVED_NODE_VERSION
+  printf '%s\t%s\t%s\t%s\n' "$step" "$signature" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$detail" >> "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$STATE_FILE"
-}
-
-confirm_plan() {
-  say "Platform: $OS_FAMILY"
-  say "Target: $TARGET"
-  say "Profile ref: ${PROFILE_REF:-mutable development ref}"
-  say "Steps: $SELECTED_STEPS"
-  say "Package groups: $SELECTED_GROUPS"
-  say "SSH: $SSH_MODE; SSH passphrase: $SSH_PASSPHRASE_MODE; GPG: $GPG_MODE; GPG passphrase: $GPG_PASSPHRASE_MODE"
-  [[ -z $SSH_KEY_PATH ]] || say "Reused SSH key: $SSH_KEY_PATH"
-  [[ -z $GPG_KEY_ID ]] || say "Reused GPG key: $GPG_KEY_ID"
-  [[ -z $FONT_NAME ]] || say "Nerd Font: $FONT_NAME"
-  say "Fonts: $INSTALL_FONTS; default shell: $CHANGE_DEFAULT_SHELL"
-  if [[ $INSTALL_FONTS == auto ]]; then
-    if is_desktop; then
-      say "Automatic font decision: install JetBrainsMono (desktop detected)"
-    else
-      say "Automatic font decision: skip (headless host detected)"
-    fi
-  fi
-  [[ $DRY_RUN -eq 0 ]] || say "Dry-run: no mutation will occur."
-  [[ $PLAN_ONLY -eq 0 ]] || return 0
-  [[ $ASSUME_YES -eq 1 ]] && return 0
-  local response
-  read -r -p "Apply this plan? [y/N] " response
-  [[ $response == y || $response == Y || $response == yes || $response == YES ]] || die "Cancelled"
 }
 
 ensure_sudo() {
@@ -303,7 +455,9 @@ ensure_sudo() {
 
 ensure_brew() {
   command -v brew >/dev/null 2>&1 && return 0
-  local installer="${TMPDIR:-/tmp}/leos-homebrew-install-${HOMEBREW_INSTALL_SHA256}.sh"
+  local installer
+  installer=$(mktemp "${TMPDIR:-/tmp}/leos-homebrew-install.XXXXXX")
+  track_temp "$installer"
   say "Installing Homebrew from a pinned, SHA-256-verified script"
   download_verified "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256" "$installer"
   run /bin/bash "$installer"
@@ -332,53 +486,8 @@ bootstrap_tools() {
     fedora)
       run sudo dnf install -y git curl ca-certificates unzip ;;
     arch)
-      run sudo pacman -Syu --needed --noconfirm git curl ca-certificates unzip ;;
+      run sudo pacman -S --needed --noconfirm git curl ca-certificates unzip ;;
   esac
-}
-
-origin_matches() {
-  [[ -d $TARGET/.git ]] || return 1
-  local origin
-  origin=$(git -C "$TARGET" remote get-url origin 2>/dev/null || true)
-  [[ $origin == "$LEOS_PROFILE_REPOSITORY" || $origin == git@github.com:foxhatleo/leos-profiles.git ]]
-}
-
-ensure_target() {
-  if [[ -e $TARGET && ! -d $TARGET ]]; then
-    die "Target exists but is not a directory: $TARGET"
-  fi
-  if [[ -d $TARGET ]]; then
-    origin_matches || die "Existing target is not a Leo's Profiles checkout: $TARGET"
-    [[ -f $TARGET/zsh/start.zsh ]] || die "Existing target is incomplete: $TARGET"
-    if [[ -n $PROFILE_REF ]]; then
-      if git -C "$TARGET" cat-file -e "$PROFILE_REF^{commit}" 2>/dev/null; then
-        local actual
-        actual=$(git -C "$TARGET" rev-parse HEAD)
-        if [[ $actual != "$PROFILE_REF" ]]; then
-          [[ $REPAIR -eq 1 ]] || die "Target is at $actual, expected $PROFILE_REF; rerun with --repair after reviewing local changes"
-          [[ -z $(git -C "$TARGET" status --porcelain) ]] || die "Refusing to repair a target with local changes"
-          run git -C "$TARGET" checkout --detach "$PROFILE_REF"
-        fi
-      else
-        [[ $REPAIR -eq 1 ]] || die "Target lacks requested ref; rerun with --repair"
-        [[ -z $(git -C "$TARGET" status --porcelain) ]] || die "Refusing to repair a target with local changes"
-        run git -C "$TARGET" fetch origin "$PROFILE_REF"
-        run git -C "$TARGET" checkout --detach "$PROFILE_REF"
-      fi
-    fi
-    return 0
-  fi
-
-  [[ -n $PROFILE_REF || $ALLOW_MUTABLE_REF -eq 1 ]] || die "A pinned --ref is required before cloning"
-  run mkdir -p "$(dirname -- "$TARGET")"
-  run git clone "$LEOS_PROFILE_REPOSITORY" "$TARGET"
-  if [[ -n $PROFILE_REF ]]; then
-    if [[ $DRY_RUN -eq 0 ]] && ! git -C "$TARGET" cat-file -e "$PROFILE_REF^{commit}" 2>/dev/null; then
-      run git -C "$TARGET" fetch origin "$PROFILE_REF"
-    fi
-    run git -C "$TARGET" checkout --detach "$PROFILE_REF"
-    [[ $DRY_RUN -eq 1 ]] || [[ $(git -C "$TARGET" rev-parse HEAD) == "$PROFILE_REF" ]] || die "Clone did not resolve requested commit"
-  fi
 }
 
 package_list_for_group() {
@@ -458,13 +567,15 @@ install_os_packages() {
     macos)
       ensure_brew
       if has_csv_item "$SELECTED_GROUPS" network; then run brew tap heroku/brew; fi
-      run brew update
-      run brew upgrade
-      run brew upgrade --cask
+      if [[ $FULL_UPGRADE -eq 1 ]]; then
+        run brew update
+        run brew upgrade
+        run brew upgrade --cask
+      fi
       run brew install "${SELECTED_PACKAGES[@]}" ;;
     apt)
       run sudo apt-get update
-      run sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+      [[ $FULL_UPGRADE -eq 0 ]] || run sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
       run sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${SELECTED_PACKAGES[@]}"
       run mkdir -p "$HOME/.local/bin"
       if [[ $DRY_RUN -eq 0 ]]; then
@@ -472,7 +583,7 @@ install_os_packages() {
         command -v bat >/dev/null 2>&1 || { command -v batcat >/dev/null 2>&1 && ln -sf "$(command -v batcat)" "$HOME/.local/bin/bat"; }
       fi ;;
     fedora)
-      run sudo dnf upgrade -y
+      [[ $FULL_UPGRADE -eq 0 ]] || run sudo dnf upgrade -y
       if has_csv_item "$SELECTED_GROUPS" dev-tools; then run sudo dnf group install -y development-tools; fi
       if has_csv_item "$SELECTED_GROUPS" media; then
         run sudo dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
@@ -483,9 +594,32 @@ install_os_packages() {
         run sudo dnf install -y "${SELECTED_PACKAGES[@]}"
       fi ;;
     arch)
-      run sudo pacman -Syu --noconfirm
+      [[ $FULL_UPGRADE -eq 0 ]] || run sudo pacman -Syu --noconfirm
       run sudo pacman -S --needed --noconfirm "${SELECTED_PACKAGES[@]}" ;;
   esac
+}
+
+github_repo_slug() {
+  local url=$1 slug
+  case $url in
+    https://github.com/*) slug=${url#https://github.com/} ;;
+    git@github.com:*) slug=${url#git@github.com:} ;;
+    ssh://git@github.com/*) slug=${url#ssh://git@github.com/} ;;
+    *) return 1 ;;
+  esac
+  slug=${slug%/}
+  slug=${slug%.git}
+  [[ $slug == */* && $slug != */*/* ]] || return 1
+  printf '%s\n' "$slug" | tr '[:upper:]' '[:lower:]'
+}
+
+github_origins_equivalent() {
+  local actual expected actual_slug expected_slug
+  actual=$1
+  expected=$2
+  actual_slug=$(github_repo_slug "$actual") || return 1
+  expected_slug=$(github_repo_slug "$expected") || return 1
+  [[ $actual_slug == "$expected_slug" ]]
 }
 
 clone_pinned() {
@@ -493,8 +627,11 @@ clone_pinned() {
   if [[ -d $destination ]]; then
     [[ -d $destination/.git ]] || die "$label exists but is not a Git checkout: $destination"
     origin=$(git -C "$destination" remote get-url origin 2>/dev/null || true)
-    [[ $origin == "$repository" ]] || die "$label checkout has an unexpected origin: $destination"
+    github_origins_equivalent "$origin" "$repository" || die "$label checkout has an unexpected origin: $destination"
     [[ -z $(git -C "$destination" status --porcelain) ]] || die "$label checkout has local changes: $destination"
+    if [[ $origin != "$repository" ]]; then
+      run git -C "$destination" remote set-url origin "$repository"
+    fi
   else
     run mkdir -p "$(dirname -- "$destination")"
     run git clone "$repository" "$destination"
@@ -555,6 +692,7 @@ install_fonts() {
   fi
   local temp
   temp=$(mktemp -d)
+  track_temp "$temp"
   clone_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$temp/nerd-fonts" nerd-fonts
   run "$temp/nerd-fonts/install.sh" "$font"
   rm -rf "$temp"
@@ -573,6 +711,7 @@ install_locked_npm_package() {
   local package=$1 url=$2 expected=$3 temp archive
   ensure_user_npm_prefix
   temp=$(mktemp -d)
+  track_temp "$temp"
   archive="$temp/$package.tgz"
   download_verified "$url" "$expected" "$archive"
   run npm install --global --prefix "$HOME/.local/npm" "$archive"
@@ -633,7 +772,7 @@ step_signature() {
     pnpm) material+="|$PNPM_VERSION|$PNPM_URL|$PNPM_SHA256|$HOME/.local/npm" ;;
     fnm)
       asset=$(platform_asset fnm)
-      material+="|$FNM_VERSION|$asset" ;;
+      material+="|$FNM_VERSION|$asset|${RESOLVED_NODE_VERSION:-unresolved}" ;;
     plugins)
       asset=$(platform_asset starship)
       material+="|$TARGET|$STARSHIP_VERSION|$asset|$ZSH_AUTOSUGGESTIONS_COMMIT|$ZSH_SYNTAX_HIGHLIGHTING_COMMIT|$ZSH_COMPLETIONS_COMMIT|$FZF_TAB_COMMIT" ;;
@@ -651,6 +790,7 @@ install_locked_archive_binary() {
   local IFS=$'\t'
   read -r url sha <<< "$asset"
   temp=$(mktemp -d)
+  track_temp "$temp"
   archive="$temp/$tool.$extension"
   download_verified "$url" "$sha" "$archive"
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -679,9 +819,33 @@ install_bun() {
 install_fnm() {
   install_locked_archive_binary fnm zip "$HOME/.local/bin/fnm"
   [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/fnm" --version | grep -qx "fnm $FNM_VERSION" || die "fnm version verification failed"
-  [[ $DRY_RUN -eq 1 ]] || eval "$("$HOME/.local/bin/fnm" env)"
-  run "$HOME/.local/bin/fnm" install --lts
-  run "$HOME/.local/bin/fnm" default lts-latest
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would resolve the current Node LTS once, install that exact version, and make it default"
+    return 0
+  fi
+  resolve_node_lts
+  eval "$("$HOME/.local/bin/fnm" env --shell bash)"
+  run "$HOME/.local/bin/fnm" install "$RESOLVED_NODE_VERSION"
+  run "$HOME/.local/bin/fnm" default "$RESOLVED_NODE_VERSION"
+}
+
+resolve_node_lts() {
+  [[ -z $RESOLVED_NODE_VERSION ]] || return 0
+  local fnm_bin latest
+  if command -v curl >/dev/null 2>&1; then
+    latest=$(curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      https://nodejs.org/dist/index.tab 2>/dev/null | awk -F '\t' 'NR > 1 && $10 != "-" { print $1; exit }') || true
+  fi
+  if [[ ! ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -x $HOME/.local/bin/fnm ]]; then
+    fnm_bin="$HOME/.local/bin/fnm"
+  elif [[ ! ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    fnm_bin=$(command -v fnm 2>/dev/null || true)
+  fi
+  if [[ ! ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n ${fnm_bin:-} ]]; then
+    latest=$("$fnm_bin" list-remote --lts 2>/dev/null | tail -n 1 | awk '{print $1}')
+  fi
+  [[ ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Could not resolve the current Node LTS"
+  RESOLVED_NODE_VERSION=$latest
 }
 
 install_starship() {
@@ -756,7 +920,8 @@ install_managed_block() {
   else
     mode=$(stat -c '%a' "$file")
   fi
-  tmp="$file.leos-profiles.tmp.$$"
+  tmp=$(mktemp "$(dirname -- "$file")/.$(basename -- "$file").leos-profiles.tmp.XXXXXX")
+  track_temp "$tmp"
   awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
     $0 == begin { skip=1; next }
     $0 == end { skip=0; next }
@@ -825,11 +990,15 @@ ensure_git_identity() {
   if [[ -z $existing_name ]]; then
     [[ -n $GIT_NAME ]] || die "GPG provisioning needs a Git name; pass --git-name"
     run git config --global user.name "$GIT_NAME"
+    existing_name=$GIT_NAME
   fi
   if [[ -z $existing_email ]]; then
     [[ -n $GIT_EMAIL ]] || die "GPG provisioning needs a Git email; pass --git-email"
     run git config --global user.email "$GIT_EMAIL"
+    existing_email=$GIT_EMAIL
   fi
+  GIT_NAME=$existing_name
+  GIT_EMAIL=$existing_email
 }
 
 ssh_public_material() {
@@ -852,6 +1021,44 @@ ensure_github_auth() {
 
 verify_github_api() {
   gh api user --jq '.login' >/dev/null 2>&1 || die "GitHub API authentication/connectivity verification failed"
+}
+
+github_email_is_verified() {
+  local email=$1 verified
+  if ! verified=$(gh api user/emails --jq '.[] | select(.verified == true) | .email' 2>/dev/null); then
+    die "GitHub email verification requires gh scope user:email; let the AI run: gh auth refresh -s user:email"
+  fi
+  grep -qxiF "$email" <<< "$verified"
+}
+
+ensure_github_known_hosts() {
+  local approved scanned verified known_tmp host key_type key material existing
+  approved=$(mktemp)
+  scanned=$(mktemp)
+  verified=$(mktemp)
+  track_temp "$approved"
+  track_temp "$scanned"
+  track_temp "$verified"
+  gh api meta --jq '.ssh_keys[]' > "$approved" || die "Could not obtain GitHub's published SSH host keys"
+  ssh-keyscan -T 15 -t rsa,ecdsa,ed25519 github.com > "$scanned" 2>/dev/null ||
+    die "Could not scan GitHub SSH host keys"
+  while read -r host key_type key _; do
+    material="$key_type $key"
+    grep -qxF "$material" "$approved" && printf '%s %s %s\n' "$host" "$key_type" "$key" >> "$verified"
+  done < "$scanned"
+  [[ -s $verified ]] || die "GitHub SSH host keys did not match GitHub's published metadata"
+  mkdir -p "$HOME/.ssh"
+  chmod 700 "$HOME/.ssh"
+  known_tmp=$(mktemp "$HOME/.ssh/.known-hosts.tmp.XXXXXX")
+  track_temp "$known_tmp"
+  if [[ -f $HOME/.ssh/known_hosts ]]; then cp "$HOME/.ssh/known_hosts" "$known_tmp"; fi
+  while read -r host key_type key; do
+    material="$key_type $key"
+    existing=$(awk 'NF >= 3 { print $2 " " $3 }' "$known_tmp")
+    grep -qxF "$material" <<< "$existing" || printf '%s %s %s\n' "$host" "$key_type" "$key" >> "$known_tmp"
+  done < "$verified"
+  chmod 600 "$known_tmp"
+  mv -f "$known_tmp" "$HOME/.ssh/known_hosts"
 }
 
 provision_ssh() {
@@ -885,6 +1092,7 @@ provision_ssh() {
   fi
   local derived_public
   derived_public=$(mktemp)
+  track_temp "$derived_public"
   if [[ $DRY_RUN -eq 0 ]]; then
     ssh-keygen -y -f "$key" > "$derived_public"
   fi
@@ -909,11 +1117,18 @@ provision_ssh() {
     say "Would add selected SSH key to GitHub as $title"
   elif (( existing_generate && ! key_present )); then
     die "The existing default SSH key is not on GitHub; use --ssh reuse --ssh-key $key to select it explicitly"
-  elif (( ! key_present )); then
+  fi
+  # Persist an explicitly reused or newly generated reference before remote
+  # upload/testing. A retry then repairs this key without replacing it.
+  SSH_KEY_PATH=$key
+  SSH_MODE=reuse
+  write_profile
+  if [[ $DRY_RUN -eq 0 ]] && (( ! key_present )); then
     gh ssh-key add "$key.pub" --title "$title" || die "GitHub rejected SSH-key upload"
   fi
+  ensure_github_known_hosts
   local ssh_output
-  ssh_output=$(ssh -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -T git@github.com 2>&1 || true)
+  ssh_output=$(ssh -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
   grep -q 'successfully authenticated' <<< "$ssh_output" || die "SSH key upload did not produce GitHub authentication"
   gh config set git_protocol ssh --host github.com
 }
@@ -959,6 +1174,7 @@ provision_gpg() {
   name=$(git config --global user.name || true)
   email=$(git config --global user.email || true)
   [[ -n $name && -n $email ]] || die "Set global git user.name and user.email before GPG provisioning"
+  github_email_is_verified "$email" || die "Git email is not verified on the authenticated GitHub account: $email"
   if [[ $GPG_MODE == reuse ]]; then
     keyid=$(gpg_secret_fingerprint "$GPG_KEY_ID")
     [[ -n $keyid ]] || die "The selected GPG secret key was not found: $GPG_KEY_ID"
@@ -982,8 +1198,14 @@ provision_gpg() {
   fi
   [[ -n $keyid ]] || die "No matching GPG secret key found"
   gpg_key_has_email "$keyid" "$email" || die "Selected GPG key has no user ID for the Git email $email"
+  # Save the fingerprint before signing/upload verification so a partial
+  # failure retries this exact key instead of creating another one.
+  GPG_KEY_ID=$keyid
+  GPG_MODE=reuse
+  write_profile
   local temp_repo
   temp_repo=$(mktemp -d)
+  track_temp "$temp_repo"
   git -C "$temp_repo" init -q
   git -C "$temp_repo" config user.name "$name"
   git -C "$temp_repo" config user.email "$email"
@@ -999,6 +1221,7 @@ provision_gpg() {
     say "Would export and add GPG key $keyid to GitHub"
   elif ! github_gpg_key_present "$keyid"; then
     exported_key=$(mktemp)
+    track_temp "$exported_key"
     gpg --armor --export "$keyid" > "$exported_key"
     if ! gh gpg-key add "$exported_key"; then
       rm -f "$exported_key"
@@ -1009,7 +1232,6 @@ provision_gpg() {
   git config --global user.signingkey "$keyid"
   git config --global gpg.format openpgp
   git config --global commit.gpgsign true
-  git config --global tag.gpgsign true
 }
 
 current_login_shell() {
@@ -1046,7 +1268,7 @@ git_checkout_at() {
   local directory=$1 repository=$2 commit=$3 origin
   [[ -d $directory/.git ]] || return 1
   origin=$(git -C "$directory" remote get-url origin 2>/dev/null || true)
-  [[ $origin == "$repository" ]] || return 1
+  github_origins_equivalent "$origin" "$repository" || return 1
   [[ -z $(git -C "$directory" status --porcelain) ]] || return 1
   [[ $(git -C "$directory" rev-parse HEAD 2>/dev/null || true) == "$commit" ]]
 }
@@ -1080,9 +1302,11 @@ verify_step() {
     pnpm)
       [[ -x $HOME/.local/npm/bin/pnpm ]] && "$HOME/.local/npm/bin/pnpm" --version 2>/dev/null | grep -qx "$PNPM_VERSION" ;;
     fnm)
+      [[ -n $RESOLVED_NODE_VERSION ]] || resolve_node_lts || return 1
       [[ -x $HOME/.local/bin/fnm ]] &&
         "$HOME/.local/bin/fnm" --version 2>/dev/null | grep -qx "fnm $FNM_VERSION" &&
-        [[ -e ${XDG_DATA_HOME:-$HOME/.local/share}/fnm/aliases/default ]] ;;
+        [[ $("$HOME/.local/bin/fnm" default 2>/dev/null) == "$RESOLVED_NODE_VERSION" ]] &&
+        [[ $("$HOME/.local/bin/fnm" exec --using="$RESOLVED_NODE_VERSION" -- node --version 2>/dev/null) == "$RESOLVED_NODE_VERSION" ]] ;;
     plugins)
       [[ -x $HOME/.local/bin/starship ]] &&
         "$HOME/.local/bin/starship" --version 2>/dev/null | sed -n '1p' | grep -qx "starship $STARSHIP_VERSION" &&
@@ -1110,11 +1334,11 @@ verify_step() {
 
 run_step() {
   local step=$1
-  if state_done "$step" && [[ $REPAIR -eq 0 ]] && verify_step "$step"; then
+  if [[ ! ( $step == packages && $FULL_UPGRADE -eq 1 ) ]] && state_done "$step" && verify_step "$step"; then
     say "Skipping $step (recorded complete and verified)"
     return 0
   fi
-  if state_done "$step" && [[ $REPAIR -eq 0 ]]; then
+  if state_done "$step"; then
     warn "$step was recorded complete but failed verification; repairing it"
   fi
   say "Running $step"
@@ -1137,27 +1361,149 @@ run_step() {
   mark_done "$step"
 }
 
+inspect_tsv() {
+  local step group package status origin asset url digest
+  printf 'meta\tschema\t1\n'
+  printf 'platform\tfamily\t%s\n' "$OS_FAMILY"
+  printf 'profile\troot\t%s\n' "$TARGET"
+  printf 'policy\tfull-upgrade\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf yes || printf no)"
+  printf 'channel\tpackages\t%s\n' "$PACKAGE_CHANNEL"
+  printf 'channel\tnode\t%s\n' "$NODE_CHANNEL"
+  printf 'channel\tai-cli-updates\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
+  printf 'group\tinternal\tbootstrap\tselected\n'
+  local canonical="bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell"
+  local old_ifs=$IFS
+  IFS=,
+  for step in $canonical; do
+    has_csv_item "$SELECTED_STEPS" "$step" || continue
+    if has_csv_item "$REQUESTED_STEPS" "$step"; then origin=selected; else origin=implied; fi
+    printf 'group\tcomponent\t%s\t%s\n' "$step" "$origin"
+  done
+  for group in core-utils shell dev-tools languages media network system; do
+    has_csv_item "$SELECTED_GROUPS" "$group" || continue
+    if has_csv_item "$REQUESTED_GROUPS" "$group"; then origin=selected; else origin=implied; fi
+    printf 'group\tpackage\t%s\t%s\n' "$group" "$origin"
+  done
+  IFS=$old_ifs
+  printf 'group\tcredential\tssh\t%s\n' "$SSH_MODE"
+  printf 'group\tcredential\tgpg\t%s\n' "$GPG_MODE"
+  collect_selected_packages
+  if (( ${#SELECTED_PACKAGES[@]} > 0 )); then
+    for package in "${SELECTED_PACKAGES[@]}"; do printf 'package\t%s\t%s\n' "$OS_FAMILY" "$package"; done
+  fi
+  printf 'action\tbootstrap\tensure git,curl,ca-certificates,archive tools\n'
+  if [[ $OS_FAMILY == macos ]] && ! command -v brew >/dev/null 2>&1; then
+    printf 'artifact\tdirect\thomebrew-bootstrap\t%s\t%s\n' "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256"
+  fi
+  if has_csv_item "$SELECTED_STEPS" packages; then
+    printf 'action\tpackages\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf 'full host upgrade and selected package installation' || printf 'install missing selected packages without full host upgrade')"
+    if [[ $FULL_UPGRADE -eq 1 ]]; then printf 'irreversible\thost-upgrade\tpackage-manager upgrades are not automatically reversible\n'; fi
+    if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" network; then
+      printf 'action\trepository\tHomebrew heroku/brew tap\n'
+    fi
+    if [[ $OS_FAMILY == fedora ]] && has_csv_item "$SELECTED_GROUPS" media; then
+      printf 'action\trepository\tRPM Fusion free\n'
+    fi
+  fi
+  if [[ $SSH_MODE != skip ]]; then
+    printf 'action\tssh\tverify or provision explicit key and GitHub upload\n'
+    printf 'external\tgithub\tSSH public-key upload and Git protocol setting\n'
+    printf 'file\tssh-known-hosts\t~/.ssh/known_hosts\n'
+  fi
+  if [[ $GPG_MODE != skip ]]; then
+    printf 'action\tgpg\tverify GitHub email, configure commit signing, and upload public key\n'
+    printf 'external\tgithub\tverified-email query and GPG public-key upload\n'
+  fi
+  if has_csv_item "$SELECTED_STEPS" zsh-config; then printf 'action\tzsh-config\tmanaged blocks in ~/.zshrc and ~/.zshenv\n'; fi
+  if has_csv_item "$SELECTED_STEPS" default-shell; then printf 'action\tdefault-shell\t%s\n' "$CHANGE_DEFAULT_SHELL"; fi
+  printf 'file\tlocal-profile\t%s\n' "$PROFILE_FILE"
+  printf 'file\tlocal-state\t%s\n' "$STATE_FILE"
+  if [[ $SSH_MODE != skip ]]; then printf 'file\tssh-reference\t%s\n' "${SSH_KEY_PATH:-generated path under ~/.ssh}"; fi
+  if [[ $GPG_MODE != skip ]]; then printf 'global\tgit\tuser.signingkey,gpg.format,commit.gpgsign\n'; fi
+  if has_csv_item "$SELECTED_STEPS" default-shell && [[ $CHANGE_DEFAULT_SHELL != no ]]; then printf 'irreversible\tlogin-shell\tchsh may require a new login\n'; fi
+  if has_csv_item "$SELECTED_STEPS" bins; then printf 'artifact\tdirect\trpatool\t%s\t%s\n' "$RPATOOL_URL" "$RPATOOL_SHA256"; fi
+  if has_csv_item "$SELECTED_STEPS" pyenv; then printf 'artifact\tgit\tpyenv\t%s\t%s\n' "$PYENV_REPOSITORY" "$PYENV_COMMIT"; fi
+  if has_csv_item "$SELECTED_STEPS" rbenv; then
+    printf 'artifact\tgit\trbenv\t%s\t%s\n' "$RBENV_REPOSITORY" "$RBENV_COMMIT"
+    printf 'artifact\tgit\truby-build\t%s\t%s\n' "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT"
+  fi
+  if has_csv_item "$SELECTED_STEPS" bun; then
+    asset=$(platform_asset bun); IFS=$'\t' read -r url digest <<< "$asset"
+    printf 'artifact\tdirect\tbun\t%s\t%s\n' "$url" "$digest"
+  fi
+  if has_csv_item "$SELECTED_STEPS" yarn; then printf 'artifact\tdirect\tyarn\t%s\t%s\n' "$YARN_URL" "$YARN_SHA256"; fi
+  if has_csv_item "$SELECTED_STEPS" pnpm; then printf 'artifact\tdirect\tpnpm\t%s\t%s\n' "$PNPM_URL" "$PNPM_SHA256"; fi
+  if has_csv_item "$SELECTED_STEPS" fnm; then
+    asset=$(platform_asset fnm); IFS=$'\t' read -r url digest <<< "$asset"
+    printf 'artifact\tdirect\tfnm\t%s\t%s\n' "$url" "$digest"
+    printf 'external\tnode-lts-index\thttps://nodejs.org/dist/index.tab\n'
+  fi
+  if has_csv_item "$SELECTED_STEPS" plugins; then
+    asset=$(platform_asset starship); IFS=$'\t' read -r url digest <<< "$asset"
+    printf 'artifact\tdirect\tstarship\t%s\t%s\n' "$url" "$digest"
+    printf 'artifact\tgit\tzsh-autosuggestions\t%s\t%s\n' "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT"
+    printf 'artifact\tgit\tzsh-syntax-highlighting\t%s\t%s\n' "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT"
+    printf 'artifact\tgit\tzsh-completions\t%s\t%s\n' "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT"
+    printf 'artifact\tgit\tfzf-tab\t%s\t%s\n' "$FZF_TAB_REPOSITORY" "$FZF_TAB_COMMIT"
+  fi
+  if has_csv_item "$SELECTED_STEPS" fonts && font_should_install; then
+    printf 'artifact\tgit\tnerd-fonts\t%s\t%s\n' "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT"
+  fi
+  if has_csv_item "$SELECTED_STEPS" fnm; then
+    if resolve_node_lts; then printf 'moving\tnode-lts\t%s\n' "$RESOLVED_NODE_VERSION"; else printf 'moving\tnode-lts\tresolve-during-apply\n'; fi
+  fi
+  old_ifs=$IFS
+  IFS=,
+  for step in $SELECTED_STEPS; do
+    if verify_step "$step"; then status=verified; else status=needed; fi
+    printf 'postcondition\t%s\t%s\n' "$step" "$status"
+  done
+  IFS=$old_ifs
+}
+
 main() {
+  parse_args "$@"
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+  if [[ $COMMAND == reconcile ]]; then
+    read_profile
+  fi
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
   validate_options
   normalise_dependencies
   order_selected_steps
   detect_os
-  confirm_plan
-  [[ $PLAN_ONLY -eq 0 ]] || exit 0
+  if [[ $COMMAND == inspect ]]; then
+    inspect_tsv
+    return 0
+  fi
+  [[ $ASSUME_YES -eq 1 ]] || die "Apply/reconcile requires --yes after the AI-presented plan is approved"
+  acquire_lock
+  migrate_local_state
+  if [[ $COMMAND == apply ]]; then
+    if [[ $FULL_UPGRADE -eq 1 ]]; then SAVED_FULL_UPGRADE=yes; else SAVED_FULL_UPGRADE=no; fi
+    write_profile
+  fi
   bootstrap_tools
-  ensure_target
+  if has_csv_item "$SELECTED_STEPS" fnm && [[ $DRY_RUN -eq 0 ]]; then
+    resolve_node_lts
+    say "Resolved Node current LTS for this run: $RESOLVED_NODE_VERSION"
+  fi
   install_credential_prerequisites
   provision_ssh
   provision_gpg
+  write_profile
   local step old_ifs=$IFS
   IFS=,
   for step in $SELECTED_STEPS; do
     run_step "$step"
   done
   IFS=$old_ifs
-  say "Installation complete. Restart the terminal; default-shell changes apply at next login."
+  say "Profile reconciliation complete. Restart the terminal; default-shell changes apply at next login."
 }
 
 if [[ ${LEOS_PROFILES_INSTALL_LIB_ONLY:-0} != 1 ]]; then
-  main
+  main "$@"
 fi
