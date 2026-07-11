@@ -52,4 +52,8 @@ entry() {
 
 entry entries
 
+# Convention: every profile zsh file ends with a bare `:` so `source`
+# reports success when the file's last real command is a guard that
+# legitimately failed (e.g. `command -v x && eval ...`). A mid-file error
+# under err_return still aborts before reaching it.
 :

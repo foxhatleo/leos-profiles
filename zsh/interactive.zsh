@@ -54,8 +54,6 @@ fi
 # completion definitions and prompt widget setup.
 _leos_plugin zsh-syntax-highlighting/zsh-syntax-highlighting.zsh   # MUST be last
 
-:
-
 # Starship prompt.
 if command -v starship >/dev/null 2>&1; then
   # Keep Leo's established themed prompt as the default.  The plain prompt is
@@ -72,3 +70,5 @@ else
   fi
   PROMPT='%F{cyan}%n@%m%f %F{blue}%~%f %# '
 fi
+
+:
