@@ -242,7 +242,11 @@ test_profile_round_trip_and_control_character_rejection() (
   GIT_NAME='Leo Liang'
   SSH_KEY_PATH='/tmp/id test'
   write_profile
-  mode=$(stat -f '%Lp' "$PROFILE_FILE" 2>/dev/null || stat -c '%a' "$PROFILE_FILE")
+  if [[ $(uname -s) == Darwin ]]; then
+    mode=$(/usr/bin/stat -f '%Lp' "$PROFILE_FILE")
+  else
+    mode=$(stat -c '%a' "$PROFILE_FILE")
+  fi
   assert_equals "$mode" 600
   SELECTED_STEPS=fonts
   GIT_NAME=changed
