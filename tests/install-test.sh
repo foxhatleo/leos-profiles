@@ -202,6 +202,23 @@ test_default_font_policy_and_npm_versions_are_locked() {
   [[ $YARN_SHA256 =~ ^[0-9a-f]{64}$ && $PNPM_SHA256 =~ ^[0-9a-f]{64}$ ]] || fail "npm tarball digest is invalid"
 }
 
+test_font_verifier_accepts_renamed_families() (
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp"
+  OS_FAMILY=macos
+  FONT_NAME="CascadiaCode"
+  mkdir -p "$HOME/Library/Fonts"
+  : > "$HOME/Library/Fonts/CaskaydiaCoveNerdFont-Regular.ttf"
+  font_is_installed || fail "renamed Nerd Font family was not recognised as installed"
+  rm -f "$HOME/Library/Fonts/CaskaydiaCoveNerdFont-Regular.ttf"
+  : > "$HOME/Library/Fonts/SomethingElse-Regular.ttf"
+  if font_is_installed; then
+    fail "verifier passed with no patched Nerd Font present"
+  fi
+  rm -rf "$temp"
+)
+
 test_ssh_public_material_ignores_comments() {
   local temp
   temp=$(mktemp)
@@ -428,6 +445,7 @@ test_tar_archive_install_creates_extraction_directory
 test_platform_assets_are_locked
 test_package_maps_cover_every_supported_os
 test_default_font_policy_and_npm_versions_are_locked
+test_font_verifier_accepts_renamed_families
 test_ssh_public_material_ignores_comments
 test_auto_shell_verifier_accepts_an_existing_zsh
 test_git_identity_only_fills_missing_fields

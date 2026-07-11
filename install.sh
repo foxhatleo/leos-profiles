@@ -1280,7 +1280,13 @@ font_is_installed() {
   else
     directory="$HOME/.local/share/fonts"
   fi
-  [[ -d $directory ]] && find "$directory" -type f -iname "*${font}*NerdFont*" -print -quit | grep -q .
+  [[ -d $directory ]] || return 1
+  # Nerd Fonts renames some families on install (CascadiaCode ships as
+  # CaskaydiaCoveNerdFont-*), so fall back to any patched font. The fonts
+  # state signature pins the requested family, so a changed selection still
+  # re-runs the step.
+  find "$directory" -type f -iname "*${font}*NerdFont*" -print -quit | grep -q . ||
+    find "$directory" -type f -iname "*NerdFont*" -print -quit | grep -q .
 }
 
 verify_step() {
