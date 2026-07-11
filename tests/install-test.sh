@@ -227,6 +227,41 @@ test_ssh_public_material_ignores_comments() {
   rm -f "$temp"
 }
 
+test_github_key_checks_fail_closed_on_api_errors() (
+  local temp
+  temp=$(mktemp -d)
+  printf '%s\n' 'ssh-ed25519 AAAATEST comment' > "$temp/key.pub"
+  gh() { return 1; }  # simulate network/auth failure
+  if (github_ssh_key_present "$temp/key.pub") >/dev/null 2>&1; then
+    fail "SSH check treated an API failure as key-present"
+  fi
+  local error_output
+  error_output=$( (github_ssh_key_present "$temp/key.pub") 2>&1 || true )
+  [[ $error_output == *'GitHub SSH keys'* ]] \
+    || fail "SSH check did not die loudly on an API failure"
+  if (github_gpg_key_present ABCDEF1234567890) >/dev/null 2>&1; then
+    fail "GPG check treated an API failure as key-present"
+  fi
+  error_output=$( (github_gpg_key_present ABCDEF1234567890) 2>&1 || true )
+  [[ $error_output == *'GitHub GPG keys'* ]] \
+    || fail "GPG check did not die loudly on an API failure"
+  rm -rf "$temp"
+)
+
+test_github_key_checks_still_match_present_keys() (
+  local temp
+  temp=$(mktemp -d)
+  printf '%s\n' 'ssh-ed25519 AAAATEST workstation' > "$temp/key.pub"
+  gh() { printf '%s\n' 'ssh-ed25519 AAAATEST other-comment'; }
+  github_ssh_key_present "$temp/key.pub" || fail "matching SSH key not detected"
+  gh() { printf '%s\n' '1234567890ABCDEF'; }
+  github_gpg_key_present ABCDEF1234567890ABCDEF1234567890 \
+    && fail "non-suffix GPG key id incorrectly matched"
+  github_gpg_key_present AAAA1234567890ABCDEF \
+    || fail "suffix-matching GPG key id not detected"
+  rm -rf "$temp"
+)
+
 test_auto_shell_verifier_accepts_an_existing_zsh() (
   CHANGE_DEFAULT_SHELL=auto
   current_login_shell() { printf '%s\n' /bin/zsh; }
@@ -447,6 +482,8 @@ test_package_maps_cover_every_supported_os
 test_default_font_policy_and_npm_versions_are_locked
 test_font_verifier_accepts_renamed_families
 test_ssh_public_material_ignores_comments
+test_github_key_checks_fail_closed_on_api_errors
+test_github_key_checks_still_match_present_keys
 test_auto_shell_verifier_accepts_an_existing_zsh
 test_git_identity_only_fills_missing_fields
 test_profile_round_trip_and_control_character_rejection

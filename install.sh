@@ -1006,11 +1006,12 @@ ssh_public_material() {
 }
 
 github_ssh_key_present() {
-  local public_key=$1 material
+  local public_key=$1 material remote_keys
   material=$(ssh_public_material "$public_key")
   [[ -n $material ]] || return 1
-  gh api --paginate user/keys --jq '.[].key' 2>/dev/null | \
-    awk 'NF >= 2 { print $1 " " $2 }' | grep -qxF "$material"
+  remote_keys=$(gh api --paginate user/keys --jq '.[].key') \
+    || die "Could not list GitHub SSH keys; refusing to guess (check network and gh auth)"
+  awk 'NF >= 2 { print $1 " " $2 }' <<< "$remote_keys" | grep -qxF "$material"
 }
 
 ensure_github_auth() {
@@ -1147,8 +1148,10 @@ gpg_key_has_email() {
 }
 
 github_gpg_key_present() {
-  local fingerprint=$1
-  gh api --paginate user/gpg_keys --jq '.[].key_id' 2>/dev/null | awk -v fingerprint="$fingerprint" '
+  local fingerprint=$1 remote_ids
+  remote_ids=$(gh api --paginate user/gpg_keys --jq '.[].key_id') \
+    || die "Could not list GitHub GPG keys; refusing to guess (check network and gh auth)"
+  awk -v fingerprint="$fingerprint" '
     BEGIN { fingerprint=toupper(fingerprint) }
     {
       remote=toupper($0)
@@ -1156,7 +1159,7 @@ github_gpg_key_present() {
           substr(fingerprint, length(fingerprint) - length(remote) + 1) == remote) found=1
     }
     END { exit !found }
-  '
+  ' <<< "$remote_ids"
 }
 
 provision_gpg() {
