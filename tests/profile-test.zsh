@@ -83,7 +83,10 @@ LEOS_TEST_ROOT="$tmp/profile" zsh -dfc '
   [[ $LEOS_PRIVATE_LOADED == yes ]]
 ' || fail 'local private override'
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+# Fresh HOME: earlier blocks leave a valid .zcompdump in $tmp, and a cached
+# dump lets even pre-compaudit code pass this test via the compinit -C path.
+insecure_home=$(mktemp -d)
+HOME="$insecure_home" ZDOTDIR="$insecure_home" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
     mkdir -p "$HOME/insecure-completions"
@@ -92,7 +95,8 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
     starship() { [[ $1 == init ]] && print -r -- ":"; }
     source "$LEOS_PROFILES_HOME/zsh/start.zsh" 2>/dev/null
     (( $+functions[compdef] ))
-  ' || fail 'insecure completion path handling'
+  ' </dev/null || fail 'insecure completion path handling'
+rm -rf "$insecure_home"
 
 HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" PATH=/usr/bin:/bin TERM=xterm-256color \
   zsh -dfc '
@@ -102,6 +106,17 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" PATH=/usr/bin:/bin TERM
     source "$LEOS_PROFILES_ZSH/interactive.zsh" 2>/dev/null
     [[ $PROMPT == *"%n@%m"* ]]
   ' || fail 'missing-Starship fallback prompt'
+
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" TERM=xterm-256color \
+  zsh -dfc '
+    setopt err_return no_unset pipe_fail
+    puts-err() { :; }
+    entry() { :; }
+    starship() { [[ $1 == init ]] && print -r -- ":"; }
+    compinit() { return 1 }   # a defined function survives autoload -Uz
+    source "$LEOS_PROFILES_ZSH/interactive.zsh" 2>/dev/null
+    [[ -n ${STARSHIP_CONFIG:-} ]]
+  ' || fail 'startup resilient when compinit fails'
 
 HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$tmp/empty-zsh" LEOS_TEST_ROOT="$root" TERM=xterm-256color \
   zsh -dfc '
