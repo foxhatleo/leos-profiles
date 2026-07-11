@@ -84,7 +84,10 @@ def scan(root: str, dry_run: bool, purge_recycle_bins: bool = False) -> Result:
     def walk_error(error: OSError) -> None:
         result.failures += 1
         failed_path = error.filename or root
-        progress(failed_path, root, prompt=f"Could not scan ({{}}): {error}", newline=True)
+        # The error text contains the path; escape braces so progress()'s
+        # str.format template cannot choke on it.
+        detail = str(error).replace("{", "{{").replace("}", "}}")
+        progress(failed_path, root, prompt=f"Could not scan ({{}}): {detail}", newline=True)
 
     for current_root, dirs, files in os.walk(
         root, topdown=True, onerror=walk_error, followlinks=False

@@ -73,6 +73,18 @@ class RmdsstoreTest(unittest.TestCase):
                 result = rmdsstore.scan(directory, dry_run=True)
             self.assertEqual(result.failures, 1)
 
+    def test_walk_errors_with_braces_do_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def brace_walk(*_args: object, **kwargs: object) -> list[object]:
+                onerror = kwargs["onerror"]
+                assert callable(onerror)
+                onerror(PermissionError(13, "denied {oops}", directory + "/{weird}"))
+                return []
+
+            with mock.patch.object(rmdsstore.os, "walk", side_effect=brace_walk):
+                result = rmdsstore.scan(directory, dry_run=True)
+            self.assertEqual(result.failures, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
