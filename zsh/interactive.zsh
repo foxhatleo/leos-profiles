@@ -67,6 +67,8 @@ if command -v starship >/dev/null 2>&1; then
   fi
   eval "$(starship init zsh)"
 else
-  puts-err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore the themed prompt."
+  if [[ ! -f ${LEOS_PROFILES_ZSH:h}/local/flags/no-starship-warning ]]; then
+    puts-err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore it, or touch local/flags/no-starship-warning under the profile root to silence this."
+  fi
   PROMPT='%F{cyan}%n@%m%f %F{blue}%~%f %# '
 fi

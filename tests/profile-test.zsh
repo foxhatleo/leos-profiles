@@ -118,6 +118,21 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" TERM=xterm-256color \
     [[ -n ${STARSHIP_CONFIG:-} ]]
   ' || fail 'startup resilient when compinit fails'
 
+flag_root=$(mktemp -d)
+mkdir -p "$flag_root/zsh" "$flag_root/local/flags"
+cp "$root/zsh/interactive.zsh" "$flag_root/zsh/interactive.zsh"
+: > "$flag_root/local/flags/no-starship-warning"
+warning_output=$(HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$flag_root/zsh" PATH=/usr/bin:/bin TERM=xterm-256color \
+  zsh -dfc '
+    setopt err_return no_unset pipe_fail
+    puts-err() { print -r -- "WARN: $*"; }
+    entry() { :; }
+    source "$LEOS_PROFILES_ZSH/interactive.zsh" 2>/dev/null
+    [[ $PROMPT == *"%n@%m"* ]]
+  ' 2>&1) || fail 'silenced-warning block errored'
+[[ $warning_output != *"Starship is not installed"* ]] || fail 'no-starship-warning flag did not silence the warning'
+rm -rf "$flag_root"
+
 HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$tmp/empty-zsh" LEOS_TEST_ROOT="$root" TERM=xterm-256color \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
