@@ -1083,7 +1083,7 @@ provision_ssh() {
       say "Found an existing default SSH key pair; it will be reused only if GitHub already has it"
     else
       run mkdir -p "$HOME/.ssh"
-      [[ $DRY_RUN -eq 1 ]] || chmod 700 "$HOME/.ssh"
+      chmod 700 "$HOME/.ssh"
       if [[ $SSH_PASSPHRASE_MODE == prompt ]]; then
         run ssh-keygen -t ed25519 -f "$key"
       else
@@ -1094,18 +1094,12 @@ provision_ssh() {
   local derived_public
   derived_public=$(mktemp)
   track_temp "$derived_public"
-  if [[ $DRY_RUN -eq 0 ]]; then
-    ssh-keygen -y -f "$key" > "$derived_public"
-  fi
+  ssh-keygen -y -f "$key" > "$derived_public"
   if [[ ! -f "$key.pub" ]]; then
-    if [[ $DRY_RUN -eq 1 ]]; then
-      say "Would derive public key: $key.pub"
-    else
-      mv -f "$derived_public" "$key.pub"
-      chmod 644 "$key.pub"
-      derived_public=""
-    fi
-  elif [[ $DRY_RUN -eq 0 ]] && [[ $(ssh_public_material "$derived_public") != $(ssh_public_material "$key.pub") ]]; then
+    mv -f "$derived_public" "$key.pub"
+    chmod 644 "$key.pub"
+    derived_public=""
+  elif [[ $(ssh_public_material "$derived_public") != "$(ssh_public_material "$key.pub")" ]]; then
     rm -f "$derived_public"
     die "Existing public key does not match the selected private key: $key.pub"
   fi
@@ -1114,9 +1108,7 @@ provision_ssh() {
   title="leos-profiles-$(hostname)-$(date +%Y%m%d)"
   local key_present=0
   github_ssh_key_present "$key.pub" && key_present=1
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would add selected SSH key to GitHub as $title"
-  elif (( existing_generate && ! key_present )); then
+  if (( existing_generate && ! key_present )); then
     die "The existing default SSH key is not on GitHub; use --ssh reuse --ssh-key $key to select it explicitly"
   fi
   # Persist an explicitly reused or newly generated reference before remote
@@ -1124,7 +1116,7 @@ provision_ssh() {
   SSH_KEY_PATH=$key
   SSH_MODE=reuse
   write_profile
-  if [[ $DRY_RUN -eq 0 ]] && (( ! key_present )); then
+  if (( ! key_present )); then
     gh ssh-key add "$key.pub" --title "$title" || die "GitHub rejected SSH-key upload"
   fi
   ensure_github_known_hosts
