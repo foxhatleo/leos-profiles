@@ -146,10 +146,11 @@ Options:
 
 `rmdsstore [--dry-run] [--purge-recycle-bins] [root ...]` deletes only named
 metadata files by default. With no root it intentionally scans standard
-system-wide macOS data roots. It rejects symlink roots, does not follow
-symlinks or cross mount boundaries, ignores cloud directories, supports
-multiple roots/dry-run, and reports failures. Recycle-bin directory removal is
-opt-in.
+system-wide macOS roots: the complete writable APFS data volume and every
+mounted volume directly under `/Volumes`. It rejects symlink roots, does not
+follow symlinks or implicitly cross nested mount boundaries, supports multiple
+roots/dry-run, and reports failures. Cloud-storage directories are included.
+Recycle-bin directory removal is opt-in.
 
 `brew-china-enable` remains an explicitly confirmed USTC mirror option; its
 flag now lives under `local/flags/`. `brew-china-disable` restores the official

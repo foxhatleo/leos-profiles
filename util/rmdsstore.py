@@ -17,9 +17,10 @@ import sys
 from dataclasses import dataclass
 
 
-IGNORED_DIRS = {"CloudStorage"}
 METADATA_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 RECYCLE_BIN = "$RECYCLE.BIN"
+MACOS_DATA_ROOT = "/System/Volumes/Data"
+MACOS_VOLUMES_ROOT = "/Volumes"
 
 
 @dataclass
@@ -27,6 +28,11 @@ class Result:
     removed: int = 0
     failures: int = 0
     skipped_mounts: int = 0
+
+    def add(self, other: Result) -> None:
+        self.removed += other.removed
+        self.failures += other.failures
+        self.skipped_mounts += other.skipped_mounts
 
 
 def _term_width() -> int:
@@ -72,6 +78,55 @@ def remove_path(path: str, root: str, dry_run: bool, result: Result, is_dir: boo
         progress(path, root, prompt=f"Could not remove ({{}}): {error}", newline=True)
 
 
+def _directory_key(path: str) -> tuple[int, int]:
+    stat = os.stat(path, follow_symlinks=False)
+    return stat.st_dev, stat.st_ino
+
+
+def unique_roots(roots: list[str]) -> list[str]:
+    """Return existing directory roots once, preserving their requested order."""
+    unique = []
+    seen: set[tuple[int, int]] = set()
+    for root in roots:
+        normalized = os.path.abspath(os.path.normpath(root))
+        if os.path.islink(normalized) or not os.path.isdir(normalized):
+            # Keep invalid roots so scan() can report the existing precise error.
+            unique.append(normalized)
+            continue
+        try:
+            key = _directory_key(normalized)
+        except OSError:
+            # Preserve a raced or inaccessible root for scan() to diagnose.
+            unique.append(normalized)
+            continue
+        if key not in seen:
+            seen.add(key)
+            unique.append(normalized)
+    return unique
+
+
+def discover_default_roots(
+    data_root: str = MACOS_DATA_ROOT, volumes_root: str = MACOS_VOLUMES_ROOT
+) -> list[str]:
+    """Find the writable macOS data volume and separately mounted volumes."""
+    roots = []
+    if os.path.isdir(data_root) and not os.path.islink(data_root):
+        roots.append(data_root)
+
+    entries = []
+    if os.path.isdir(volumes_root):
+        with os.scandir(volumes_root) as volume_entries:
+            entries = sorted(volume_entries, key=lambda entry: entry.name)
+    for entry in entries:
+        if (
+            entry.is_dir(follow_symlinks=False)
+            and not entry.is_symlink()
+            and os.path.ismount(entry.path)
+        ):
+            roots.append(entry.path)
+    return unique_roots(roots)
+
+
 def scan(root: str, dry_run: bool, purge_recycle_bins: bool = False) -> Result:
     root = os.path.abspath(os.path.normpath(root))
     if os.path.islink(root):
@@ -96,8 +151,6 @@ def scan(root: str, dry_run: bool, purge_recycle_bins: bool = False) -> Result:
         retained_dirs = []
         for name in dirs:
             candidate = os.path.join(current_root, name)
-            if name.endswith(".duck") or name in IGNORED_DIRS:
-                continue
             if os.path.ismount(candidate):
                 result.skipped_mounts += 1
                 progress(candidate, root, prompt="Skipping mounted filesystem {}...", newline=True)
@@ -123,22 +176,46 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="also remove directories named $RECYCLE.BIN and their contents",
     )
-    parser.add_argument("root", help="directory tree to scan")
+    parser.add_argument(
+        "root",
+        nargs="*",
+        help="directory tree(s) to scan; defaults to macOS data and mounted volumes",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    root = os.path.abspath(args.root)
-    print(f'Running rmdsstore on "{root}"{" (dry run)" if args.dry_run else ""}.', flush=True)
     try:
-        result = scan(root, args.dry_run, args.purge_recycle_bins)
-    except ValueError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        roots = unique_roots(args.root) if args.root else discover_default_roots()
+    except OSError as error:
+        print(f"ERROR: Could not discover mounted volumes: {error}", file=sys.stderr)
+        return 2
+    if not roots:
+        print("ERROR: No macOS data or mounted-volume roots found.", file=sys.stderr)
         return 2
 
-    print(f"\nFinished: {result.removed} item(s) {'would be ' if args.dry_run else ''}removed; "
-          f"{result.skipped_mounts} mounted filesystem(s) skipped; {result.failures} failure(s).")
+    result = Result()
+    valid_roots = 0
+    for root in roots:
+        print(
+            f'Running rmdsstore on "{root}"{" (dry run)" if args.dry_run else ""}.',
+            flush=True,
+        )
+        try:
+            result.add(scan(root, args.dry_run, args.purge_recycle_bins))
+            valid_roots += 1
+        except ValueError as error:
+            result.failures += 1
+            print(f"ERROR: {error}", file=sys.stderr)
+
+    print(
+        f"\nFinished: {result.removed} item(s) {'would be ' if args.dry_run else ''}removed; "
+        f"{result.skipped_mounts} nested mounted filesystem(s) skipped; "
+        f"{result.failures} failure(s)."
+    )
+    if not valid_roots:
+        return 2
     return 1 if result.failures else 0
 
 

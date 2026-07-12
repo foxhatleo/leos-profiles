@@ -5,10 +5,6 @@ __rmdsstore() {
     puts-err "rmdsstore only supports the macOS data-volume layout."
     return 1
   fi
-  if (( $# == 0 )); then
-    puts-err "Usage: rmdsstore [--dry-run] [--purge-recycle-bins] <root>."
-    return 2
-  fi
   local python
   python=$(command -v python3) || { puts-err "python3 is required for rmdsstore."; return 1; }
   sudo "$python" "$LEOS_PROFILES/util/rmdsstore.py" "$@" || return $?
@@ -17,7 +13,7 @@ __rmdsstore() {
 
 # Remove all .DS_Store and sibling metadata files under standard macOS roots.
 rmdsstore() {
-  local root arg exit_code=0
+  local arg
   local -a options
   while (( $# > 0 )); do
     arg=$1
@@ -28,21 +24,7 @@ rmdsstore() {
       *) break ;;
     esac
   done
-  if (( $# > 0 )); then
-    for root in "$@"; do
-      __rmdsstore "${options[@]}" "$root" || exit_code=1
-    done
-    return $exit_code
-  fi
-  for root in /System/Volumes/Data/Users /System/Volumes/Data/Library \
-              /System/Volumes/Data/opt /System/Volumes/Data/usr /System/Volumes/Data/private; do
-    if [[ -d $root ]]; then
-      __rmdsstore "${options[@]}" "$root" || exit_code=1
-    else
-      puts-err "Skipping missing macOS data root: $root"
-    fi
-  done
-  return $exit_code
+  __rmdsstore "${options[@]}" "$@"
 }
 
 # Clear known history files. The aggressive mode adds the legacy broad globs,

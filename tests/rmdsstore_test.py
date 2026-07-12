@@ -61,6 +61,82 @@ class RmdsstoreTest(unittest.TestCase):
     def test_invalid_root_is_an_error(self) -> None:
         self.assertEqual(rmdsstore.main(["/definitely-not-a-real-leos-root"]), 2)
 
+    def test_cloud_storage_and_duck_directories_are_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            cloud = root / "Library" / "CloudStorage"
+            duck = root / "remote.duck"
+            cloud.mkdir(parents=True)
+            duck.mkdir()
+            (cloud / ".DS_Store").write_text("metadata", encoding="utf-8")
+            (duck / ".DS_Store").write_text("metadata", encoding="utf-8")
+
+            result = rmdsstore.scan(str(root), dry_run=False)
+
+            self.assertEqual(result.removed, 2)
+            self.assertFalse((cloud / ".DS_Store").exists())
+            self.assertFalse((duck / ".DS_Store").exists())
+
+    def test_nested_mount_is_pruned_but_explicit_mount_root_is_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            mounted = root / "mounted"
+            mounted.mkdir()
+            metadata = mounted / ".DS_Store"
+            metadata.write_text("metadata", encoding="utf-8")
+
+            real_ismount = rmdsstore.os.path.ismount
+            with mock.patch.object(
+                rmdsstore.os.path,
+                "ismount",
+                side_effect=lambda path: pathlib.Path(path) == mounted or real_ismount(path),
+            ):
+                parent_result = rmdsstore.scan(str(root), dry_run=False)
+                mount_result = rmdsstore.scan(str(mounted), dry_run=False)
+
+            self.assertEqual(parent_result.skipped_mounts, 1)
+            self.assertEqual(mount_result.removed, 1)
+            self.assertFalse(metadata.exists())
+
+    def test_default_roots_include_data_and_each_mounted_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            data = base / "Data"
+            volumes = base / "Volumes"
+            external = volumes / "External"
+            ordinary = volumes / "Ordinary"
+            data.mkdir()
+            external.mkdir(parents=True)
+            ordinary.mkdir()
+            (volumes / "Link").symlink_to(external, target_is_directory=True)
+
+            with mock.patch.object(
+                rmdsstore.os.path,
+                "ismount",
+                side_effect=lambda path: pathlib.Path(path) == external,
+            ):
+                roots = rmdsstore.discover_default_roots(str(data), str(volumes))
+
+            self.assertEqual(roots, [str(data), str(external)])
+
+    def test_multiple_roots_are_deduplicated_and_aggregated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / ".DS_Store").write_text("metadata", encoding="utf-8")
+
+            status = rmdsstore.main(["--dry-run", str(root), f"{root}/"])
+
+            self.assertEqual(status, 0)
+            self.assertTrue((root / ".DS_Store").exists())
+
+    def test_default_discovery_errors_are_reported(self) -> None:
+        with mock.patch.object(
+            rmdsstore, "discover_default_roots", side_effect=PermissionError("denied")
+        ):
+            status = rmdsstore.main([])
+
+        self.assertEqual(status, 2)
+
     def test_walk_errors_are_reported_as_failures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             def inaccessible_walk(*_args: object, **kwargs: object) -> list[object]:
