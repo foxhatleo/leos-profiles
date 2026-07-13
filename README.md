@@ -126,6 +126,12 @@ repairs locked tools, plugins, configuration, fonts, Node LTS, and saved
 credential references without a full host upgrade. `--full-upgrade` opts into
 the saved broad package-manager upgrade behavior.
 
+A full upgrade—here and in `bye`'s package checkups—upgrades installed packages
+within the current OS release only (`apt-get upgrade`, `dnf upgrade`,
+`pacman -Syu`, `brew upgrade`). It never performs a distribution/release
+upgrade such as `do-release-upgrade` or `dnf system-upgrade`. Arch is rolling,
+so `pacman -Syu` is inherently in-release.
+
 `bye` remains the full maintenance-and-exit command. By default it runs package
 maintenance, uses native `claude update`/`codex update` only for detected
 installed AI CLIs, safely clears known history files, performs the intended
@@ -194,6 +200,7 @@ signing preferences, and GitHub keys are likewise left for explicit review.
 zsh -n zsh/*.zsh zsh/path/*.zsh
 bash -n install.sh installer/lock.sh tests/*.sh
 bash tests/install-test.sh
+bash tests/apply-dryrun-test.sh
 zsh tests/profile-test.zsh
 python3 -m py_compile util/rmdsstore.py
 python3 tests/rmdsstore_test.py

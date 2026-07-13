@@ -235,12 +235,21 @@ track_temp() { TEMP_PATHS+=("$1"); }
 cleanup() {
   local path
   for path in "${TEMP_PATHS[@]-}"; do [[ -z $path ]] || rm -rf -- "$path"; done
-  if [[ $LOCK_HELD -eq 1 && -d $LOCK_DIR ]]; then rm -rf -- "$LOCK_DIR"; fi
+  # Only remove the lock if it is still ours — never delete a lock a different
+  # run now holds (defensive backstop for the reclaim race).
+  if [[ $LOCK_HELD -eq 1 && -f $LOCK_DIR/pid ]] && [[ $(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null) == "$$" ]]; then
+    rm -rf -- "$LOCK_DIR"
+  fi
 }
 
 acquire_lock() {
   [[ $DRY_RUN -eq 0 ]] || return 0
   prepare_local_dir
+  # The ONLY state-changing operation here is the atomic exclusive `mkdir`, so
+  # two concurrent runs can never both acquire and there is no reclaim TOCTOU.
+  # A stale lock is only left by an unclean kill (SIGKILL/power loss) — the EXIT
+  # trap clears it on any normal or signalled exit — so we fail closed and tell
+  # the operator how to remove it rather than racily auto-reclaiming it.
   if mkdir "$LOCK_DIR" 2>/dev/null; then
     printf '%s\n' "$$" > "$LOCK_DIR/pid"
     chmod 600 "$LOCK_DIR/pid"
@@ -250,12 +259,7 @@ acquire_lock() {
   local owner=""
   [[ -f $LOCK_DIR/pid ]] && owner=$(sed -n '1p' "$LOCK_DIR/pid")
   if [[ $owner =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
-    rm -rf -- "$LOCK_DIR"
-    mkdir "$LOCK_DIR"
-    printf '%s\n' "$$" > "$LOCK_DIR/pid"
-    chmod 600 "$LOCK_DIR/pid"
-    LOCK_HELD=1
-    return 0
+    die "A previous Leo's Profiles operation (PID $owner) exited uncleanly and left a lock. If no such process is running, remove it and retry: rm -rf -- '$LOCK_DIR'"
   fi
   die "Another Leo's Profiles operation is running${owner:+ (PID $owner)}"
 }
@@ -502,7 +506,7 @@ package_list_for_group() {
     macos:system) printf '%s\n' 'smartmontools' ;;
     apt:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     apt:shell) printf '%s\n' 'zsh' ;;
-    apt:dev-tools) printf '%s\n' 'bat build-essential clang direnv fd-find fzf gcc git libbz2-dev libffi-dev liblzma-dev libncursesw5-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-dev libxmlsec1-dev llvm ripgrep tk-dev vim xz-utils zlib1g-dev zoxide' ;;
+    apt:dev-tools) printf '%s\n' 'bat build-essential clang direnv fd-find fzf gcc git libbz2-dev libffi-dev liblzma-dev libncurses-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-dev libxmlsec1-dev llvm ripgrep tk-dev vim xz-utils zlib1g-dev zoxide' ;;
     apt:languages) printf '%s\n' 'nodejs npm python-is-python3 ruby' ;;
     apt:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
     apt:network) printf '%s\n' 'wget rclone' ;;
@@ -570,6 +574,12 @@ install_os_packages() {
   collect_selected_packages
   (( ${#SELECTED_PACKAGES[@]} > 0 )) || return 0
   ensure_sudo
+  # INVARIANT: a full upgrade upgrades installed packages within the current OS
+  # release only (apt-get upgrade / dnf upgrade / pacman -Syu / brew upgrade).
+  # It must never perform a distribution/release upgrade (e.g. Ubuntu's
+  # do-release-upgrade, Fedora's dnf system-upgrade, or apt full-upgrade against
+  # a bumped sources list). Arch is rolling, so pacman -Syu is inherently
+  # in-release. Keep this true; the guard test in tests/install-test.sh enforces it.
   case $OS_FAMILY in
     macos)
       ensure_brew
@@ -687,6 +697,29 @@ font_should_install() {
   [[ $INSTALL_FONTS == yes ]] || { [[ $INSTALL_FONTS == auto ]] && is_desktop; }
 }
 
+# Blobless, shallow, cone-sparse checkout of a pinned commit limited to the
+# given paths. For a huge monorepo (nerd-fonts) this fetches only the requested
+# font's blobs instead of the whole multi-GB tree/history. Returns non-zero on
+# any failure so callers can fall back to a full checkout; content trust is
+# unchanged (the pinned commit is still asserted).
+sparse_checkout_pinned() {
+  local repository=$1 commit=$2 destination=$3 label=$4
+  shift 4
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would sparse-checkout $label ($*) at the pinned commit"
+    return 0
+  fi
+  mkdir -p "$destination" &&
+    git -C "$destination" init -q &&
+    git -C "$destination" remote add origin "$repository" &&
+    git -C "$destination" config extensions.partialClone origin &&
+    git -C "$destination" sparse-checkout init --cone &&
+    git -C "$destination" sparse-checkout set "$@" &&
+    git -C "$destination" fetch --depth 1 --filter=blob:none origin "$commit" &&
+    git -C "$destination" checkout --detach FETCH_HEAD || return 1
+  [[ $(git -C "$destination" rev-parse HEAD) == "$commit" ]] || return 1
+}
+
 install_fonts() {
   if ! font_should_install; then
     say "Skipping Nerd Fonts ($INSTALL_FONTS policy)"
@@ -697,11 +730,22 @@ install_fonts() {
     say "Would download pinned Nerd Fonts and install $font"
     return 0
   fi
-  local temp
+  local temp checkout
   temp=$(mktemp -d)
   track_temp "$temp"
-  clone_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$temp/nerd-fonts" nerd-fonts
-  run "$temp/nerd-fonts/install.sh" "$font"
+  checkout="$temp/nerd-fonts"
+  # Fast path: fetch only this font's files. Fall back to a full pinned checkout
+  # (the original behavior) if the sparse layout doesn't satisfy the upstream
+  # installer, so no supported font can regress.
+  if sparse_checkout_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$checkout" nerd-fonts \
+       install.sh bin "patched-fonts/$font" && "$checkout/install.sh" "$font"; then
+    :
+  else
+    say "Sparse Nerd Fonts install did not complete; retrying with a full pinned checkout"
+    rm -rf "$checkout"
+    clone_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$checkout" nerd-fonts
+    run "$checkout/install.sh" "$font"
+  fi
   rm -rf "$temp"
 }
 
@@ -830,7 +874,7 @@ install_fnm() {
     say "Would resolve the current Node LTS once, install that exact version, and make it default"
     return 0
   fi
-  resolve_node_lts
+  resolve_node_lts || die "Could not resolve the current Node LTS"
   eval "$("$HOME/.local/bin/fnm" env --shell bash)"
   run "$HOME/.local/bin/fnm" install "$RESOLVED_NODE_VERSION"
   run "$HOME/.local/bin/fnm" default "$RESOLVED_NODE_VERSION"
@@ -849,9 +893,13 @@ resolve_node_lts() {
     fnm_bin=$(command -v fnm 2>/dev/null || true)
   fi
   if [[ ! ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n ${fnm_bin:-} ]]; then
-    latest=$("$fnm_bin" list-remote --lts 2>/dev/null | tail -n 1 | awk '{print $1}')
+    latest=$("$fnm_bin" list-remote --lts 2>/dev/null | tail -n 1 | awk '{print $1}') || true
   fi
-  [[ ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Could not resolve the current Node LTS"
+  # Return non-zero (do not die) so callers can degrade gracefully: `inspect`
+  # falls back to "resolve-during-apply" and verify_step reports "needed".
+  # Callers that genuinely require a version (install_fnm, apply's main) add
+  # their own `|| die`.
+  [[ ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
   RESOLVED_NODE_VERSION=$latest
 }
 
@@ -1050,7 +1098,9 @@ ensure_github_known_hosts() {
   gh api meta --jq '.ssh_keys[]' > "$approved" || die "Could not obtain GitHub's published SSH host keys"
   ssh-keyscan -T 15 -t rsa,ecdsa,ed25519 github.com > "$scanned" 2>/dev/null ||
     die "Could not scan GitHub SSH host keys"
-  while read -r host key_type key _; do
+  # ssh-keyscan output is space-separated; the global IFS ($'\n\t') has no space,
+  # so this read must set a space-splitting IFS or the whole line lands in $host.
+  while IFS=$' \t' read -r host key_type key _; do
     material="$key_type $key"
     grep -qxF "$material" "$approved" && printf '%s %s %s\n' "$host" "$key_type" "$key" >> "$verified"
   done < "$scanned"
@@ -1060,7 +1110,7 @@ ensure_github_known_hosts() {
   known_tmp=$(mktemp "$HOME/.ssh/.known-hosts.tmp.XXXXXX")
   track_temp "$known_tmp"
   if [[ -f $HOME/.ssh/known_hosts ]]; then cp "$HOME/.ssh/known_hosts" "$known_tmp"; fi
-  while read -r host key_type key; do
+  while IFS=$' \t' read -r host key_type key; do
     material="$key_type $key"
     existing=$(awk 'NF >= 3 { print $2 " " $3 }' "$known_tmp")
     grep -qxF "$material" <<< "$existing" || printf '%s %s %s\n' "$host" "$key_type" "$key" >> "$known_tmp"
@@ -1364,12 +1414,17 @@ verify_step() {
 }
 
 run_step() {
-  local step=$1
-  if [[ ! ( $step == packages && $FULL_UPGRADE -eq 1 ) ]] && state_done "$step" && verify_step "$step"; then
+  local step=$1 force_rerun=0
+  # A full host upgrade always re-runs the packages step; it deliberately skips
+  # the state/verify short-circuit rather than failing verification.
+  [[ $step == packages && $FULL_UPGRADE -eq 1 ]] && force_rerun=1
+  if [[ $force_rerun -eq 0 ]] && state_done "$step" && verify_step "$step"; then
     say "Skipping $step (recorded complete and verified)"
     return 0
   fi
-  if state_done "$step"; then
+  if [[ $force_rerun -eq 1 ]] && state_done "$step"; then
+    say "Re-running $step (full host upgrade always re-runs the packages step)"
+  elif state_done "$step"; then
     warn "$step was recorded complete but failed verification; repairing it"
   fi
   say "Running $step"
@@ -1428,7 +1483,7 @@ inspect_tsv() {
   fi
   if has_csv_item "$SELECTED_STEPS" packages; then
     printf 'action\tpackages\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf 'full host upgrade and selected package installation' || printf 'install missing selected packages without full host upgrade')"
-    if [[ $FULL_UPGRADE -eq 1 ]]; then printf 'irreversible\thost-upgrade\tpackage-manager upgrades are not automatically reversible\n'; fi
+    if [[ $FULL_UPGRADE -eq 1 ]]; then printf 'irreversible\thost-upgrade\tin-release package-manager upgrades (never an OS release upgrade) are not automatically reversible\n'; fi
     if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" network; then
       printf 'action\trepository\tHomebrew heroku/brew tap\n'
     fi
@@ -1519,7 +1574,7 @@ main() {
   fi
   bootstrap_tools
   if has_csv_item "$SELECTED_STEPS" fnm && [[ $DRY_RUN -eq 0 ]]; then
-    resolve_node_lts
+    resolve_node_lts || die "Could not resolve the current Node LTS"
     say "Resolved Node current LTS for this run: $RESOLVED_NODE_VERSION"
   fi
   install_credential_prerequisites

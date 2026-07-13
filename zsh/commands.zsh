@@ -5,9 +5,19 @@ __rmdsstore() {
     puts-err "rmdsstore only supports the macOS data-volume layout."
     return 1
   fi
-  local python
-  python=$(command -v python3) || { puts-err "python3 is required for rmdsstore."; return 1; }
-  sudo "$python" "$LEOS_PROFILES/util/rmdsstore.py" "$@" || return $?
+  # Run the sweep with the OS interpreter, not a PATH-resolved one: `sudo` must
+  # not execute a python3 from a user-writable dir (the Homebrew prefix, pyenv
+  # shims), which would be a local root-escalation vector — especially since
+  # `bye` runs `brew upgrade` moments earlier. `-I` isolates the interpreter
+  # (ignores PYTHON* env and user site; drops the script dir from sys.path on
+  # 3.11+). rmdsstore.py is stdlib-only, so the system Python is sufficient.
+  # Note: the script itself lives in the user-owned checkout by design (see the
+  # README trust model); this closes the interpreter/env vectors, not that one.
+  if [[ ! -x /usr/bin/python3 ]]; then
+    puts-err "/usr/bin/python3 (the system Python) is required for rmdsstore."
+    return 1
+  fi
+  sudo /usr/bin/python3 -I "$LEOS_PROFILES/util/rmdsstore.py" "$@" || return $?
   puts "Finished scanning $*"
 }
 

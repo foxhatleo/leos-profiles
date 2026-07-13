@@ -15,6 +15,10 @@ _leos_plugin() {
 # an interactive question during shell startup.
 autoload -Uz compinit compaudit
 () {
+  # Localize options so the freshness qualifier below (which needs EXTENDED_GLOB,
+  # normally enabled in env.zsh) works regardless of the ambient option set.
+  emulate -L zsh
+  setopt extended_glob
   local dump=$HOME/.zcompdump insecure
   insecure=$(compaudit 2>/dev/null) || true
   if [[ -n $insecure ]]; then

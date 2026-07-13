@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import pathlib
 import sys
@@ -137,29 +138,75 @@ class RmdsstoreTest(unittest.TestCase):
 
         self.assertEqual(status, 2)
 
-    def test_walk_errors_are_reported_as_failures(self) -> None:
+    def test_genuine_walk_errors_are_reported_as_failures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            def inaccessible_walk(*_args: object, **kwargs: object) -> list[object]:
+            def failing_walk(*_args: object, **kwargs: object) -> list[object]:
                 onerror = kwargs["onerror"]
                 assert callable(onerror)
-                onerror(PermissionError(13, "Permission denied", directory))
+                onerror(OSError(errno.EIO, "I/O error", directory))
                 return []
 
-            with mock.patch.object(rmdsstore.os, "walk", side_effect=inaccessible_walk):
+            with mock.patch.object(rmdsstore.os, "walk", side_effect=failing_walk):
                 result = rmdsstore.scan(directory, dry_run=True)
             self.assertEqual(result.failures, 1)
+            self.assertEqual(result.skipped_unreadable, 0)
+
+    def test_permission_denied_walk_is_skipped_not_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def denied_walk(*_args: object, **kwargs: object) -> list[object]:
+                onerror = kwargs["onerror"]
+                assert callable(onerror)
+                onerror(PermissionError(errno.EACCES, "Permission denied", directory + "/Protected"))
+                return []
+
+            with mock.patch.object(rmdsstore.os, "walk", side_effect=denied_walk):
+                result = rmdsstore.scan(directory, dry_run=True)
+            self.assertEqual(result.failures, 0)
+            self.assertEqual(result.skipped_unreadable, 1)
+
+    def test_permission_denied_run_exits_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def denied_walk(*_args: object, **kwargs: object) -> list[object]:
+                onerror = kwargs["onerror"]
+                assert callable(onerror)
+                onerror(PermissionError(errno.EPERM, "Operation not permitted", directory))
+                return []
+
+            with mock.patch.object(rmdsstore.os, "walk", side_effect=denied_walk):
+                status = rmdsstore.main([directory])
+            self.assertEqual(status, 0)
+
+    def test_remove_permission_error_is_failure_and_brace_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            braced = root / "{weird}"
+            braced.mkdir()
+            (braced / ".DS_Store").write_text("x", encoding="utf-8")
+
+            def denied_remove(path: str, *a: object, **k: object) -> None:
+                raise PermissionError(errno.EACCES, "denied {oops}", path)
+
+            with mock.patch.object(rmdsstore.os, "remove", side_effect=denied_remove):
+                result = rmdsstore.scan(str(root), dry_run=False)
+            # A found-but-undeletable metadata file is a real failure, not a
+            # skip, and braces in the path/error must not crash progress().
+            self.assertEqual(result.failures, 1)
+            self.assertEqual(result.skipped_unreadable, 0)
 
     def test_walk_errors_with_braces_do_not_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             def brace_walk(*_args: object, **kwargs: object) -> list[object]:
                 onerror = kwargs["onerror"]
                 assert callable(onerror)
-                onerror(PermissionError(13, "denied {oops}", directory + "/{weird}"))
+                onerror(PermissionError(errno.EACCES, "denied {oops}", directory + "/{weird}"))
                 return []
 
             with mock.patch.object(rmdsstore.os, "walk", side_effect=brace_walk):
                 result = rmdsstore.scan(directory, dry_run=True)
-            self.assertEqual(result.failures, 1)
+            # Permission-denied is skipped, not failed; braces in the error text
+            # and path must not crash progress()'s str.format template.
+            self.assertEqual(result.skipped_unreadable, 1)
+            self.assertEqual(result.failures, 0)
 
 
 if __name__ == "__main__":

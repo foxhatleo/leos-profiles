@@ -49,6 +49,17 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_TEST_ROOT="$root" zsh -dfc '
   fuck first-call
 ' || fail 'lazy thefuck first invocation'
 
+HOME="$tmp/yarn-home" LEOS_TEST_ROOT="$root" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  mkdir -p "$HOME/.yarn/bin"
+  yarn() { : > "$HOME/yarn-spawned"; }        # node.zsh must never invoke yarn
+  typeset -ga path=()
+  add-path() { [[ -d $1 ]] && path=("$1" $path); return 0; }
+  source "$LEOS_TEST_ROOT/zsh/path/node.zsh"
+  (( ${path[(Ie)$HOME/.yarn/bin]} ))          # ~/.yarn/bin was added from disk
+  [[ ! -e $HOME/yarn-spawned ]]               # ...without spawning a Node process
+' || fail "node.zsh adds ~/.yarn/bin from disk without spawning yarn"
+
 HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
@@ -62,6 +73,18 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
     rmdsstore --dry-run "$HOME/metadata-one" "$HOME/metadata-two"
     [[ -e $HOME/metadata-one/.DS_Store && -e $HOME/metadata-two/Thumbs.db ]]
   ' || fail 'multi-root metadata cleanup wrapper'
+
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+  zsh -dfc '
+    setopt err_return no_unset pipe_fail
+    starship() { [[ $1 == init ]] && print -r -- ":"; }
+    source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+    uname() { print -r -- Darwin; }
+    typeset -g SUDO_LOG="$HOME/sudo-args"
+    sudo() { print -r -- "$*" > "$SUDO_LOG"; }    # capture the full sudo argv
+    rmdsstore --dry-run "$HOME" >/dev/null 2>&1
+    [[ "$(<$SUDO_LOG)" == "/usr/bin/python3 -I "* ]]
+  ' || fail 'rmdsstore must run the pinned, isolated system python under sudo, not a PATH-resolved one'
 
 LEOS_TEST_ROOT="$root" zsh -dfc '
   setopt err_return no_unset pipe_fail

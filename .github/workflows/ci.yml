@@ -65,6 +65,8 @@ jobs:
           exit "$rc"
       - name: Clone locked plugins and source their combined Zsh integration
         run: bash tests/locked-plugins-test.sh
+      - name: Smoke-test the deterministic apply in dry-run (apt)
+        run: bash tests/apply-dryrun-test.sh
 
   package-map-macos:
     name: Package map / ${{ matrix.runner }} (gating)
@@ -86,6 +88,8 @@ jobs:
         run: bash tests/install-test.sh
       - name: Run Zsh profile tests
         run: zsh tests/profile-test.zsh
+      - name: Smoke-test the deterministic apply in dry-run (macOS)
+        run: bash tests/apply-dryrun-test.sh
 
   package-map-apt:
     name: Package map / ${{ matrix.runner }} (gating)
@@ -135,18 +139,21 @@ jobs:
           if [[ $FAMILY == apt ]]; then
             docker run --rm -v "$PWD:/repo:ro" "$IMAGE" bash -lc '
               apt-get update && apt-get install -y ca-certificates &&
-              bash /repo/tests/package-map-availability.sh apt
+              bash /repo/tests/package-map-availability.sh apt &&
+              bash /repo/tests/apply-dryrun-test.sh
             '
           elif [[ $FAMILY == fedora ]]; then
             docker run --rm -v "$PWD:/repo:ro" "$IMAGE" bash -lc '
               dnf install -y findutils grep rpm ca-certificates &&
               dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" &&
-              bash /repo/tests/package-map-availability.sh fedora
+              bash /repo/tests/package-map-availability.sh fedora &&
+              bash /repo/tests/apply-dryrun-test.sh
             '
           else
             docker run --rm -v "$PWD:/repo:ro" "$IMAGE" bash -lc '
               pacman -Sy --noconfirm &&
-              bash /repo/tests/package-map-availability.sh arch
+              bash /repo/tests/package-map-availability.sh arch &&
+              bash /repo/tests/apply-dryrun-test.sh
             '
           fi
 

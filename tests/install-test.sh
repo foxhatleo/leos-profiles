@@ -184,6 +184,10 @@ test_package_maps_cover_every_supported_os() {
   OS_FAMILY=apt
   assert_contains "$(package_list_for_group dev-tools)" "libssl-dev"
   assert_contains "$(package_list_for_group dev-tools)" "libreadline-dev"
+  # libncursesw5-dev was removed on Debian 13 / Ubuntu 24.04+; libncurses-dev is
+  # the portable replacement (pulls in libncursesw6).
+  assert_contains "$(package_list_for_group dev-tools)" "libncurses-dev"
+  [[ $(package_list_for_group dev-tools) != *libncursesw5-dev* ]] || fail "apt dev-tools still pins the removed libncursesw5-dev"
   OS_FAMILY=fedora
   assert_contains "$(package_list_for_group dev-tools)" "openssl-devel"
   OS_FAMILY=macos
@@ -525,6 +529,196 @@ test_reconcile_upgrade_policy_and_cleanup() (
   rm -rf "$temp"
 )
 
+test_node_lts_returns_nonzero_when_unresolvable() (
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME/.local/bin"           # no fnm binary present
+  curl() { return 1; }                  # network unavailable
+  fnm() { return 1; }                   # fnm on PATH but list-remote fails
+  RESOLVED_NODE_VERSION=""
+  if resolve_node_lts; then fail "resolve_node_lts must return nonzero (not die) when unresolvable"; fi
+  [[ -z $RESOLVED_NODE_VERSION ]] || fail "resolve_node_lts set a version despite failing"
+  rm -rf "$temp"
+)
+
+test_inspect_degrades_when_node_lts_unresolvable() (
+  local output
+  OS_FAMILY=macos
+  SELECTED_STEPS=fnm
+  SELECTED_GROUPS=""
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  normalise_dependencies
+  order_selected_steps
+  resolve_node_lts() { return 1; }      # graceful failure must be reachable now
+  verify_step() { return 1; }
+  output=$(inspect_tsv)
+  assert_contains "$output" $'moving\tnode-lts\tresolve-during-apply'
+)
+
+test_packages_full_upgrade_rerun_has_no_false_warning() (
+  local temp err
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
+  OS_FAMILY=macos
+  SELECTED_GROUPS=core-utils
+  FULL_UPGRADE=1
+  install_os_packages() { :; }
+  verify_step() { return 0; }
+  DRY_RUN=0
+  mark_done packages                    # a prior run recorded packages complete
+  DRY_RUN=1
+  err=$(run_step packages 2>&1 >/dev/null)
+  [[ $err != *"failed verification"* ]] || fail "packages full-upgrade re-run emitted a false verification warning"
+  rm -rf "$temp"
+)
+
+test_stale_lock_fails_closed_with_guidance() (
+  local temp dead_pid err
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  LOCK_DIR="$LOCAL_DIR/.install.lock"
+  DRY_RUN=0
+  LOCK_HELD=0
+  prepare_local_dir
+  sh -c 'exit 0' & dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+  mkdir "$LOCK_DIR"
+  printf '%s\n' "$dead_pid" > "$LOCK_DIR/pid"
+  # A stale (dead-PID) lock must fail closed with cleanup guidance, never be
+  # auto-reclaimed (which had an unavoidable TOCTOU race).
+  err=$( (acquire_lock) 2>&1 ) && fail "a stale lock was auto-reclaimed instead of failing closed"
+  assert_contains "$err" "exited uncleanly"
+  assert_contains "$err" "$LOCK_DIR"
+  [[ $(sed -n '1p' "$LOCK_DIR/pid") == "$dead_pid" ]] || fail "acquire_lock mutated the stale lock instead of leaving it for the operator"
+  rm -rf "$temp"
+)
+
+test_sparse_font_checkout_is_blobless_and_scoped() (
+  local temp log
+  temp=$(mktemp -d)
+  log="$temp/git-args"
+  : > "$log"
+  DRY_RUN=0
+  git() {
+    local IFS=' '
+    printf '%s\n' "$*" >> "$log"
+    case "$*" in
+      *"rev-parse HEAD"*) printf '%s\n' DEADBEEFCOMMIT ;;
+    esac
+    return 0
+  }
+  sparse_checkout_pinned "https://example.invalid/nerd-fonts.git" DEADBEEFCOMMIT "$temp/nf" nerd-fonts \
+    install.sh bin patched-fonts/JetBrainsMono || fail "sparse checkout returned nonzero on a healthy path"
+  assert_contains "$(cat "$log")" "sparse-checkout set install.sh bin patched-fonts/JetBrainsMono"
+  assert_contains "$(cat "$log")" "fetch --depth 1 --filter=blob:none origin DEADBEEFCOMMIT"
+  rm -rf "$temp"
+)
+
+test_no_os_release_upgrade_tooling() {
+  # Full-upgrade / checkup paths must stay in-release. Strip comments first so
+  # the intentional mentions in guard comments don't count as usage.
+  local file code
+  for file in "$ROOT/install.sh" "$ROOT/zsh/path/apt.zsh" "$ROOT/zsh/path/dnf.zsh" "$ROOT/zsh/path/pacman.zsh"; do
+    code=$(sed 's/#.*//' "$file")
+    if grep -Eq 'do-release-upgrade|dnf[[:space:]]+system-upgrade|apt(-get)?[[:space:]]+(dist-upgrade|full-upgrade)' <<< "$code"; then
+      fail "release-upgrade tooling found in $file; a full upgrade must stay in-release"
+    fi
+  done
+}
+
+test_download_verified_rejects_bad_digest() (
+  local temp err
+  temp=$(mktemp -d)
+  DRY_RUN=0
+  TEMP_PATHS=()
+  curl() {
+    [[ ${1:-} == --help ]] && { printf '%s\n' 'no-retry-all-errors-here'; return 0; }
+    local out="" want=0 a
+    for a in "$@"; do
+      [[ $want == 1 ]] && { out=$a; want=0; }
+      [[ $a == --output ]] && want=1
+    done
+    [[ -n $out ]] && printf 'fixture-bytes' > "$out"
+    return 0
+  }
+  err=$( (download_verified "https://example.invalid/artifact" \
+    0000000000000000000000000000000000000000000000000000000000000000 "$temp/artifact") 2>&1 ) \
+    && fail "download_verified accepted a wrong digest"
+  assert_contains "$err" "Digest mismatch"
+  [[ ! -e $temp/artifact ]] || fail "download_verified kept the artifact despite a digest mismatch"
+  rm -rf "$temp"
+)
+
+test_macos_package_verification_detects_missing() (
+  OS_FAMILY=macos
+  SELECTED_GROUPS=core-utils
+  brew() {
+    shift 2                              # drop 'list --versions'
+    local first=1 package
+    for package in "$@"; do
+      [[ $first == 1 ]] && { first=0; continue; }   # pretend the first is NOT installed
+      printf '%s 1.0\n' "$package"
+    done
+  }
+  ! selected_packages_installed || fail "a missing package was reported as fully installed"
+)
+
+test_set_default_shell_auto_skips_existing_zsh() (
+  CHANGE_DEFAULT_SHELL=auto
+  DRY_RUN=1
+  OS_FAMILY=apt
+  current_login_shell() { printf '%s\n' /bin/zsh; }
+  local out
+  out=$(set_default_shell)
+  assert_contains "$out" "already zsh"
+  [[ $out != *chsh* ]] || fail "auto policy ran chsh though the login shell is already zsh"
+)
+
+test_set_default_shell_uses_unprivileged_chsh_on_linux() (
+  CHANGE_DEFAULT_SHELL=yes
+  DRY_RUN=1
+  OS_FAMILY=apt
+  current_login_shell() { printf '%s\n' /bin/bash; }
+  local out
+  out=$(set_default_shell 2>&1)
+  assert_contains "$out" "chsh -s"
+  [[ $out != *"sudo chsh"* ]] || fail "the Linux default-shell path used sudo chsh"
+)
+
+test_set_default_shell_uses_sudo_chsh_on_macos() (
+  CHANGE_DEFAULT_SHELL=yes
+  DRY_RUN=1
+  OS_FAMILY=macos
+  USER=tester
+  current_login_shell() { printf '%s\n' /bin/bash; }
+  local out
+  out=$(set_default_shell 2>&1)
+  assert_contains "$out" "sudo chsh -s"
+)
+
+test_known_hosts_matches_metadata_and_dedupes() (
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp"
+  TEMP_PATHS=()
+  gh() {
+    [[ ${1:-} == api && ${2:-} == meta ]] || return 1
+    printf '%s\n' 'ssh-ed25519 AAAAGOOD' 'ssh-rsa AAAARSAGOOD'
+  }
+  ssh-keyscan() { printf '%s\n' 'github.com ssh-ed25519 AAAAGOOD' 'github.com ssh-ed25519 AAAAEVIL'; }
+  ensure_github_known_hosts
+  local written
+  written=$(cat "$HOME/.ssh/known_hosts")
+  assert_contains "$written" 'github.com ssh-ed25519 AAAAGOOD'
+  [[ $written != *AAAAEVIL* ]] || fail "an unverified host key was written to known_hosts"
+  ensure_github_known_hosts                                  # re-run must not duplicate
+  [[ $(cat "$HOME/.ssh/known_hosts") == "$written" ]] || fail "re-running duplicated known_hosts entries"
+  rm -rf "$temp"
+)
+
 test_default_does_not_include_unreleased_local_bin
 test_option_validation_rejects_bad_csv_and_implicit_keys
 test_dependency_normalisation
@@ -556,4 +750,16 @@ test_inspection_schema_and_membership
 test_empty_custom_selection_is_inspectable
 test_runtime_and_signing_invariants
 test_reconcile_upgrade_policy_and_cleanup
+test_node_lts_returns_nonzero_when_unresolvable
+test_inspect_degrades_when_node_lts_unresolvable
+test_packages_full_upgrade_rerun_has_no_false_warning
+test_stale_lock_fails_closed_with_guidance
+test_sparse_font_checkout_is_blobless_and_scoped
+test_no_os_release_upgrade_tooling
+test_download_verified_rejects_bad_digest
+test_macos_package_verification_detects_missing
+test_set_default_shell_auto_skips_existing_zsh
+test_set_default_shell_uses_unprivileged_chsh_on_linux
+test_set_default_shell_uses_sudo_chsh_on_macos
+test_known_hosts_matches_metadata_and_dedupes
 printf '%s\n' 'install tests: PASS'

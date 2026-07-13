@@ -1,4 +1,5 @@
-# APT checkup
+# APT checkup — in-release package upgrade only; never do-release-upgrade or
+# `apt full-upgrade` against a bumped release.
 if command -v apt-get >/dev/null 2>&1; then
   apt-checkup() {
     sudo apt-get update &&

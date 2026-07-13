@@ -4,12 +4,17 @@
 The script is intentionally usable without the zsh profile.  It never follows
 symlinks, will not descend into mounted filesystems below the chosen root, and
 returns a non-zero status when the requested root is invalid or a deletion
-fails.  Use --dry-run to inspect scope before deleting anything.
+fails.  Directories that cannot be *entered* (e.g. macOS TCC/SIP-protected
+paths, which stay unreadable even under sudo) are skipped rather than counted as
+failures, so a clean sweep still exits 0; a metadata file that is found but
+cannot be deleted still counts as a failure.  Use --dry-run to inspect scope
+before deleting anything.
 """
 
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import re
 import shutil
@@ -28,11 +33,13 @@ class Result:
     removed: int = 0
     failures: int = 0
     skipped_mounts: int = 0
+    skipped_unreadable: int = 0
 
     def add(self, other: Result) -> None:
         self.removed += other.removed
         self.failures += other.failures
         self.skipped_mounts += other.skipped_mounts
+        self.skipped_unreadable += other.skipped_unreadable
 
 
 def _term_width() -> int:
@@ -74,8 +81,13 @@ def remove_path(path: str, root: str, dry_run: bool, result: Result, is_dir: boo
             os.remove(path)
         result.removed += 1
     except OSError as error:
+        # A metadata file we found but cannot delete (permission, immutable flag,
+        # I/O) is a genuine failure the caller should see — unlike a directory we
+        # could not even enter (handled in walk_error). Escape braces so a path
+        # containing '{' or '}' cannot break progress()'s str.format template.
         result.failures += 1
-        progress(path, root, prompt=f"Could not remove ({{}}): {error}", newline=True)
+        detail = str(error).replace("{", "{{").replace("}", "}}")
+        progress(path, root, prompt=f"Could not remove ({{}}): {detail}", newline=True)
 
 
 def _directory_key(path: str) -> tuple[int, int]:
@@ -137,11 +149,18 @@ def scan(root: str, dry_run: bool, purge_recycle_bins: bool = False) -> Result:
     result = Result()
 
     def walk_error(error: OSError) -> None:
-        result.failures += 1
         failed_path = error.filename or root
         # The error text contains the path; escape braces so progress()'s
         # str.format template cannot choke on it.
         detail = str(error).replace("{", "{{").replace("}", "}}")
+        if getattr(error, "errno", None) in (errno.EACCES, errno.EPERM):
+            # macOS TCC/SIP blocks traversal of protected trees (Mail, Photos,
+            # ...) even under sudo. That is "nothing to clean here", not a
+            # deletion failure, so a clean sweep still exits 0.
+            result.skipped_unreadable += 1
+            progress(failed_path, root, prompt=f"Skipping unreadable ({{}}): {detail}", newline=True)
+            return
+        result.failures += 1
         progress(failed_path, root, prompt=f"Could not scan ({{}}): {detail}", newline=True)
 
     for current_root, dirs, files in os.walk(
@@ -212,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"\nFinished: {result.removed} item(s) {'would be ' if args.dry_run else ''}removed; "
         f"{result.skipped_mounts} nested mounted filesystem(s) skipped; "
+        f"{result.skipped_unreadable} unreadable path(s) skipped; "
         f"{result.failures} failure(s)."
     )
     if not valid_roots:
