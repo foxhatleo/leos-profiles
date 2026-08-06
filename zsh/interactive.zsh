@@ -52,6 +52,9 @@ if (( $+functions[compdef] )); then
       '--shutdown-wsl[Shut down WSL after maintenance]'
   }
   compdef _leos_bye bye
+
+  # npm/pnpm completions (cached; defined in path/node.zsh).
+  (( $+functions[leos-node-completions] )) && leos-node-completions
 fi
 
 # Syntax highlighting must be the final interactive plugin action, after

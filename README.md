@@ -109,7 +109,11 @@ The first changed version is preserved beside the file as
 The profile remains relocatable via `LEOS_PROFILES_HOME`.
 
 Starship and custom completions initialize before zsh-syntax-highlighting,
-which is the final interactive plugin action. Locale fallback validates
+which is the final interactive plugin action. npm and pnpm completions are
+generated from `npm completion` / `pnpm completion zsh` and cached under
+`${XDG_CACHE_HOME:-~/.cache}/leos-profiles/completions`, regenerated only when
+the resolved binary changes; Yarn ships no generator, so it uses the bundled
+zsh-completions `_yarn`. Locale fallback validates
 `C.UTF-8`, then `en_US.UTF-8`, and otherwise uses `C`. fnm alone constructs its
 runtime PATH. Set `LEOS_PLAIN_PROMPT=1` for the ASCII prompt,
 `LEOS_DISABLE_ALIASES=1` to disable command aliases, or

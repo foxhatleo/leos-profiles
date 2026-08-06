@@ -60,6 +60,32 @@ HOME="$tmp/yarn-home" LEOS_TEST_ROOT="$root" zsh -dfc '
   [[ ! -e $HOME/yarn-spawned ]]               # ...without spawning a Node process
 ' || fail "node.zsh adds ~/.yarn/bin from disk without spawning yarn"
 
+HOME="$tmp/pm-home" LEOS_TEST_ROOT="$root" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  mkdir -p "$HOME/bin"
+  for tool in npm pnpm; do
+    print -r -- "#!/bin/sh
+printf %s\\\\n \"\$0 \$*\" >> \"\$HOME/spawns\"
+printf %s\\\\n \"_${tool}_stub() { :; }\"
+printf %s\\\\n \"compdef _${tool}_stub ${tool}\"" > "$HOME/bin/$tool"
+    chmod +x "$HOME/bin/$tool"
+  done
+  path=("$HOME/bin" $path)
+  add-path() { return 0; }
+  puts-err() { print -u2 -r -- "$*"; }
+  compdef() { : ; }                             # stand in for the completion system
+  source "$LEOS_TEST_ROOT/zsh/path/node.zsh"
+  leos-node-completions
+  (( $+functions[_npm_stub] && $+functions[_pnpm_stub] ))   # generators were sourced
+  [[ $(wc -l < "$HOME/spawns") -eq 2 ]]
+  grep -q -- "npm completion$" "$HOME/spawns"
+  grep -q -- "pnpm completion zsh$" "$HOME/spawns"
+  unset -f _npm_stub _pnpm_stub
+  leos-node-completions                         # second shell: cache hit only
+  (( $+functions[_npm_stub] && $+functions[_pnpm_stub] ))
+  [[ $(wc -l < "$HOME/spawns") -eq 2 ]]
+' || fail "node.zsh caches npm/pnpm completions without respawning them"
+
 HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
