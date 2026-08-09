@@ -30,7 +30,13 @@ if [[ ${LEOS_DISABLE_ALIASES:-0} != 1 ]]; then
   elif [[ $OSTYPE == darwin* ]]; then
     alias ls='ls -G'
   fi
-  command -v bat >/dev/null 2>&1 && alias cat='bat --style=plain --paging=never'
+  if command -v bat >/dev/null 2>&1; then
+    alias cat='bat --style=plain --paging=never'
+    # Colorized man pages from the same pager. `col -bx` strips the overstrike
+    # sequences groff emits, which bat would otherwise render literally.
+    export MANPAGER="sh -c 'col -bx | bat -l man -p'"
+    export MANROFFOPT='-c'          # keeps groff from re-adding those sequences
+  fi
   if command grep --color=auto '' /dev/null >/dev/null 2>&1 || [[ $? == 1 ]]; then
     alias grep='grep --color=auto'
     alias fgrep='fgrep --color=auto'
@@ -57,6 +63,10 @@ zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'   # case-insensitive
 zstyle ':completion:*' menu no
 zstyle ':completion:*' list-colors ${(s.:.)LS_COLORS}        # colorize menu; also picked up by fzf-tab
 zstyle ':completion:*:descriptions' format '[%d]'            # fzf-tab uses these as group headers
+# Directory preview in fzf-tab's finder, matching the eza/bat aesthetic above.
+if command -v eza >/dev/null 2>&1; then
+  zstyle ':fzf-tab:complete:cd:*' fzf-preview 'eza -1 --color=always $realpath'
+fi
 zstyle ':completion:*' rehash true                           # find newly-installed executables without a restart
 zstyle ':completion:*' accept-exact '*(N)'
 zstyle ':completion:*' use-cache on

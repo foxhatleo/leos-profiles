@@ -4,6 +4,10 @@
 # can be added in local/private.zsh.
 add-path "$HOME/.yarn/bin"
 
+# bun's own global bin dir, where `bun add -g` puts binaries. add-path no-ops
+# when it does not exist, so this costs nothing until bun installs something.
+add-path "$HOME/.bun/bin"
+
 # Node package-manager completions.
 #
 # npm ships `npm completion` and pnpm ships `pnpm completion zsh`; both print a

@@ -61,9 +61,16 @@ autoload -Uz compinit compaudit
 entry "path/fzf"
 entry "path/zoxide"
 entry "path/gcloud-completion"
+entry "path/heroku"
 
 # fzf-tab must load after compinit but BEFORE plugins that wrap ZLE widgets.
 _leos_plugin fzf-tab/fzf-tab.plugin.zsh
+
+# Suggest from the completion system as well as history, so a command typed for
+# the first time still gets a suggestion. Capped buffer size keeps the
+# completion strategy from adding latency on very long lines.
+ZSH_AUTOSUGGEST_STRATEGY=(history completion)
+ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE=20
 _leos_plugin zsh-autosuggestions/zsh-autosuggestions.zsh
 
 # Custom completions (after compinit).
