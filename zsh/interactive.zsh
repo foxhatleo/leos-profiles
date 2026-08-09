@@ -18,13 +18,9 @@ _leos_plugin() {
 # it. This states today's behaviour (env.zsh defaults EDITOR to nano) explicitly
 # instead of leaving it to inherited environment.
 #
-# `bindkey -e` itself fails when there is no line editor, and a bare failing
-# command mid-file aborts the whole file under ERR_RETURN (how the tests source
-# it) — hence the guard. Note a *false guard* is safe: in `cond && action`,
-# ERR_RETURN ignores cond failing and only fires if action does.
-if [[ -o zle ]]; then
-  bindkey -e
-fi
+# Unguarded on purpose: verified that `bindkey -e` returns 0 and prints nothing
+# even when the shell has no line editor, so there is nothing to guard against.
+bindkey -e
 
 # zsh-completions must extend fpath BEFORE compinit.
 [[ -d $LEOS_PROFILES_ZSH/plugins/zsh-completions/src ]] && \
@@ -102,7 +98,10 @@ fi
 # completion definitions and prompt widget setup.
 _leos_plugin zsh-syntax-highlighting/zsh-syntax-highlighting.zsh   # MUST be last
 
-# Starship prompt.
+# Starship prompt. The built-in fallback is used whenever Starship cannot drive
+# the prompt, whether because it is absent or because its init produced nothing.
+typeset -g _leos_fallback_prompt='%F{cyan}%n@%m%f %F{blue}%~%f %# '
+
 # $+commands, not `command -v`: the cached init below needs the binary's path,
 # and only $commands is guaranteed to hold one.
 if (( $+commands[starship] )); then
@@ -114,16 +113,24 @@ if (( $+commands[starship] )); then
     export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship.toml"
   fi
   # Cached: the init script is deterministic, and the parts that must vary per
-  # shell (the session key, PROMPT2) are expanded when it is sourced. Status
-  # consumed so a failure cannot abort this file under ERR_RETURN.
-  leos-source-cached starship-init $commands[starship] init zsh ||
-    puts-err "starship init produced no output; falling back to the built-in prompt."
+  # shell (the session key, PROMPT2) are expanded when it is sourced.
+  typeset -g _leos_starship_status=0
+  leos-source-cached starship-init $commands[starship] init zsh || _leos_starship_status=$?
+  if (( _leos_starship_status )); then
+    # Only warn on a fresh failure (1); 2 means an earlier shell already said so.
+    (( _leos_starship_status == 1 )) &&
+      puts-err "starship init produced no output; using the built-in fallback prompt."
+    # Actually install that fallback, rather than leaving the prompt unset.
+    PROMPT=$_leos_fallback_prompt
+  fi
+  unset _leos_starship_status
 else
   if [[ ! -f $_leos_root/local/flags/no-starship-warning ]]; then
     puts-err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore it, or touch local/flags/no-starship-warning under the profile root to silence this."
   fi
-  PROMPT='%F{cyan}%n@%m%f %F{blue}%~%f %# '
+  PROMPT=$_leos_fallback_prompt
 fi
+unset _leos_fallback_prompt
 
 # Machine-local interactive overrides, last of all: this is the counterpart to
 # local/private.zsh for anything that needs `compdef`, a ZLE widget, or the final

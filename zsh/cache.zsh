@@ -106,12 +106,32 @@ leos-source-cached() {
   # so a caller's ERR_RETURN would otherwise return here before we could branch.
   local __leos_cache_status=0
   __leos_init_cache "$@" || __leos_cache_status=$?
+  # `|| true` is what actually makes the "ignore the script's own status" promise
+  # hold: without it, a cached script ending in a false command returns non-zero
+  # from `source`, and under a caller's ERR_RETURN that returns from this function
+  # before the `return 0` below is ever reached.
   case $__leos_cache_status in
-    0) source $REPLY; return 0 ;;
-    1) eval "$REPLY";  return 0 ;;
+    0) source $REPLY || true; return 0 ;;
+    1) eval "$REPLY"  || true; return 0 ;;
     2) return 1 ;;
     *) return 2 ;;
   esac
+}
+
+# leos-source-cached-warn <message> <key> <bin> [args...]
+# The form every startup file should use. As leos-source-cached, but:
+#   - reports <message> the FIRST time the generator yields nothing, and stays
+#     quiet afterwards (repeating it on every shell would just be noise);
+#   - always returns 0, so a bare call cannot abort the calling file under
+#     ERR_RETURN. Note `(( guard )) && leos-source-cached …` is NOT safe: a
+#     failing command on the right of && does trip ERR_RETURN.
+leos-source-cached-warn() {
+  local __leos_warn_msg=$1
+  shift
+  local __leos_warn_status=0
+  leos-source-cached "$@" || __leos_warn_status=$?
+  (( __leos_warn_status == 1 )) && puts-err "$__leos_warn_msg"
+  return 0
 }
 
 # Drop every cached init script, forcing regeneration on the next shell. Needed

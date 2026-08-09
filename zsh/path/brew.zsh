@@ -4,8 +4,8 @@ if __leos_brew_bin_path=$(__leos_brew_bin); then
   add-path "${__leos_brew_bin_path:h}"
   # `brew shellenv` costs ~20ms per shell for deterministic output; cache it.
   # Its embedded path_helper call still runs at source time, as it must.
-  leos-source-cached brew-shellenv "$__leos_brew_bin_path" shellenv ||
-    puts-err "brew shellenv produced no output; Homebrew paths may be missing."
+  leos-source-cached-warn "brew shellenv produced no output; Homebrew paths may be missing." \
+    brew-shellenv "$__leos_brew_bin_path" shellenv
 
   # Single definition of the mirror endpoints, used both by the startup block
   # below and by brew-china-enable, so the two cannot drift apart.

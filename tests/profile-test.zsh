@@ -170,6 +170,184 @@ for mode in 600 640 604 644; do
 done
 chmod 600 "$tmp/profile/local/private.zsh"
 
+# A symlink to a correctly locked file must not warn: mode qualifiers lstat by
+# default, and a symlink's own mode is 0777, so the check has to follow links.
+mkdir -p "$tmp/symprofile/zsh" "$tmp/symprofile/local" "$tmp/symtarget"
+cp "$root/zsh/entries.zsh" "$tmp/symprofile/zsh/entries.zsh"
+print -r -- 'typeset -g LEOS_PRIVATE_LOADED=yes' > "$tmp/symtarget/private.zsh"
+ln -sf "$tmp/symtarget/private.zsh" "$tmp/symprofile/local/private.zsh"
+for target_mode in 600 644; do
+  chmod $target_mode "$tmp/symtarget/private.zsh"
+  sym_warning=$(LEOS_TEST_ROOT="$tmp/symprofile" zsh -dfc '
+    setopt err_return no_unset pipe_fail
+    entry() { :; }
+    puts-err() { print -u2 -r -- "$*"; }
+    LEOS_PROFILES="$LEOS_TEST_ROOT"
+    source "$LEOS_TEST_ROOT/zsh/entries.zsh"
+    [[ $LEOS_PRIVATE_LOADED == yes ]]
+  ' 2>&1) || fail "symlinked private.zsh errored at target mode $target_mode"
+  if [[ $target_mode == 600 ]]; then
+    [[ $sym_warning != *"readable beyond its owner"* ]] ||
+      fail 'a symlink to a 600 private.zsh warned about the link mode'
+  else
+    [[ $sym_warning == *"readable beyond its owner"* ]] ||
+      fail 'a symlink to a 644 private.zsh did not warn'
+  fi
+done
+
+# heroku must load BEFORE the other post-compinit entries: its zsh_setup runs a
+# second compinit, which discards every compdef registered up to that point.
+heroku_order_out=$(LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  typeset -a loaded
+  entry() { loaded+=("$1"); }
+  puts-err() { :; }
+  autoload -Uz compinit compaudit
+  compinit() { : ; }
+  compaudit() { : ; }
+  _leos_plugin() { :; }
+  source "$LEOS_PROFILES_ZSH/cache.zsh"
+  source "$LEOS_PROFILES_ZSH/interactive.zsh"
+  h=${loaded[(ie)path/heroku]}
+  for other in path/fzf path/zoxide path/gcloud-completion; do
+    (( h < ${loaded[(ie)$other]} )) || {
+      print -u2 -r -- "path/heroku ($h) must load before $other (${loaded[(ie)$other]})"; exit 1
+    }
+  done
+  print -r -- ORDER-OK
+' 2>&1) || true
+[[ $heroku_order_out == *ORDER-OK* ]] ||
+  fail "path/heroku loads before the other compdef-registering entries: $heroku_order_out"
+
+# The init-cache status contract, which every startup file depends on:
+#   0  something was sourced — even if the sourced script's own last command was
+#      false (heroku's ends in `test -f … && source …`). Getting this wrong sends
+#      path/fzf.zsh down a fallback that double-binds its widgets.
+#   1  nothing available, first time — worth one message.
+#   2  nothing available, already reported — stay silent.
+# leos-source-cached-warn must additionally always return 0, because a non-zero
+# return from a bare call (or from the right side of `&&`) aborts the calling file
+# under ERR_RETURN.
+mkdir -p "$tmp/cachehome/bin"
+print -rl -- '#!/bin/sh' \
+  'printf "%s\n" "typeset -g LEOS_CACHE_SOURCED=yes" "test -f /nonexistent/leos && source /nonexistent/leos"' \
+  > "$tmp/cachehome/bin/falsetail"
+print -rl -- '#!/bin/sh' 'exit 0' > "$tmp/cachehome/bin/silenttool"
+chmod +x "$tmp/cachehome/bin/falsetail" "$tmp/cachehome/bin/silenttool"
+contract_out=$(HOME="$tmp/cachehome" LEOS_TEST_ROOT="$root" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  typeset -g WARNINGS=0
+  puts() { :; }
+  # NOT (( WARNINGS++ )): post-increment yields the old value, so the first
+  # call evaluates to 0 and returns status 1, which err_return would treat as
+  # a failure inside this stub.
+  puts-err() { WARNINGS=$(( WARNINGS + 1 )); }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+
+  typeset -g st=0
+  leos-source-cached ft "$HOME/bin/falsetail" || st=$?
+  (( st == 0 ))                                  # a false last command is still "sourced"
+  [[ ${LEOS_CACHE_SOURCED:-no} == yes ]]
+
+  st=0; leos-source-cached et "$HOME/bin/silenttool" || st=$?
+  (( st == 1 ))                                  # nothing produced, first time
+  st=0; leos-source-cached et "$HOME/bin/silenttool" || st=$?
+  (( st == 2 ))                                  # ...and remembered afterwards
+
+  # The -warn wrapper: one message for the fresh failure, none on the repeat,
+  # and status 0 every time so a bare call can never abort the caller.
+  WARNINGS=0
+  leos-source-cached-warn "nope" et2 "$HOME/bin/silenttool"; (( $? == 0 ))
+  (( WARNINGS == 1 ))
+  leos-source-cached-warn "nope" et2 "$HOME/bin/silenttool"; (( $? == 0 ))
+  (( WARNINGS == 1 ))
+  print -r -- CONTRACT-OK
+' 2>&1) || true   # err_return would abort before the assertion otherwise
+[[ $contract_out == *CONTRACT-OK* ]] ||
+  fail "init-cache status contract and warn-once behaviour: $contract_out"
+
+# A generator that yields nothing must not take the rest of the profile down with
+# it. This is the ERR_RETURN hazard that `(( guard )) && leos-source-cached …`
+# reintroduces: a failing command on the right of && does abort a sourced file.
+mkdir -p "$tmp/deadtool/bin"
+print -rl -- '#!/bin/sh' 'exit 0' > "$tmp/deadtool/bin/zoxide"
+print -rl -- '#!/bin/sh' 'exit 0' > "$tmp/deadtool/bin/direnv"
+chmod +x "$tmp/deadtool/bin/zoxide" "$tmp/deadtool/bin/direnv"
+for broken in zoxide direnv; do
+  dead_out=$(HOME="$tmp/deadtool" LEOS_TEST_ROOT="$root" BROKEN="$broken" zsh -dfc '
+    setopt err_return no_unset pipe_fail
+    path=("$HOME/bin" $path)
+    puts() { :; }; puts-err() { :; }
+    source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+    source "$LEOS_TEST_ROOT/zsh/path/$BROKEN.zsh"
+    print -r -- REACHED-END               # the sentinel IS the assertion here
+  ' 2>&1) || true
+  [[ $dead_out == *REACHED-END* ]] ||
+    fail "a silent $broken generator must not abort path/$broken.zsh: $dead_out"
+done
+
+# leos-refresh-init-cache must actually delete the cached scripts (an unmatched
+# glob would otherwise abort the whole rm under NOMATCH and clear nothing), leave
+# the rehash stamps alone, and cope with awkward filenames.
+#
+# Asserted via a trailing sentinel rather than the block's exit status: an
+# ERR_RETURN abort mid-block (which is exactly what an unmatched glob causes)
+# still leaves `zsh -dfc` exiting 0, so `|| fail` alone would pass vacuously.
+mkdir -p "$tmp/refreshhome/.cache/leos-profiles/init"
+refresh_out=$(HOME="$tmp/refreshhome" LEOS_TEST_ROOT="$root" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  d=$HOME/.cache/leos-profiles/init
+  : > "$d/brew-shellenv_x.zsh"
+  : > "$d/brew-shellenv_x.zsh.zwc"
+  : > "$d/some tool_y.zsh"          # a space in the name must not split
+  : > "$d/pyenv-rehash"             # not an init cache; must survive
+  leos-refresh-init-cache
+  [[ ! -e $d/brew-shellenv_x.zsh && ! -e $d/brew-shellenv_x.zsh.zwc ]]
+  [[ ! -e "$d/some tool_y.zsh" ]]
+  [[ -e $d/pyenv-rehash ]]
+  leos-refresh-init-cache            # idempotent on an already-empty cache
+  [[ -e $d/pyenv-rehash ]]
+  print -r -- REFRESH-OK
+' 2>&1) || true
+[[ $refresh_out == *REFRESH-OK* ]] ||
+  fail "leos-refresh-init-cache clears init scripts and keeps rehash stamps: $refresh_out"
+
+# brew-checkup gained a `|| return 1` and a cache-refresh call: it must still
+# report success on a clean run, fail when brew fails, and only clear the cache
+# when the upgrade actually succeeded.
+mkdir -p "$tmp/checkuphome/bin" "$tmp/checkuphome/profile/local/flags"
+print -rl -- '#!/bin/sh' 'case "$1" in' \
+  '  shellenv) printf "%s\\n" "export HOMEBREW_PREFIX=/fake/brew" ;;' \
+  '  update) exit "${FAKE_BREW_UPDATE_STATUS:-0}" ;;' \
+  '  *) exit 0 ;;' \
+  'esac' > "$tmp/checkuphome/bin/brew"
+chmod +x "$tmp/checkuphome/bin/brew"
+for expect in success failure; do
+  HOME="$tmp/checkuphome" LEOS_TEST_ROOT="$root" EXPECT="$expect" zsh -dfc '
+    setopt no_unset pipe_fail
+    path=("$HOME/bin" $path)
+    puts() { :; }; puts-err() { :; }
+    add-path() { return 0; }
+    __leos_brew_bin() { print -r -- "$HOME/bin/brew"; }
+    LEOS_PROFILES="$HOME/profile"
+    source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+    source "$LEOS_TEST_ROOT/zsh/path/brew.zsh"
+    d=${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init
+    mkdir -p "$d"; : > "$d/marker_x.zsh"
+    if [[ $EXPECT == success ]]; then
+      export FAKE_BREW_UPDATE_STATUS=0
+      brew-checkup >/dev/null 2>&1 || exit 1        # must report success
+      [[ ! -e $d/marker_x.zsh ]] || exit 1          # ...and clear the cache
+    else
+      export FAKE_BREW_UPDATE_STATUS=1
+      brew-checkup >/dev/null 2>&1 && exit 1        # must report failure
+      [[ -e $d/marker_x.zsh ]] || exit 1            # ...and leave the cache alone
+    fi
+  ' || fail "brew-checkup control flow on $expect"
+done
+
 # brew-china-enable snapshots three HOMEBREW_* vars and must restore them exactly
 # when `brew update` fails — including restoring "was not set" as unset, not "".
 # This needs a real brew on disk, not a shell function: brew.zsh resolves
@@ -258,7 +436,7 @@ LEOS_TEST_ROOT="$root" zsh -dfc '
   done
 ' || fail 'compdef-registering entries must not load from entries.zsh'
 
-LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" zsh -dfc '
+late_entries_out=$(LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" zsh -dfc '
   setopt err_return no_unset pipe_fail
   typeset -a loaded
   entry() { loaded+=("$1"); }
@@ -269,12 +447,15 @@ LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" zsh -dfc '
   _leos_plugin() { :; }
   source "$LEOS_PROFILES_ZSH/cache.zsh"     # interactive.zsh uses leos-source-cached
   source "$LEOS_PROFILES_ZSH/interactive.zsh"
-  for late in path/fzf path/zoxide path/gcloud-completion; do
+  for late in path/fzf path/zoxide path/gcloud-completion path/heroku; do
     (( ${loaded[(Ie)$late]} )) || {
       print -u2 -r -- "$late is not loaded by interactive.zsh"; exit 1
     }
   done
-' || fail 'interactive.zsh must load the compdef-registering entries'
+  print -r -- LATE-OK
+' 2>&1) || true
+[[ $late_entries_out == *LATE-OK* ]] ||
+  fail "interactive.zsh must load the compdef-registering entries: $late_entries_out"
 
 # zoxide registers its `cd` completion with a compdef guarded on compdef being
 # defined, so a load before compinit loses it with no error at all.

@@ -9,8 +9,8 @@ if (( $+commands[rbenv] )); then
   # tab completion at all. fpath additions belong here: compinit runs later.
   [[ ! -d $RBENV_ROOT/completions ]] || fpath=("$RBENV_ROOT/completions" $fpath)
   # --no-rehash plus a throttled background rehash; see path/pyenv.zsh.
-  leos-source-cached rbenv-init $commands[rbenv] init --no-rehash - zsh ||
-    puts-err "rbenv init produced no output; rbenv shims may be missing from PATH."
+  leos-source-cached-warn "rbenv init produced no output; rbenv shims may be missing from PATH." \
+    rbenv-init $commands[rbenv] init --no-rehash - zsh
   __leos_rehash_daily rbenv
 elif [[ ${LEOS_WARN_OPTIONAL_TOOLS:-0} == 1 && ! -f $LEOS_PROFILES/local/flags/no-rbenv ]]; then
   puts-err "rbenv is not installed. To silence, touch \$LEOS_PROFILES/local/flags/no-rbenv." >&2
