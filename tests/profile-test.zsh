@@ -161,6 +161,25 @@ for mode in 600 640 604 644; do
 done
 chmod 600 "$tmp/profile/local/private.zsh"
 
+# add-path's dedup escapes pattern metacharacters. zsh only reinterprets an
+# expanded value as a pattern under GLOB_SUBST, so the test sets it explicitly:
+# without the escaping this is where a directory named `a[1]` evicts `a1`.
+mkdir -p "$tmp/globroot/zsh" "$tmp/globdirs/a[1]/bin" "$tmp/globdirs/a1/bin" "$tmp/globdirs/keep/bin"
+cp "$root/zsh/start.zsh" "$root/zsh/cache.zsh" "$tmp/globroot/zsh/"
+: > "$tmp/globroot/zsh/entries.zsh"          # keep start.zsh from loading the world
+HOME="$tmp/globroot" LEOS_PROFILES_HOME="$tmp/globroot" GLOBDIRS="$tmp/globdirs" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+  setopt glob_subst
+  typeset -ga path=("$GLOBDIRS/keep/bin" "$GLOBDIRS/a1/bin")
+  add-path "$GLOBDIRS/a[1]/bin"
+  (( $#path == 3 ))                                     # added, nothing evicted
+  (( ${path[(ie)$GLOBDIRS/a1/bin]}   <= $#path ))       # sibling survived
+  (( ${path[(ie)$GLOBDIRS/keep/bin]} <= $#path ))
+  add-path "$GLOBDIRS/a[1]/bin"
+  (( $#path == 3 ))                                     # re-adding dedups
+' || fail 'add-path escapes glob metacharacters when deduping'
+
 # Completion-registering entries must load from interactive.zsh (after compinit),
 # never from entries.zsh (the PATH phase), where `compdef` does not exist yet and
 # their registrations silently no-op.

@@ -2,6 +2,11 @@
 
 entry "path/brew"
 entry "path/gnu"
+# add-path prepends, so PATH order is the reverse of load order: user-local bins
+# are loaded here, BEFORE the version managers below, so their shims end up in
+# front. Otherwise a stale node/python/ruby left in ~/.local/bin permanently
+# shadows whatever fnm/pyenv/rbenv selected, defeating per-directory switching.
+entry "path/bin"
 entry "path/apt"
 entry "path/dnf"
 entry "path/pacman"
@@ -15,7 +20,6 @@ entry "path/flutter"
 entry "path/thefuck"
 entry "path/gcloud"
 entry "path/gpg"
-entry "path/bin"
 
 # Load aliases and completion styles only after PATH initialisation, so tools
 # discovered by Homebrew/local-bin setup are available to env.zsh.
@@ -25,6 +29,10 @@ entry "commands"
 
 # Private definitions live outside version control and load after the public
 # command layer so a machine-specific override can intentionally win.
+#
+# compinit has not run yet, so `compdef` does not exist here: completion and ZLE
+# widget overrides belong in local/private-interactive.zsh, which interactive.zsh
+# sources at the very end instead.
 if [[ -r $LEOS_PROFILES/local/private.zsh ]]; then
   # This file routinely holds API keys, and a group-traversable home (the macOS
   # default, where every local account is in staff) makes a permissive mode a

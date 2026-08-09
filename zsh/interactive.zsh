@@ -1,10 +1,28 @@
 # Leo's Profiles — interactive stack: plugins, completion, Starship.
 # Loaded LAST so zsh-syntax-highlighting is the final plugin sourced.
 
+# Every other file reads flags from $LEOS_PROFILES, but this one is also sourced
+# standalone by the test suite with only LEOS_PROFILES_ZSH set. Derive the root
+# once from either, so a flag cannot resolve against a different root here than
+# it does everywhere else.
+typeset -g _leos_root=${LEOS_PROFILES:-${LEOS_PROFILES_ZSH:h}}
+
 _leos_plugin() {
   [[ -e $LEOS_PROFILES_ZSH/plugins/$1 ]] || return 0
   source "$LEOS_PROFILES_ZSH/plugins/$1"
 }
+
+# Pin the keymap before any plugin binds a key. Without this zsh picks the
+# initial keymap from $VISUAL/$EDITOR, so a machine that exports EDITOR=vim
+# silently starts in vi mode — with none of the plugins or the prompt set up for
+# it. This states today's behaviour (env.zsh defaults EDITOR to nano) explicitly
+# instead of leaving it to inherited environment.
+#
+# An `if`, not `&&`: with no line editor the guard is false, and a false guard
+# mid-file aborts the whole file under ERR_RETURN (how the tests source it).
+if [[ -o zle ]]; then
+  bindkey -e
+fi
 
 # zsh-completions must extend fpath BEFORE compinit.
 [[ -d $LEOS_PROFILES_ZSH/plugins/zsh-completions/src ]] && \
@@ -85,10 +103,19 @@ if (( $+commands[starship] )); then
   # shell (the session key, PROMPT2) are expanded when it is sourced.
   leos-source-cached starship-init $commands[starship] init zsh
 else
-  if [[ ! -f ${LEOS_PROFILES_ZSH:h}/local/flags/no-starship-warning ]]; then
+  if [[ ! -f $_leos_root/local/flags/no-starship-warning ]]; then
     puts-err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore it, or touch local/flags/no-starship-warning under the profile root to silence this."
   fi
   PROMPT='%F{cyan}%n@%m%f %F{blue}%~%f %# '
 fi
+
+# Machine-local interactive overrides, last of all: this is the counterpart to
+# local/private.zsh for anything that needs `compdef`, a ZLE widget, or the final
+# word over the plugin stack — none of which exist yet when private.zsh loads.
+if [[ -r $_leos_root/local/private-interactive.zsh ]]; then
+  source "$_leos_root/local/private-interactive.zsh"
+fi
+
+unset _leos_root
 
 :

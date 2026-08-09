@@ -9,7 +9,12 @@ puts-err() { print -Pn "%B%F{red}===>%f%b " >&2; print -r -- "$*" >&2; }
 add-path() {
   local dir=$1 mode=${2:-}
   if [[ -d $dir ]]; then
-    path=("$dir" ${path:#$dir})
+    # (b) escapes pattern metacharacters in $dir. Belt and braces rather than a
+    # live bug: zsh only reinterprets an expanded value as a pattern under
+    # GLOB_SUBST, which is off by default and never set here — verified that
+    # without it a dir named `a[1]` does not evict `a1`, and with it the plain
+    # form wipes the array. This keeps the dedup correct either way.
+    path=("$dir" ${path:#${(b)dir}})
     typeset -gU path
     return 0
   elif [[ $mode == required ]]; then
