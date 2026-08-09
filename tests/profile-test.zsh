@@ -161,6 +161,59 @@ for mode in 600 640 604 644; do
 done
 chmod 600 "$tmp/profile/local/private.zsh"
 
+# brew-china-enable snapshots three HOMEBREW_* vars and must restore them exactly
+# when `brew update` fails — including restoring "was not set" as unset, not "".
+# This needs a real brew on disk, not a shell function: brew.zsh resolves
+# __leos_brew_bin and sources the shellenv output through the init cache.
+mkdir -p "$tmp/brewhome/bin"
+print -rl -- '#!/bin/sh' 'case "$1" in' \
+  '  shellenv) printf "%s\\n" "export HOMEBREW_PREFIX=/fake/brew" ;;' \
+  '  update) exit "${FAKE_BREW_UPDATE_STATUS:-0}" ;;' \
+  'esac' > "$tmp/brewhome/bin/brew"
+chmod +x "$tmp/brewhome/bin/brew"
+
+for preset in unset preset; do
+  HOME="$tmp/brewhome" LEOS_TEST_ROOT="$root" BREW_PRESET="$preset" zsh -dfc '
+    setopt err_return no_unset pipe_fail
+    path=("$HOME/bin" $path)
+    puts() { :; }; puts-err() { :; }
+    add-path() { return 0; }
+    __leos_brew_bin() { print -r -- "$HOME/bin/brew"; }   # from start.zsh
+    LEOS_PROFILES="$HOME/profile"; mkdir -p "$LEOS_PROFILES/local/flags"
+    source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+    source "$LEOS_TEST_ROOT/zsh/path/brew.zsh"
+    if [[ $BREW_PRESET == preset ]]; then
+      export HOMEBREW_BOTTLE_DOMAIN=https://prior.example
+    fi
+    export FAKE_BREW_UPDATE_STATUS=1   # a child process must see it
+    ! brew-china-enable --yes                     # must report the failure
+    # A failed enable must neither write the flag nor leave mirror env behind.
+    [[ ! -e $LEOS_PROFILES/local/flags/brew-china ]]
+    if [[ $BREW_PRESET == preset ]]; then
+      [[ $HOMEBREW_BOTTLE_DOMAIN == https://prior.example ]]
+    else
+      (( ! ${+HOMEBREW_BOTTLE_DOMAIN} ))          # unset must stay unset, not ""
+    fi
+    (( ! ${+HOMEBREW_BREW_GIT_REMOTE} ))
+    (( ! ${+HOMEBREW_API_DOMAIN} ))
+  ' || fail "brew-china-enable rollback preserves prior env ($preset)"
+done
+
+HOME="$tmp/brewhome" LEOS_TEST_ROOT="$root" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  path=("$HOME/bin" $path)
+  puts() { :; }; puts-err() { :; }
+  add-path() { return 0; }
+  __leos_brew_bin() { print -r -- "$HOME/bin/brew"; }     # from start.zsh
+  LEOS_PROFILES="$HOME/profile"; mkdir -p "$LEOS_PROFILES/local/flags"
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  source "$LEOS_TEST_ROOT/zsh/path/brew.zsh"
+  export FAKE_BREW_UPDATE_STATUS=0
+  brew-china-enable --yes
+  [[ -f $LEOS_PROFILES/local/flags/brew-china ]]          # flag recorded
+  [[ $HOMEBREW_BOTTLE_DOMAIN == *mirrors.ustc.edu.cn* ]]  # mirror env exported
+' || fail 'brew-china-enable records the flag and exports the mirrors on success'
+
 # add-path's dedup escapes pattern metacharacters. zsh only reinterprets an
 # expanded value as a pattern under GLOB_SUBST, so the test sets it explicitly:
 # without the escaping this is where a directory named `a[1]` evicts `a1`.
