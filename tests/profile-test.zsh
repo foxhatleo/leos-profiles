@@ -161,6 +161,61 @@ for mode in 600 640 604 644; do
 done
 chmod 600 "$tmp/profile/local/private.zsh"
 
+# Completion-registering entries must load from interactive.zsh (after compinit),
+# never from entries.zsh (the PATH phase), where `compdef` does not exist yet and
+# their registrations silently no-op.
+LEOS_TEST_ROOT="$root" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  typeset -a loaded
+  entry() { loaded+=("$1"); }
+  LEOS_PROFILES="$LEOS_TEST_ROOT"
+  source "$LEOS_TEST_ROOT/zsh/entries.zsh"
+  for late in path/fzf path/zoxide path/gcloud-completion; do
+    (( ! ${loaded[(Ie)$late]} )) || {
+      print -u2 -r -- "$late is loaded during the PATH phase"; exit 1
+    }
+  done
+' || fail 'compdef-registering entries must not load from entries.zsh'
+
+LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  typeset -a loaded
+  entry() { loaded+=("$1"); }
+  puts-err() { :; }
+  autoload -Uz compinit compaudit
+  compinit() { : ; }
+  compaudit() { : ; }
+  _leos_plugin() { :; }
+  source "$LEOS_PROFILES_ZSH/cache.zsh"     # interactive.zsh uses leos-source-cached
+  source "$LEOS_PROFILES_ZSH/interactive.zsh"
+  for late in path/fzf path/zoxide path/gcloud-completion; do
+    (( ${loaded[(Ie)$late]} )) || {
+      print -u2 -r -- "$late is not loaded by interactive.zsh"; exit 1
+    }
+  done
+' || fail 'interactive.zsh must load the compdef-registering entries'
+
+# zoxide registers its `cd` completion with a compdef guarded on compdef being
+# defined, so a load before compinit loses it with no error at all.
+HOME="$tmp/zoxide-home" LEOS_TEST_ROOT="$root" zsh -dfc '
+  setopt err_return no_unset pipe_fail
+  mkdir -p "$HOME/bin"
+  print -rl -- "#!/bin/sh" \
+    "printf %s\\\\n \"__zoxide_cd() { :; }\"" \
+    "printf %s\\\\n \"[[ \\\"\\\${+functions[compdef]}\\\" -ne 0 ]] && compdef __zoxide_z_complete cd\"" \
+    > "$HOME/bin/zoxide"
+  chmod +x "$HOME/bin/zoxide"
+  path=("$HOME/bin" $path)
+  puts-err() { print -u2 -r -- "$*"; }
+  typeset -g COMPDEF_LOG=""
+  compdef() { COMPDEF_LOG="$*"; }          # capture the registration argv
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  source "$LEOS_TEST_ROOT/zsh/path/zoxide.zsh"
+  [[ $COMPDEF_LOG == "__zoxide_z_complete cd" ]] || {
+    print -u2 -r -- "zoxide compdef not registered: ${COMPDEF_LOG:-<none>}"; exit 1
+  }
+' || fail 'zoxide registers its cd completion when loaded after compinit'
+
 # Fresh HOME: earlier blocks leave a valid .zcompdump in $tmp, and a cached
 # dump lets even pre-compaudit code pass this test via the compinit -C path.
 insecure_home=$(mktemp -d)

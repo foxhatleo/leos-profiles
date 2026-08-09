@@ -37,8 +37,12 @@ autoload -Uz compinit compaudit
   return 0
 }
 
-# fzf completion and widgets load after compinit, but before fzf-tab.
+# These all register completions with `compdef`, so they must load after
+# compinit — during the PATH phase their registrations silently no-op.
+# fzf specifically must also come before fzf-tab, per fzf-tab's docs.
 entry "path/fzf"
+entry "path/zoxide"
+entry "path/gcloud-completion"
 
 # fzf-tab must load after compinit but BEFORE plugins that wrap ZLE widgets.
 _leos_plugin fzf-tab/fzf-tab.plugin.zsh
