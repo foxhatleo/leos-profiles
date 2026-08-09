@@ -398,6 +398,27 @@ test_local_migration_and_conflict_detection() (
   rm -rf "$temp"
 )
 
+test_prepare_local_dir_hardens_private_zsh() (
+  local temp mode
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  DRY_RUN=0
+  mkdir -p "$LOCAL_DIR"
+  printf '%s\n' 'export SECRET=1' > "$LOCAL_DIR/private.zsh"
+  chmod 644 "$LOCAL_DIR/private.zsh"
+  prepare_local_dir
+  if [[ $(uname -s) == Darwin ]]; then
+    mode=$(/usr/bin/stat -f '%Lp' "$LOCAL_DIR/private.zsh")
+  else
+    mode=$(stat -c '%a' "$LOCAL_DIR/private.zsh")
+  fi
+  assert_equals "$mode" "600"
+  # A missing private.zsh must not make the run fail.
+  rm -f "$LOCAL_DIR/private.zsh"
+  prepare_local_dir || fail "prepare_local_dir failed without a private.zsh"
+  rm -rf "$temp"
+)
+
 test_concurrent_lock_rejection() (
   local temp
   temp=$(mktemp -d)
@@ -741,6 +762,7 @@ test_shell_matchers_agree_on_non_zsh_shells
 test_git_identity_only_fills_missing_fields
 test_profile_round_trip_and_control_character_rejection
 test_local_migration_and_conflict_detection
+test_prepare_local_dir_hardens_private_zsh
 test_concurrent_lock_rejection
 test_equivalent_github_origins
 test_recommended_and_whole_group_closure

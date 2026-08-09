@@ -124,13 +124,37 @@ LEOS_TEST_ROOT="$root" zsh -dfc '
 mkdir -p "$tmp/profile/local" "$tmp/profile/zsh"
 cp "$root/zsh/entries.zsh" "$tmp/profile/zsh/entries.zsh"
 print -r -- 'typeset -g LEOS_PRIVATE_LOADED=yes' > "$tmp/profile/local/private.zsh"
+# 600 is the mode a secrets file is supposed to have, and the mode the installer
+# enforces; a laxer fixture would trip the permission warning asserted below.
+chmod 600 "$tmp/profile/local/private.zsh"
 LEOS_TEST_ROOT="$tmp/profile" zsh -dfc '
   setopt err_return no_unset pipe_fail
   entry() { :; }
+  puts-err() { print -u2 -r -- "$*"; }
   LEOS_PROFILES="$LEOS_TEST_ROOT"
   source "$LEOS_TEST_ROOT/zsh/entries.zsh"
   [[ $LEOS_PRIVATE_LOADED == yes ]]
 ' || fail 'local private override'
+
+# A secrets file readable beyond its owner must be reported, and must still load
+# (warn, never silently drop the override or rewrite the user's mode).
+for mode in 600 640 604 644; do
+  chmod $mode "$tmp/profile/local/private.zsh"
+  private_warning=$(LEOS_TEST_ROOT="$tmp/profile" zsh -dfc '
+    setopt err_return no_unset pipe_fail
+    entry() { :; }
+    puts-err() { print -u2 -r -- "$*"; }
+    LEOS_PROFILES="$LEOS_TEST_ROOT"
+    source "$LEOS_TEST_ROOT/zsh/entries.zsh"
+    [[ $LEOS_PRIVATE_LOADED == yes ]]
+  ' 2>&1) || fail "private override errored at mode $mode"
+  if [[ $mode == 600 ]]; then
+    [[ $private_warning != *"readable beyond its owner"* ]] || fail 'mode 600 private.zsh warned anyway'
+  else
+    [[ $private_warning == *"readable beyond its owner"* ]] || fail "mode $mode private.zsh did not warn"
+  fi
+done
+chmod 600 "$tmp/profile/local/private.zsh"
 
 # Fresh HOME: earlier blocks leave a valid .zcompdump in $tmp, and a cached
 # dump lets even pre-compaudit code pass this test via the compinit -C path.
