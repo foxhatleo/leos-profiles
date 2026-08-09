@@ -27,7 +27,7 @@ if [[ ${LEOS_DISABLE_ALIASES:-0} != 1 ]]; then
     alias ls='eza --color=auto --group-directories-first'
   elif command ls --color=auto -d . >/dev/null 2>&1; then
     alias ls='ls --color=auto'
-  elif [[ $(uname -s) == Darwin ]]; then
+  elif [[ $OSTYPE == darwin* ]]; then
     alias ls='ls -G'
   fi
   command -v bat >/dev/null 2>&1 && alias cat='bat --style=plain --paging=never'
@@ -54,8 +54,12 @@ zstyle ':completion:*' list-colors ${(s.:.)LS_COLORS}        # colorize menu; al
 zstyle ':completion:*' rehash true                           # find newly-installed executables without a restart
 zstyle ':completion:*' accept-exact '*(N)'
 zstyle ':completion:*' use-cache on
-mkdir -p "$HOME/.zsh/cache"
-zstyle ':completion:*' cache-path "$HOME/.zsh/cache"
+# One cache root for the whole profile (path/node.zsh and start.zsh's init cache
+# live here too), and skip the mkdir syscall on the hot path once it exists.
+_leos_zcompcache=${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/zcompcache
+[[ -d $_leos_zcompcache ]] || mkdir -p "$_leos_zcompcache"
+zstyle ':completion:*' cache-path "$_leos_zcompcache"
+unset _leos_zcompcache
 
 # iTerm2 integration is deliberately opt-in: it is external shell code and is
 # no longer downloaded by the installer. Install it through iTerm2, then set

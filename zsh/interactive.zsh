@@ -29,6 +29,11 @@ autoload -Uz compinit compaudit
   else
     compinit -d "$dump" || { puts-err "Zsh completion initialization failed; continuing without completion."; return 0; }
   fi
+  # Compile the dump so later shells map it instead of re-parsing ~60KB of Zsh
+  # source; compinit prefers a .zwc that is newer than its origin.
+  if [[ -s $dump && ( ! -s $dump.zwc || $dump -nt $dump.zwc ) ]]; then
+    zcompile -R "$dump" 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -62,7 +67,9 @@ fi
 _leos_plugin zsh-syntax-highlighting/zsh-syntax-highlighting.zsh   # MUST be last
 
 # Starship prompt.
-if command -v starship >/dev/null 2>&1; then
+# $+commands, not `command -v`: the cached init below needs the binary's path,
+# and only $commands is guaranteed to hold one.
+if (( $+commands[starship] )); then
   # Keep Leo's established themed prompt as the default.  The plain prompt is
   # an explicit fallback for terminals without Nerd Font support.
   if [[ ${LEOS_PLAIN_PROMPT:-0} == 1 ]]; then
@@ -70,7 +77,9 @@ if command -v starship >/dev/null 2>&1; then
   else
     export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship.toml"
   fi
-  eval "$(starship init zsh)"
+  # Cached: the init script is deterministic, and the parts that must vary per
+  # shell (the session key, PROMPT2) are expanded when it is sourced.
+  leos-source-cached starship-init $commands[starship] init zsh
 else
   if [[ ! -f ${LEOS_PROFILES_ZSH:h}/local/flags/no-starship-warning ]]; then
     puts-err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore it, or touch local/flags/no-starship-warning under the profile root to silence this."

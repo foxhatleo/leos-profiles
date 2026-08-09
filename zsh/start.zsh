@@ -50,6 +50,10 @@ entry() {
   fi
 }
 
+# Shared init-cache helpers, loaded before entries.zsh so every path/ entry can
+# use them. Kept in their own file so tests can exercise them in isolation.
+entry cache
+
 entry entries
 
 # Convention: every profile zsh file ends with a bare `:` so `source`

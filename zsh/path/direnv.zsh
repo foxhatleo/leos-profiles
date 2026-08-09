@@ -1,4 +1,5 @@
 # direnv — per-directory environment loader (authorizes and runs .envrc)
-command -v direnv >/dev/null 2>&1 && eval "$(direnv hook zsh)"
+# The hook script is deterministic, so it is cached rather than regenerated.
+(( $+commands[direnv] )) && leos-source-cached direnv-hook $commands[direnv] hook zsh
 
 :

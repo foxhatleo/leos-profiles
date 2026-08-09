@@ -1,8 +1,10 @@
 # Homebrew
 
 if __leos_brew_bin_path=$(__leos_brew_bin); then
-  add-path "$(dirname "$__leos_brew_bin_path")"
-  eval "$("$__leos_brew_bin_path" shellenv)"
+  add-path "${__leos_brew_bin_path:h}"
+  # `brew shellenv` costs ~20ms per shell for deterministic output; cache it.
+  # Its embedded path_helper call still runs at source time, as it must.
+  leos-source-cached brew-shellenv "$__leos_brew_bin_path" shellenv
 
   if [[ -f $LEOS_PROFILES/local/flags/brew-china ]]; then
     export HOMEBREW_BREW_GIT_REMOTE="https://mirrors.ustc.edu.cn/brew.git"
@@ -61,7 +63,7 @@ if __leos_brew_bin_path=$(__leos_brew_bin); then
     brew update
   }
 else
-  if [[ $(uname -s) == Darwin && ! -f $LEOS_PROFILES/local/flags/no-brew ]]; then
+  if [[ $OSTYPE == darwin* && ! -f $LEOS_PROFILES/local/flags/no-brew ]]; then
     puts-err "brew is not installed. To silence, touch \$LEOS_PROFILES/local/flags/no-brew."
   fi
 fi
