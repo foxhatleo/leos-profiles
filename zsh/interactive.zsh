@@ -18,8 +18,10 @@ _leos_plugin() {
 # it. This states today's behaviour (env.zsh defaults EDITOR to nano) explicitly
 # instead of leaving it to inherited environment.
 #
-# An `if`, not `&&`: with no line editor the guard is false, and a false guard
-# mid-file aborts the whole file under ERR_RETURN (how the tests source it).
+# `bindkey -e` itself fails when there is no line editor, and a bare failing
+# command mid-file aborts the whole file under ERR_RETURN (how the tests source
+# it) — hence the guard. Note a *false guard* is safe: in `cond && action`,
+# ERR_RETURN ignores cond failing and only fires if action does.
 if [[ -o zle ]]; then
   bindkey -e
 fi
@@ -58,10 +60,15 @@ autoload -Uz compinit compaudit
 # These all register completions with `compdef`, so they must load after
 # compinit — during the PATH phase their registrations silently no-op.
 # fzf specifically must also come before fzf-tab, per fzf-tab's docs.
+#
+# heroku goes FIRST: its zsh_setup runs a second compinit, which discards every
+# compdef registered up to that point. Loading it ahead of the others means it
+# only ever clears an empty slate, instead of silently undoing zoxide's `cd`
+# completion (the exact thing moving these after compinit was meant to fix).
+entry "path/heroku"
 entry "path/fzf"
 entry "path/zoxide"
 entry "path/gcloud-completion"
-entry "path/heroku"
 
 # fzf-tab must load after compinit but BEFORE plugins that wrap ZLE widgets.
 _leos_plugin fzf-tab/fzf-tab.plugin.zsh
@@ -107,8 +114,10 @@ if (( $+commands[starship] )); then
     export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship.toml"
   fi
   # Cached: the init script is deterministic, and the parts that must vary per
-  # shell (the session key, PROMPT2) are expanded when it is sourced.
-  leos-source-cached starship-init $commands[starship] init zsh
+  # shell (the session key, PROMPT2) are expanded when it is sourced. Status
+  # consumed so a failure cannot abort this file under ERR_RETURN.
+  leos-source-cached starship-init $commands[starship] init zsh ||
+    puts-err "starship init produced no output; falling back to the built-in prompt."
 else
   if [[ ! -f $_leos_root/local/flags/no-starship-warning ]]; then
     puts-err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore it, or touch local/flags/no-starship-warning under the profile root to silence this."

@@ -9,7 +9,10 @@
 # phase. That file is only built once `heroku autocomplete` has been run
 # interactively; until then the snippet's own `test -f` makes it a no-op.
 if (( $+commands[heroku] )); then
-  leos-source-cached heroku-completion $commands[heroku] autocomplete:script zsh
+  # Status consumed with `|| true`: a bare command that returns non-zero aborts
+  # the file under ERR_RETURN (how the tests source it), and absent heroku
+  # completions are not worth a startup warning.
+  leos-source-cached heroku-completion $commands[heroku] autocomplete:script zsh || true
 fi
 
 :

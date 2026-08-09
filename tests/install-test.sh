@@ -508,15 +508,34 @@ test_remove_blocks_strips_only_the_managed_block() (
 )
 
 test_bootstrap_skips_present_tools_on_linux() (
-  local temp out
-  temp=$(mktemp -d)
+  local out
   OS_FAMILY=apt
-  DRY_RUN=0
-  # git and curl both exist on any CI runner, so nothing should be installed.
+  # DRY_RUN=1 so that if the host is missing one of these, the test echoes the
+  # install command instead of really running sudo apt-get on a non-apt machine.
+  DRY_RUN=1
   out=$( (bootstrap_tools) 2>&1 )
-  assert_contains "$out" "already present"
-  [[ $out != *"apt-get"* ]] || fail "bootstrap ran the package manager with git and curl present"
-  rm -rf "$temp"
+  if command -v git >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+    assert_contains "$out" "already present"
+    [[ $out != *"apt-get"* ]] || fail "bootstrap ran the package manager with all tools present"
+  else
+    # unzip is what install_locked_archive_binary needs for bun and fnm.
+    assert_contains "$out" "apt-get"
+  fi
+)
+
+test_bootstrap_installs_unzip_when_missing() (
+  local out
+  OS_FAMILY=apt
+  DRY_RUN=1
+  # unzip is in no package group, so the bootstrap is the only thing that can
+  # provide it — and install_locked_archive_binary needs it for bun and fnm.
+  command() {
+    if [[ ${2:-} == unzip ]]; then return 1; fi
+    builtin command "$@"
+  }
+  out=$( (bootstrap_tools) 2>&1 )
+  assert_contains "$out" "unzip"
+  [[ $out != *"already present"* ]] || fail "bootstrap skipped while unzip was missing"
 )
 
 test_concurrent_lock_rejection() (
@@ -870,6 +889,7 @@ test_lock_without_pid_gives_removal_guidance
 test_dry_run_still_detects_local_conflicts
 test_remove_blocks_strips_only_the_managed_block
 test_bootstrap_skips_present_tools_on_linux
+test_bootstrap_installs_unzip_when_missing
 test_concurrent_lock_rejection
 test_equivalent_github_origins
 test_recommended_and_whole_group_closure

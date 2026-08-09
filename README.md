@@ -143,7 +143,10 @@ Tool initialization that is deterministic — `brew shellenv`, `pyenv`/`rbenv`
 npm/pnpm/bun completion generators — is cached under
 `${XDG_CACHE_HOME:-~/.cache}/leos-profiles/init`, keyed by the resolved binary
 path and regenerated only when that binary changes, then `zcompile`d. This is
-what keeps startup near 0.1s; delete that directory to force a refresh. `fnm env`
+what keeps startup near 0.1s. Freshness is keyed on the *launcher* binary, so an
+upgrade that rewrites a tool's init logic without touching that binary is not
+detected automatically: run `leos-refresh-init-cache` (which `brew-checkup`
+already does for you) or delete the directory. `fnm env`
 is deliberately never cached because it mints a per-process
 `FNM_MULTISHELL_PATH`. pyenv and rbenv are initialized with `--no-rehash` and
 their shims are refreshed in the background at most once a day, so a console

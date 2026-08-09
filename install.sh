@@ -551,8 +551,13 @@ bootstrap_tools() {
     fi
     return 0
   fi
+  # unzip must be part of the check, not just git and curl: the Linux bootstrap
+  # is also what provides the archive tools, and install_locked_archive_binary
+  # unzips both bun and fnm (a default step) while unzip belongs to no package
+  # group. macOS ships unzip, hence checking it only here.
+  command -v unzip >/dev/null 2>&1 || missing+=(unzip)
   if (( ${#missing[@]} == 0 )); then
-    say "git and curl are already present; skipping bootstrap"
+    say "git, curl and unzip are already present; skipping bootstrap"
     return 0
   fi
   ensure_sudo

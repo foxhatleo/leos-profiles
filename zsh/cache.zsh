@@ -24,9 +24,15 @@
 #
 #   0  REPLY is a cache file to source.
 #   1  the cache is unwritable; REPLY holds the generated text to eval instead.
-#   2  the generator produced nothing. Remembered in a marker file so a broken
-#      or too-old generator is not respawned on every shell. REPLY is unusable;
-#      callers with a fallback branch on this, callers without one should warn.
+#   2  the generator just produced nothing. Worth telling the user about once.
+#   3  the generator produced nothing on an earlier shell, remembered in a marker
+#      file so a broken or too-old generator is not respawned every time. Stay
+#      quiet: whatever needed saying was said when the marker was created.
+#
+# Freshness is keyed on the mtime of the *resolved launcher*. For tools whose
+# init logic lives in a separate file (brew's shellenv.sh, pyenv's
+# libexec/pyenv-init), an in-place upgrade that leaves the launcher untouched
+# will not invalidate the cache — run `leos-refresh-init-cache` after one.
 __leos_init_cache() {
   emulate -L zsh
   local key=$1 bin=$2
@@ -44,7 +50,7 @@ __leos_init_cache() {
     return 0
   fi
   if [[ -e $failed && ! $real -nt $failed ]]; then
-    return 2
+    return 3
   fi
 
   generated=$("$bin" "$@" 2>/dev/null)
@@ -76,7 +82,17 @@ __leos_init_cache() {
 }
 
 # leos-source-cached <key> <bin> [args...]
-# Returns non-zero when there was nothing to source, so callers can fall back.
+# Status describes whether there was anything to source, NOT what the sourced
+# script returned:
+#   0  something was sourced.
+#   1  nothing was available; the caller may fall back. Warn about it.
+#   2  nothing was available and that was already reported on an earlier shell.
+#
+# Deliberately ignores the sourced script's own exit status. Several generators
+# legitimately end in a false command — heroku's snippet ends in
+# `test -f … && source …`, false on any machine that has not run
+# `heroku autocomplete` — and treating that as failure would send callers like
+# path/fzf.zsh down a fallback path that double-binds widgets.
 #
 # Deliberately NOT `emulate -L zsh`: sourced init scripts legitimately set
 # options for the whole shell (starship needs PROMPT_SUBST), and `emulate -L`
@@ -91,10 +107,35 @@ leos-source-cached() {
   local __leos_cache_status=0
   __leos_init_cache "$@" || __leos_cache_status=$?
   case $__leos_cache_status in
-    0) source $REPLY ;;
-    1) eval "$REPLY" ;;
-    *) return 1 ;;
+    0) source $REPLY; return 0 ;;
+    1) eval "$REPLY";  return 0 ;;
+    2) return 1 ;;
+    *) return 2 ;;
   esac
+}
+
+# Drop every cached init script, forcing regeneration on the next shell. Needed
+# after an upgrade that rewrites a tool's init logic without touching the
+# launcher binary the cache is keyed on (see __leos_init_cache).
+leos-refresh-init-cache() {
+  # No sourcing happens here, so localizing options is safe and makes the globs
+  # below behave regardless of the ambient option set.
+  emulate -L zsh
+  local dir=${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init
+  if [[ ! -d $dir ]]; then
+    puts "No init cache to clear."
+    return 0
+  fi
+  # (N) is required, not decorative: with the default NOMATCH, a single pattern
+  # matching nothing aborts the whole `rm` and silently clears nothing at all.
+  local -a stale=($dir/*.zsh(N) $dir/*.zwc(N) $dir/*.failed(N))
+  if (( $#stale )); then
+    rm -f -- $stale
+    puts "Cleared $#stale cached init file(s) in $dir. Restart the shell to regenerate."
+  else
+    puts "Init cache in $dir is already empty."
+  fi
+  return 0
 }
 
 # __leos_rehash_daily <tool>

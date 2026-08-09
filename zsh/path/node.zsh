@@ -30,13 +30,19 @@ leos-node-completions() {
   # bun ships a full compsys script on stdout, like npm and pnpm. Yarn has no
   # generator in either line — Classic 1.x never had one and Berry 4.x still
   # does not — so yarn keeps the `_yarn` bundled with zsh-completions.
+  local status_
   for tool in npm pnpm bun; do
     (( $+commands[$tool] )) || continue
+    status_=0
     case $tool in
-      npm)  leos-source-cached npm-completion  $commands[npm]  completion ;;
-      pnpm) leos-source-cached pnpm-completion $commands[pnpm] completion zsh ;;
-      bun)  leos-source-cached bun-completion  $commands[bun]  completions ;;
-    esac || puts-err "$tool did not produce a Zsh completion script; skipping its completions."
+      npm)  leos-source-cached npm-completion  $commands[npm]  completion     || status_=$? ;;
+      pnpm) leos-source-cached pnpm-completion $commands[pnpm] completion zsh || status_=$? ;;
+      bun)  leos-source-cached bun-completion  $commands[bun]  completions    || status_=$? ;;
+    esac
+    # Only status 1 is a fresh failure; 2 means it was already reported on an
+    # earlier shell, and repeating it every startup would just be noise.
+    (( status_ == 1 )) &&
+      puts-err "$tool did not produce a Zsh completion script; skipping its completions. Run leos-refresh-init-cache to retry."
   done
   return 0
 }

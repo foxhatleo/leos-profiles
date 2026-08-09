@@ -195,7 +195,9 @@ ai-checkup() {
   fi
   # Skip a Homebrew-managed opencode: brew-checkup already owns that copy, and
   # `opencode upgrade` would fight it. Only self-installed copies are updated.
-  if (( $+commands[opencode] )) && [[ $commands[opencode] != ${HOMEBREW_PREFIX:-/opt/homebrew}/* ]]; then
+  # `command -v` for detection (so it can be stubbed like claude/codex above),
+  # $commands for the prefix test — empty for a stub, which reads as non-brew.
+  if command -v opencode >/dev/null 2>&1 && [[ ${commands[opencode]:-} != ${HOMEBREW_PREFIX:-/opt/homebrew}/* ]]; then
     found=1; puts "Updating opencode..."; opencode upgrade || exit_code=1
   fi
   (( found )) || puts "No supported installed AI CLI was detected; nothing to update."

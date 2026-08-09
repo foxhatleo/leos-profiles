@@ -15,8 +15,6 @@ if (( $+commands[go] )); then
       # $(<file) is read in-process by zsh, so this stays fork-free. Take the
       # last assignment, which is the one `go env -w` leaves in effect.
       _leos_go_lines=(${(M)${(f)"$(<$_leos_go_envfile)"}:#GOPATH=*})
-      # An `if` rather than `&&`: a false guard mid-file aborts the whole file
-      # under ERR_RETURN, which is how the test harness sources the profile.
       if (( $#_leos_go_lines )); then
         _leos_gopath=${_leos_go_lines[-1]#GOPATH=}
       fi

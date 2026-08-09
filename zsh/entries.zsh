@@ -47,7 +47,10 @@ if [[ -r $LEOS_PROFILES/local/private.zsh ]]; then
     emulate -L zsh
     setopt extended_glob
     local f=$LEOS_PROFILES/local/private.zsh
-    [[ -n $f(#qNf:g+r:) || -n $f(#qNf:o+r:) ]] || return 0
+    # `-f` follows symlinks: a bare `f:...:` qualifier lstats, and a symlink's
+    # own mode is 0777, so a link to a correctly-locked file would warn forever
+    # with no way to silence it.
+    [[ -n $f(#qN-f:g+r:) || -n $f(#qN-f:o+r:) ]] || return 0
     puts-err "$f is readable beyond its owner and usually holds secrets. Fix with: chmod 600 ${(q)f}"
   }
   source "$LEOS_PROFILES/local/private.zsh"

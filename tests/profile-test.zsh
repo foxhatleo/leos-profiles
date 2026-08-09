@@ -8,10 +8,23 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail() { print -u2 -r -- "FAIL: $*"; exit 1; }
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+# interactive.zsh resolves starship through $commands (it needs the binary's path
+# for the cached init), and $commands never sees a shell function — so blocks that
+# expect starship to be present need a real executable on PATH, not a stub.
+mkdir -p "$tmp/fakebin"
+print -rl -- '#!/bin/sh' 'case "$1" in' '  init) printf ":\n" ;;' '  prompt) printf "%s" "fake> " ;;' 'esac' \
+  > "$tmp/fakebin/starship"
+chmod +x "$tmp/fakebin/starship"
+# Likewise opencode: ai-checkup decides brew-managed vs self-installed from
+# $commands[opencode], which a shell function never populates, so the host's real
+# (Homebrew) copy would otherwise decide the branch — and could really be upgraded.
+print -rl -- '#!/bin/sh' 'printf "%s\n" "opencode $*" >> "$AI_LOG"' > "$tmp/fakebin/opencode"
+chmod +x "$tmp/fakebin/opencode"
+fakepath="$tmp/fakebin:$PATH"
+
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
-    starship() { [[ $1 == init ]] && print -r -- ":"; }
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     [[ "$LEOS_PROFILES" == "$LEOS_PROFILES_HOME" ]] || { print -u2 -r -- "profile root mismatch: $LEOS_PROFILES"; exit 1; }
     (( $+functions[bye] )) || { print -u2 -r -- "bye function was not loaded"; exit 1; }
@@ -23,19 +36,17 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
     }
   ' || fail 'default themed profile'
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" LEOS_PLAIN_PROMPT=1 TERM=xterm-256color \
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" LEOS_PLAIN_PROMPT=1 TERM=xterm-256color PATH="$fakepath" \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
-    starship() { [[ $1 == init ]] && print -r -- ":"; }
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     [[ "$STARSHIP_CONFIG" == "$LEOS_PROFILES_HOME/zsh/starship-plain.toml" ]]
   ' || fail 'plain Starship profile'
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" LEOS_DISABLE_ALIASES=1 TERM=xterm-256color \
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" LEOS_DISABLE_ALIASES=1 TERM=xterm-256color PATH="$fakepath" \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
     unset LC_ALL
-    starship() { [[ $1 == init ]] && print -r -- ":"; }
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     (( ! $+aliases[ls] ))
     (( ! $+aliases[grep] ))
@@ -91,10 +102,9 @@ printf %s\\\\n \"compdef _${tool}_stub ${tool}\"" > "$HOME/bin/$tool"
   [[ $(wc -l < "$HOME/spawns") -eq 3 ]]
 ' || fail "node.zsh caches npm/pnpm/bun completions without respawning them"
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
-    starship() { [[ $1 == init ]] && print -r -- ":"; }
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     uname() { print -r -- Darwin; }
     sudo() { command "$@"; }
@@ -105,10 +115,9 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
     [[ -e $HOME/metadata-one/.DS_Store && -e $HOME/metadata-two/Thumbs.db ]]
   ' || fail 'multi-root metadata cleanup wrapper'
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
-    starship() { [[ $1 == init ]] && print -r -- ":"; }
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     uname() { print -r -- Darwin; }
     typeset -g SUDO_LOG="$HOME/sudo-args"
@@ -291,13 +300,12 @@ HOME="$tmp/zoxide-home" LEOS_TEST_ROOT="$root" zsh -dfc '
 # Fresh HOME: earlier blocks leave a valid .zcompdump in $tmp, and a cached
 # dump lets even pre-compaudit code pass this test via the compinit -C path.
 insecure_home=$(mktemp -d)
-HOME="$insecure_home" ZDOTDIR="$insecure_home" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+HOME="$insecure_home" ZDOTDIR="$insecure_home" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
     mkdir -p "$HOME/insecure-completions"
     chmod 777 "$HOME/insecure-completions"
     fpath=("$HOME/insecure-completions" $fpath)
-    starship() { [[ $1 == init ]] && print -r -- ":"; }
     source "$LEOS_PROFILES_HOME/zsh/start.zsh" 2>/dev/null
     (( $+functions[compdef] ))
   ' </dev/null || fail 'insecure completion path handling'
@@ -312,12 +320,11 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" PATH=/usr/bin:/bin TERM
     [[ $PROMPT == *"%n@%m"* ]]
   ' || fail 'missing-Starship fallback prompt'
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" TERM=xterm-256color \
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" TERM=xterm-256color PATH="$fakepath" \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
     puts-err() { :; }
     entry() { :; }
-    starship() { [[ $1 == init ]] && print -r -- ":"; }
     compinit() { return 1 }   # a defined function survives autoload -Uz
     source "$LEOS_PROFILES_ZSH/interactive.zsh" 2>/dev/null
     [[ -n ${STARSHIP_CONFIG:-} ]]
@@ -338,13 +345,12 @@ warning_output=$(HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$flag_root/zsh" P
 [[ $warning_output != *"Starship is not installed"* ]] || fail 'no-starship-warning flag did not silence the warning'
 rm -rf "$flag_root"
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$tmp/empty-zsh" LEOS_TEST_ROOT="$root" TERM=xterm-256color \
+HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$tmp/empty-zsh" LEOS_TEST_ROOT="$root" TERM=xterm-256color PATH="$fakepath" \
   zsh -dfc '
     setopt err_return no_unset pipe_fail
     mkdir -p "$LEOS_PROFILES_ZSH"
     puts-err() { :; }
     entry() { :; }
-    starship() { [[ $1 == init ]] && print -r -- ":"; }
     source "$LEOS_TEST_ROOT/zsh/interactive.zsh" 2>/dev/null
     [[ $STARSHIP_CONFIG == "$LEOS_PROFILES_ZSH/starship.toml" ]]
   ' || fail 'clean checkout without cloned plugins'
@@ -363,7 +369,8 @@ HOME="$tmp/history-home" LEOS_TEST_ROOT="$root" zsh -dfc '
   [[ ! -e $HOME/.legacy_history && -d $HOME/.directory_history ]]
 ' || fail 'safe and aggressive history boundaries'
 
-HOME="$tmp/ai-home" LEOS_TEST_ROOT="$root" AI_LOG="$tmp/ai-log" zsh -dfc '
+HOME="$tmp/ai-home" LEOS_TEST_ROOT="$root" AI_LOG="$tmp/ai-log" PATH="$fakepath" \
+  HOMEBREW_PREFIX="$tmp/not-a-real-brew" zsh -dfc '
   setopt err_return no_unset pipe_fail
   puts() { :; }; puts-err() { :; }
   claude() { print -r -- "claude $*" >> "$AI_LOG"; }
@@ -371,7 +378,7 @@ HOME="$tmp/ai-home" LEOS_TEST_ROOT="$root" AI_LOG="$tmp/ai-log" zsh -dfc '
   npm() { print -r -- BAD >> "$AI_LOG"; return 1; }
   source "$LEOS_TEST_ROOT/zsh/commands.zsh"
   ai-checkup
-  [[ "$(<$AI_LOG)" == $'"'"'claude update\ncodex update'"'"' ]]
+  [[ "$(<$AI_LOG)" == $'"'"'claude update\ncodex update\nopencode upgrade'"'"' ]]
   ! bye --shutdown-wsl --no-exit >/dev/null 2>&1
 ' || fail 'native AI updates and contradictory bye options'
 
