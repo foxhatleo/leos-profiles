@@ -16,6 +16,13 @@ Linux and for privileged maintenance). Git is preferred but can be bootstrapped
 with the OS-native commands below. GitHub credential setup additionally needs
 an account that can authenticate through GitHub CLI.
 
+`apply` and `reconcile` never ask *setup* questions, but they are not unattended:
+depending on the selection they can still pause for the Homebrew installer's own
+confirmation and `sudo` prompt, `sudo` authentication and re-prompts on Linux,
+`chsh` asking for the user's password on Linux, `gh auth login --web`, and an
+`ssh-keygen`/`gpg` passphrase prompt when passphrase mode is `prompt`. Tell the
+user this before invoking apply so they know to stay at the keyboard.
+
 ---
 
 You are setting up Leo's Profiles. You own the guided experience; the shell

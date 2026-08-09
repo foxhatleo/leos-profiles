@@ -15,7 +15,8 @@ out=$(bash "$ROOT/install.sh" apply --yes --dry-run)
 
 fail() { printf '%s\n' "$out" >&2; printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
-grep -q 'Profile reconciliation complete' <<< "$out" || fail "dry-run apply did not run to completion"
+# `apply` says "apply complete"; only `reconcile` reports a reconciliation.
+grep -q 'Profile apply complete' <<< "$out" || fail "dry-run apply did not run to completion"
 
 # Recommended defaults must construct a package install for the detected family.
 case $(uname -s) in

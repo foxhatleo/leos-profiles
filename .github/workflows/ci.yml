@@ -57,6 +57,12 @@ jobs:
           # Validate every deterministic bootstrap snippet in the AI runbook.
           awk '/^```bash$/{f=1;n++;next} /^```$/{f=0;next} f{print > ("blk-" n ".sh")}' QUICK-INSTALL.md
           shopt -s nullglob   # zero bash blocks -> empty loop, not a literal "blk-*.sh" false error
+          # The runbook is known to contain bash blocks, so extracting none means
+          # the fence format drifted and this check silently validated nothing.
+          if ! compgen -G 'blk-*.sh' >/dev/null; then
+            echo 'no bash blocks extracted from QUICK-INSTALL.md - did the fence format change?'
+            exit 1
+          fi
           rc=0
           for b in blk-*.sh; do
             bash -n "$b" || { echo "bash syntax error in QUICK-INSTALL.md block: $b"; rc=1; }
