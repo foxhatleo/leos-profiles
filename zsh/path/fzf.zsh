@@ -1,12 +1,15 @@
 # fzf — key-bindings (^R history, ^T paste, Alt-C cd) + ** completion trigger.
 # Loaded before interactive.zsh's fzf-tab, per fzf-tab's docs.
-if command -v fzf >/dev/null 2>&1; then
-  if _leos_fzf_init=$(fzf --zsh 2>/dev/null); then
-    eval "$_leos_fzf_init"
-  else
-    # Distribution packages predating `fzf --zsh` ship these as files. Load
-    # the first layout that exists so multiple installed copies don't
-    # double-bind widgets.
+#
+# Everything here installs ZLE widgets, so it is both pointless and noisy in an
+# interactive shell with no line editor (editor shell integrations, CI,
+# `zsh -ic`): fzf's own script prints "can't change option: zle" twice there.
+if [[ -o zle ]] && (( $+commands[fzf] )); then
+  # `fzf --zsh` is deterministic, so it is cached. A non-zero return means this
+  # fzf predates that flag, in which case the distribution ships the scripts as
+  # files: load the first layout that exists so multiple installed copies do
+  # not double-bind widgets.
+  if ! leos-source-cached fzf-init $commands[fzf] --zsh; then
     for _leos_fzf_dir in \
       "$HOME/.fzf/shell" \
       /usr/share/fzf/shell \
@@ -20,7 +23,6 @@ if command -v fzf >/dev/null 2>&1; then
     done
     unset _leos_fzf_dir
   fi
-  unset _leos_fzf_init
 fi
 
 :

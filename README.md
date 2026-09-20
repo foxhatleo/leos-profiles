@@ -31,6 +31,26 @@ installer does not enforce a particular release, commit, origin, owner, or
 signature. The updater is stricter only about pulling: it requires a clean
 branch checkout with a configured upstream, then uses `git pull --ff-only`.
 
+### Why not chezmoi or GNU stow
+
+The dotfile surface here is deliberately tiny — two managed blocks plus a
+`STARSHIP_CONFIG` pointer — so templating and symlink-farm tools solve very
+little of the actual problem. What `install.sh` mostly does is *machine
+provisioning*: OS packages across four distribution families, SHA-256-pinned
+bun/fnm/starship/yarn/pnpm artifacts, commit-pinned pyenv/rbenv/plugin clones,
+SSH and GPG provisioning against the GitHub API, a sparse Nerd Fonts checkout,
+and `chsh`. chezmoi covers that only through `run_once_` escape hatches, which
+would leave the same amount of shell to maintain plus a second tool to learn.
+
+The engine also exists to serve the AI-first flow: `inspect` emits typed TSV for
+an agent to turn into selection boxes, and `apply` is a non-interactive executor
+with per-step signatures and postcondition verification. That contract is the
+product, not an accident of not knowing chezmoi exists.
+
+The cost is honest: a bespoke idempotency/state/locking engine to keep correct,
+which is why it carries a test suite and a per-OS CI matrix. If the dotfile
+surface ever grows beyond a couple of managed blocks, revisit this.
+
 ## Selection model
 
 Component groups are `bins`, `packages`, `pyenv`, `rbenv`, `bun`, `yarn`,
@@ -108,12 +128,35 @@ The first changed version is preserved beside the file as
 `.leos-profiles.bak`; symlink targets are updated without replacing the link.
 The profile remains relocatable via `LEOS_PROFILES_HOME`.
 
+The `~/.zshrc` block is interactive-only and the `~/.zshenv` block is silent, so
+`scp`, `rsync` and non-interactive `ssh` cannot break on startup output. The
+trade-off: a **non-interactive** shell (`ssh host cmd`, cron, scripts) sees only
+`~/.local/bin` and `~/.local/npm/bin` on PATH — no Homebrew, fnm, pyenv, rbenv or
+Go — so remote one-liners that need those tools should use absolute paths or
+start a login shell explicitly.
+
 Starship and custom completions initialize before zsh-syntax-highlighting,
-which is the final interactive plugin action. npm and pnpm completions are
-generated from `npm completion` / `pnpm completion zsh` and cached under
-`${XDG_CACHE_HOME:-~/.cache}/leos-profiles/completions`, regenerated only when
-the resolved binary changes; Yarn ships no generator, so it uses the bundled
-zsh-completions `_yarn`. Locale fallback validates
+which is the final interactive plugin action.
+
+Tool initialization that is deterministic — `brew shellenv`, `pyenv`/`rbenv`
+`init`, `direnv hook`, `zoxide init`, `fzf --zsh`, `starship init`, and the
+npm/pnpm/bun completion generators — is cached under
+`${XDG_CACHE_HOME:-~/.cache}/leos-profiles/init`, keyed by the resolved binary
+path and regenerated only when that binary changes, then `zcompile`d. This is
+what keeps startup near 0.1s. Freshness is keyed on the *launcher* binary, so an
+upgrade that rewrites a tool's init logic without touching that binary is not
+detected automatically: run `leos-refresh-init-cache` (which `brew-checkup`
+already does for you) or delete the directory. `fnm env`
+is deliberately never cached because it mints a per-process
+`FNM_MULTISHELL_PATH`. pyenv and rbenv are initialized with `--no-rehash` and
+their shims are refreshed in the background at most once a day, so a console
+script installed by `pip install`/`gem install` still appears without paying a
+~240ms rehash on every shell. Yarn ships no completion generator, so it uses the
+bundled zsh-completions `_yarn`.
+
+PATH precedence is deliberate: version-manager shims come first, then
+`~/.local/bin`, then Homebrew — so a stale binary in `~/.local/bin` cannot shadow
+the Node/Python/Ruby a project selected. Locale fallback validates
 `C.UTF-8`, then `en_US.UTF-8`, and otherwise uses `C`. fnm alone constructs its
 runtime PATH. Set `LEOS_PLAIN_PROMPT=1` for the ASCII prompt,
 `LEOS_DISABLE_ALIASES=1` to disable command aliases, or
@@ -192,11 +235,15 @@ is the source for runner labels.
 It is not automatically applied or updated and its original provenance is not
 recorded; review it before use and keep a backup.
 
-To stop loading the profile, restore the managed-block backups or remove only
-the matching managed blocks, start a fresh shell, and then delete the profile
-directory if desired. Package uninstall remains deliberately manual because
-packages may be shared and upgrades are not safely reversible. Git identity,
-signing preferences, and GitHub keys are likewise left for explicit review.
+To stop loading the profile, run `bash install.sh remove-blocks` (add
+`--dry-run` to preview). It deletes only the two managed blocks from `~/.zshrc`
+and `~/.zshenv` and leaves the rest of those files untouched, which is safer than
+restoring `*.leos-profiles.bak`: that backup is written only the first time a
+block is installed, so any later edits are not in it. Then start a fresh shell,
+and delete the profile directory if desired. Package uninstall remains
+deliberately manual because packages may be shared and upgrades are not safely
+reversible. Git identity, signing preferences, and GitHub keys are likewise left
+for explicit review.
 
 ## Development
 
@@ -209,6 +256,9 @@ zsh tests/profile-test.zsh
 python3 -m py_compile util/rmdsstore.py
 python3 tests/rmdsstore_test.py
 shellcheck -s bash -x install.sh installer/lock.sh tests/*.sh
+bash tests/locked-plugins-test.sh
+bash tests/locked-artifacts-test.sh
+bash tests/package-map-availability.sh macos   # or apt | fedora | arch
 ```
 
 CI also validates Starship TOML, package maps, locked artifacts, and the

@@ -398,6 +398,146 @@ test_local_migration_and_conflict_detection() (
   rm -rf "$temp"
 )
 
+test_prepare_local_dir_hardens_private_zsh() (
+  local temp mode
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  DRY_RUN=0
+  mkdir -p "$LOCAL_DIR"
+  printf '%s\n' 'export SECRET=1' > "$LOCAL_DIR/private.zsh"
+  chmod 644 "$LOCAL_DIR/private.zsh"
+  prepare_local_dir
+  if [[ $(uname -s) == Darwin ]]; then
+    mode=$(/usr/bin/stat -f '%Lp' "$LOCAL_DIR/private.zsh")
+  else
+    mode=$(stat -c '%a' "$LOCAL_DIR/private.zsh")
+  fi
+  assert_equals "$mode" "600"
+  # A missing private.zsh must not make the run fail.
+  rm -f "$LOCAL_DIR/private.zsh"
+  prepare_local_dir || fail "prepare_local_dir failed without a private.zsh"
+  rm -rf "$temp"
+)
+
+test_canonical_lists_are_single_sourced() {
+  # The vocabularies must exist in exactly one place each, so a new step cannot
+  # pass validation while being silently dropped by the ordering pass.
+  local steps_hits groups_hits
+  steps_hits=$(grep -c 'bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell' "$ROOT/install.sh")
+  groups_hits=$(grep -c 'core-utils,shell,dev-tools,languages,media,network,system' "$ROOT/install.sh")
+  assert_equals "$steps_hits" "1"
+  assert_equals "$groups_hits" "1"
+  # And the default step list is derived from the canonical one, not retyped.
+  assert_equals "$SELECTED_STEPS" "${CANONICAL_STEPS#bins,}"
+  [[ $CANONICAL_STEPS == bins,* ]] || fail "bins is expected to lead CANONICAL_STEPS"
+}
+
+test_valid_csv_rejects_duplicates() {
+  valid_csv "core-utils,shell" "$CANONICAL_GROUPS" || fail "a valid group list was rejected"
+  ! valid_csv "core-utils,core-utils" "$CANONICAL_GROUPS" || fail "a duplicated group was accepted"
+  ! valid_csv "shell,core-utils,shell" "$CANONICAL_GROUPS" || fail "a repeated group was accepted"
+}
+
+test_node_lts_curl_and_download_have_timeouts() {
+  # A stalled connection must not hang an apply that is holding the lock.
+  local resolve
+  resolve=$(sed -n '/^resolve_node_lts()/,/^}/p' "$ROOT/install.sh")
+  assert_contains "$resolve" '--connect-timeout 15'
+  assert_contains "$resolve" '--max-time 30'
+  local download
+  download=$(sed -n '/^download_verified()/,/^}/p' "$ROOT/install.sh")
+  assert_contains "$download" '--speed-limit 1'
+  assert_contains "$download" '--speed-time 60'
+}
+
+test_lock_without_pid_gives_removal_guidance() (
+  local temp out
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  LOCK_DIR="$LOCAL_DIR/.install.lock"
+  DRY_RUN=0
+  LOCK_HELD=0
+  prepare_local_dir
+  # A kill between the mkdir and the pid write leaves exactly this state.
+  mkdir "$LOCK_DIR"
+  out=$( (acquire_lock) 2>&1 ) && fail "a lock with no pid record was accepted"
+  assert_contains "$out" "exited uncleanly"
+  assert_contains "$out" "rm -rf --"
+  [[ $out != *"Another Leo's Profiles operation is running"* ]] ||
+    fail "reported a running operation for an ownerless lock"
+  rm -rf "$temp"
+)
+
+test_dry_run_still_detects_local_conflicts() (
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  LOCAL_DIR="$TARGET/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
+  LEGACY_STATE_FILE="$temp/legacy/install-state.tsv"
+  mkdir -p "$LOCAL_DIR/flags" "$HOME" "$(dirname "$LEGACY_STATE_FILE")"
+  printf '%s\n' old > "$HOME/.lp-no-gnu"
+  printf '%s\n' new > "$LOCAL_DIR/flags/no-gnu"
+  DRY_RUN=1
+  # The whole point: a green dry-run must not precede an apply that dies here.
+  if (migrate_local_state) >/dev/null 2>&1; then
+    fail "dry-run accepted a conflicting local marker"
+  fi
+  # ...and it must not have mutated anything while detecting that.
+  [[ -f $HOME/.lp-no-gnu ]] || fail "dry-run removed the legacy marker"
+  rm -rf "$temp"
+)
+
+test_remove_blocks_strips_only_the_managed_block() (
+  local temp mode
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  printf '%s\n' 'user line 1' '# >>> leos-profiles loader >>>' 'source /x' '# <<< leos-profiles loader <<<' 'user line 2' > "$HOME/.zshrc"
+  chmod 644 "$HOME/.zshrc"
+  remove_managed_block "$HOME/.zshrc" loader >/dev/null
+  assert_equals "$(< "$HOME/.zshrc")" "$(printf '%s\n%s' 'user line 1' 'user line 2')"
+  mode=$(file_mode "$HOME/.zshrc")
+  assert_equals "$mode" "644"
+  # Idempotent, and a dry run changes nothing.
+  remove_managed_block "$HOME/.zshrc" loader >/dev/null
+  assert_equals "$(< "$HOME/.zshrc")" "$(printf '%s\n%s' 'user line 1' 'user line 2')"
+  rm -rf "$temp"
+)
+
+test_bootstrap_skips_present_tools_on_linux() (
+  local out
+  OS_FAMILY=apt
+  # DRY_RUN=1 so that if the host is missing one of these, the test echoes the
+  # install command instead of really running sudo apt-get on a non-apt machine.
+  DRY_RUN=1
+  out=$( (bootstrap_tools) 2>&1 )
+  if command -v git >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+    assert_contains "$out" "already present"
+    [[ $out != *"apt-get"* ]] || fail "bootstrap ran the package manager with all tools present"
+  else
+    # unzip is what install_locked_archive_binary needs for bun and fnm.
+    assert_contains "$out" "apt-get"
+  fi
+)
+
+test_bootstrap_installs_unzip_when_missing() (
+  local out
+  OS_FAMILY=apt
+  DRY_RUN=1
+  # unzip is in no package group, so the bootstrap is the only thing that can
+  # provide it — and install_locked_archive_binary needs it for bun and fnm.
+  command() {
+    if [[ ${2:-} == unzip ]]; then return 1; fi
+    builtin command "$@"
+  }
+  out=$( (bootstrap_tools) 2>&1 )
+  assert_contains "$out" "unzip"
+  [[ $out != *"already present"* ]] || fail "bootstrap skipped while unzip was missing"
+)
+
 test_concurrent_lock_rejection() (
   local temp
   temp=$(mktemp -d)
@@ -741,6 +881,15 @@ test_shell_matchers_agree_on_non_zsh_shells
 test_git_identity_only_fills_missing_fields
 test_profile_round_trip_and_control_character_rejection
 test_local_migration_and_conflict_detection
+test_prepare_local_dir_hardens_private_zsh
+test_canonical_lists_are_single_sourced
+test_valid_csv_rejects_duplicates
+test_node_lts_curl_and_download_have_timeouts
+test_lock_without_pid_gives_removal_guidance
+test_dry_run_still_detects_local_conflicts
+test_remove_blocks_strips_only_the_managed_block
+test_bootstrap_skips_present_tools_on_linux
+test_bootstrap_installs_unzip_when_missing
 test_concurrent_lock_rejection
 test_equivalent_github_origins
 test_recommended_and_whole_group_closure

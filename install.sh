@@ -19,10 +19,18 @@ LOCK_DIR="$LOCAL_DIR/.install.lock"
 LEGACY_STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/leos-profiles/install-state.tsv"
 
 COMMAND=""
+# Single source of truth for the step and package-group vocabularies. These
+# drive validation, ordering, the usage text and inspect output alike: keeping
+# them in one place stops a step from passing validation while being silently
+# dropped by the ordering pass (they were previously spelled out 4-5 times).
+# The `case` arms in step_signature/run_step/verify_step must still gain an entry
+# for any new step; each dies (or fails verification) on an unknown one.
+readonly CANONICAL_STEPS="bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell"
+readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
 # rpatool remains available as the explicit `bins` step, but is not a default
 # because its upstream does not publish a stable release.
-SELECTED_STEPS="packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell"
-SELECTED_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
+SELECTED_STEPS="${CANONICAL_STEPS#bins,}"
+SELECTED_GROUPS="$CANONICAL_GROUPS"
 SSH_MODE="skip"
 SSH_PASSPHRASE_MODE="empty"
 GPG_MODE="skip"
@@ -52,15 +60,16 @@ warn() { printf '%s\n' "WARNING: $*" >&2; }
 die() { printf '%s\n' "ERROR: $*" >&2; exit 1; }
 
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 Usage:
   bash install.sh inspect [options]
   bash install.sh apply --yes [options]
   bash install.sh reconcile --yes [--full-upgrade]
+  bash install.sh remove-blocks [--dry-run]
 
 Options:
-  --groups <csv|none>             bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell
-  --package-groups <csv|none>     core-utils,shell,dev-tools,languages,media,network,system
+  --groups <csv|none>             $CANONICAL_STEPS
+  --package-groups <csv|none>     $CANONICAL_GROUPS
   --ssh <skip|reuse|generate>     GitHub SSH-key provisioning choice
   --ssh-key <path>                Required explicit private key when --ssh reuse
   --ssh-passphrase <empty|prompt> New SSH-key passphrase policy
@@ -78,8 +87,10 @@ Options:
   --yes                           Confirm that the AI-presented plan was approved
   --help                          Show this help
 
-The AI runbook is the supported user interface. `inspect` emits typed TSV for
-agents and diagnostics; `apply` and `reconcile` never ask setup questions.
+The AI runbook is the supported user interface. \`inspect\` emits typed TSV for
+agents and diagnostics; \`apply\` and \`reconcile\` never ask setup questions.
+\`remove-blocks\` deletes only the two managed blocks from ~/.zshrc and ~/.zshenv,
+leaving packages, plugins and credentials in place.
 EOF
 }
 
@@ -90,11 +101,11 @@ require_value() {
 parse_args() {
   [[ $# -gt 0 ]] || { usage >&2; exit 2; }
   case $1 in
-    inspect|apply|reconcile) COMMAND=$1; shift ;;
+    inspect|apply|reconcile|remove-blocks) COMMAND=$1; shift ;;
     --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
       die "$1 belongs to the retired ref/target CLI; use the AI runbook with this local checkout" ;;
     --help|-h) usage; exit 0 ;;
-    *) die "Expected inspect, apply, or reconcile; the AI runbook is the setup interface" ;;
+    *) die "Expected inspect, apply, reconcile, or remove-blocks; the AI runbook is the setup interface" ;;
   esac
   if [[ $COMMAND == reconcile ]]; then FULL_UPGRADE=0; fi
   while [[ $# -gt 0 ]]; do
@@ -137,13 +148,18 @@ parse_args() {
 }
 
 valid_csv() {
-  local value=$1 allowed=$2 item
+  local value=$1 allowed=$2 item seen=","
   [[ -n $value ]] || return 1
   [[ $value != ,* && $value != *, && $value != *,,* ]] || return 1
   local old_ifs=$IFS
   IFS=,
   for item in $value; do
     [[ ",$allowed," == *",$item,"* ]] || { IFS=$old_ifs; return 1; }
+    # Reject repeats: a duplicated group would otherwise double every package in
+    # collect_selected_packages and change the step signature, so an equivalent
+    # normalized run would be treated as never done and repeat the step.
+    [[ $seen != *",$item,"* ]] || { IFS=$old_ifs; return 1; }
+    seen="$seen$item,"
   done
   IFS=$old_ifs
 }
@@ -180,7 +196,7 @@ normalise_dependencies() {
 }
 
 order_selected_steps() {
-  local canonical="bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell"
+  local canonical="$CANONICAL_STEPS"
   local step old_ifs=$IFS ordered=""
   IFS=,
   for step in $canonical; do
@@ -192,8 +208,8 @@ order_selected_steps() {
 }
 
 validate_options() {
-  [[ -z $SELECTED_STEPS ]] || valid_csv "$SELECTED_STEPS" "bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell" || die "Invalid --groups value"
-  [[ -z $SELECTED_GROUPS ]] || valid_csv "$SELECTED_GROUPS" "core-utils,shell,dev-tools,languages,media,network,system" || die "Invalid --package-groups value"
+  [[ -z $SELECTED_STEPS ]] || valid_csv "$SELECTED_STEPS" "$CANONICAL_STEPS" || die "Invalid --groups value"
+  [[ -z $SELECTED_GROUPS ]] || valid_csv "$SELECTED_GROUPS" "$CANONICAL_GROUPS" || die "Invalid --package-groups value"
   [[ $SSH_MODE == skip || $SSH_MODE == reuse || $SSH_MODE == generate ]] || die "Invalid --ssh value"
   [[ $SSH_PASSPHRASE_MODE == empty || $SSH_PASSPHRASE_MODE == prompt ]] || die "Invalid --ssh-passphrase value"
   [[ $GPG_MODE == skip || $GPG_MODE == reuse || $GPG_MODE == generate ]] || die "Invalid --gpg value"
@@ -228,6 +244,9 @@ prepare_local_dir() {
   [[ $DRY_RUN -eq 0 ]] || return 0
   mkdir -p "$LOCAL_DIR/flags"
   chmod 700 "$LOCAL_DIR" "$LOCAL_DIR/flags"
+  # private.zsh routinely holds API keys and is created by hand, so its mode is
+  # enforced on every run — migrate_one_local_file only chmods files it moves.
+  [[ ! -f $LOCAL_DIR/private.zsh ]] || chmod 600 "$LOCAL_DIR/private.zsh"
 }
 
 track_temp() { TEMP_PATHS+=("$1"); }
@@ -258,10 +277,16 @@ acquire_lock() {
   fi
   local owner=""
   [[ -f $LOCK_DIR/pid ]] && owner=$(sed -n '1p' "$LOCK_DIR/pid")
-  if [[ $owner =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+  if [[ ! $owner =~ ^[0-9]+$ ]]; then
+    # No readable pid: a kill between the mkdir and the pid write left this
+    # behind, so there is no process to point at. Give the removal guidance
+    # rather than claiming another operation is running.
+    die "A previous Leo's Profiles operation left a lock with no usable owner record, which means it exited uncleanly. If no install is running, remove it and retry: rm -rf -- '$LOCK_DIR'"
+  fi
+  if ! kill -0 "$owner" 2>/dev/null; then
     die "A previous Leo's Profiles operation (PID $owner) exited uncleanly and left a lock. If no such process is running, remove it and retry: rm -rf -- '$LOCK_DIR'"
   fi
-  die "Another Leo's Profiles operation is running${owner:+ (PID $owner)}"
+  die "Another Leo's Profiles operation is running (PID $owner)"
 }
 
 write_profile() {
@@ -332,8 +357,14 @@ migrate_one_local_file() {
   local legacy=$1 destination=$2
   [[ -e $legacy || -L $legacy ]] || return 0
   if [[ -e $destination || -L $destination ]]; then
+    # The conflict check runs in dry-run too — see migrate_local_state.
     cmp -s "$legacy" "$destination" || die "Conflicting local settings: $legacy and $destination"
+    [[ $DRY_RUN -eq 0 ]] || { say "Would remove the superseded $legacy"; return 0; }
     rm -f -- "$legacy"
+    return 0
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would move $legacy to $destination (mode 600)"
     return 0
   fi
   mkdir -p "$(dirname -- "$destination")"
@@ -341,17 +372,28 @@ migrate_one_local_file() {
   chmod 600 "$destination"
 }
 
+# Dry-run performs the *detection* half of the migration but none of the
+# mutations, so `apply --dry-run` surfaces the same conflicts a real apply would
+# die on. Previously it returned early and reported success, then the real apply
+# failed immediately on a legacy-state conflict the dry-run never looked at.
 migrate_local_state() {
-  [[ $DRY_RUN -eq 0 ]] || return 0
   prepare_local_dir
   if [[ -f $LEGACY_STATE_FILE && ! -e $STATE_FILE ]]; then
-    cp -p "$LEGACY_STATE_FILE" "$STATE_FILE"
-    chmod 600 "$STATE_FILE"
-    rm -f "$LEGACY_STATE_FILE"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      say "Would migrate $LEGACY_STATE_FILE to $STATE_FILE"
+    else
+      cp -p "$LEGACY_STATE_FILE" "$STATE_FILE"
+      chmod 600 "$STATE_FILE"
+      rm -f "$LEGACY_STATE_FILE"
+    fi
   elif [[ -f $LEGACY_STATE_FILE && -f $STATE_FILE ]]; then
     cmp -s "$LEGACY_STATE_FILE" "$STATE_FILE" ||
       die "Conflicting installer state: $LEGACY_STATE_FILE and $STATE_FILE"
-    rm -f "$LEGACY_STATE_FILE"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      say "Would remove the superseded $LEGACY_STATE_FILE"
+    else
+      rm -f "$LEGACY_STATE_FILE"
+    fi
   fi
   migrate_one_local_file "$TARGET/zsh/_private.zsh" "$LOCAL_DIR/private.zsh"
   migrate_one_local_file "$HOME/.brew-china" "$LOCAL_DIR/flags/brew-china"
@@ -368,9 +410,14 @@ run() {
   [[ $DRY_RUN -eq 1 ]] || "$@"
 }
 
+# run_shell <description> <program> [args...]
+# Extra args are passed to `bash -c` as $1..$n, so callers never have to
+# interpolate values into the program text.
 run_shell() {
-  say "$1"
-  [[ $DRY_RUN -eq 1 ]] || bash -c "$2"
+  local description=$1 program=$2
+  shift 2
+  say "$description"
+  [[ $DRY_RUN -eq 1 ]] || bash -c "$program" _ "$@"
 }
 
 detect_os() {
@@ -387,11 +434,14 @@ detect_os() {
   fi
 }
 
-sha256() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
+sha256() { hash_text < "$1"; }
+
+# Octal mode of a file, spelling around BSD vs GNU stat.
+file_mode() {
+  if [[ $(uname -s) == Darwin ]]; then
+    /usr/bin/stat -f '%Lp' "$1"
   else
-    sha256sum "$1" | awk '{print $1}'
+    stat -c '%a' "$1"
   fi
 }
 
@@ -413,8 +463,12 @@ download_verified() {
   fi
   tmp=$(mktemp "$(dirname -- "$destination")/.$(basename -- "$destination").tmp.XXXXXX")
   track_temp "$tmp"
+  # --speed-limit/--speed-time rather than a flat --max-time: artifacts vary in
+  # size, so abort on a stalled transfer (under 1 B/s for a minute) instead of
+  # capping how long a legitimately slow download may take.
   curl_args=(--fail --location --proto '=https' --tlsv1.2 --retry 3
-    --connect-timeout 15 --silent --show-error --output "$tmp")
+    --connect-timeout 15 --speed-limit 1 --speed-time 60
+    --silent --show-error --output "$tmp")
   if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
     curl_args+=(--retry-all-errors)
   fi
@@ -446,6 +500,8 @@ mark_done() {
   else
     : > "$tmp"
   fi
+  # Column 4 is diagnostic only — nothing reads it back; it records which Node
+  # version the fnm step resolved so a state file can be inspected by hand.
   [[ $step != fnm ]] || detail=$RESOLVED_NODE_VERSION
   printf '%s\t%s\t%s\t%s\n' "$step" "$signature" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$detail" >> "$tmp"
   chmod 600 "$tmp"
@@ -477,9 +533,31 @@ ensure_brew() {
 }
 
 bootstrap_tools() {
+  local -a missing=()
+  command -v git >/dev/null 2>&1 || missing+=(git)
+  command -v curl >/dev/null 2>&1 || missing+=(curl)
   if [[ $OS_FAMILY == macos ]]; then
+    # ensure_brew stays unconditional: macOS ships git and curl, so gating on
+    # them would skip installing Homebrew itself on a fresh machine.
     ensure_brew
-    run brew install git curl
+    # But only install what is missing. `brew install` upgrades an outdated
+    # formula, so doing this unconditionally let a plain `reconcile` — documented
+    # as repairing without a host upgrade — silently upgrade git, curl and their
+    # dependency trees on every run.
+    if (( ${#missing[@]} )); then
+      run brew install "${missing[@]}"
+    else
+      say "git and curl are already present; skipping their bootstrap install"
+    fi
+    return 0
+  fi
+  # unzip must be part of the check, not just git and curl: the Linux bootstrap
+  # is also what provides the archive tools, and install_locked_archive_binary
+  # unzips both bun and fnm (a default step) while unzip belongs to no package
+  # group. macOS ships unzip, hence checking it only here.
+  command -v unzip >/dev/null 2>&1 || missing+=(unzip)
+  if (( ${#missing[@]} == 0 )); then
+    say "git, curl and unzip are already present; skipping bootstrap"
     return 0
   fi
   ensure_sudo
@@ -880,26 +958,35 @@ install_fnm() {
   run "$HOME/.local/bin/fnm" default "$RESOLVED_NODE_VERSION"
 }
 
+node_version_ok() { [[ ${1:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
 resolve_node_lts() {
   [[ -z $RESOLVED_NODE_VERSION ]] || return 0
   local fnm_bin latest
   if command -v curl >/dev/null 2>&1; then
+    # Timeouts matter here: this runs inside apply while the install lock is
+    # held, and inside the otherwise read-only `inspect`, so a stalled
+    # connection would hang the whole operation.
+    # index.tab columns: $1 = version, $10 = the LTS codename ("-" when current).
     latest=$(curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+      --connect-timeout 15 --max-time 30 \
       https://nodejs.org/dist/index.tab 2>/dev/null | awk -F '\t' 'NR > 1 && $10 != "-" { print $1; exit }') || true
   fi
-  if [[ ! ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -x $HOME/.local/bin/fnm ]]; then
-    fnm_bin="$HOME/.local/bin/fnm"
-  elif [[ ! ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    fnm_bin=$(command -v fnm 2>/dev/null || true)
-  fi
-  if [[ ! ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n ${fnm_bin:-} ]]; then
-    latest=$("$fnm_bin" list-remote --lts 2>/dev/null | tail -n 1 | awk '{print $1}') || true
+  if ! node_version_ok "${latest:-}"; then
+    if [[ -x $HOME/.local/bin/fnm ]]; then
+      fnm_bin="$HOME/.local/bin/fnm"
+    else
+      fnm_bin=$(command -v fnm 2>/dev/null || true)
+    fi
+    if [[ -n ${fnm_bin:-} ]]; then
+      latest=$("$fnm_bin" list-remote --lts 2>/dev/null | tail -n 1 | awk '{print $1}') || true
+    fi
   fi
   # Return non-zero (do not die) so callers can degrade gracefully: `inspect`
   # falls back to "resolve-during-apply" and verify_step reports "needed".
   # Callers that genuinely require a version (install_fnm, apply's main) add
   # their own `|| die`.
-  [[ ${latest:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  node_version_ok "${latest:-}" || return 1
   RESOLVED_NODE_VERSION=$latest
 }
 
@@ -970,11 +1057,7 @@ install_managed_block() {
     cp -p "$file" "$backup"
   fi
   touch "$file"
-  if [[ $(uname -s) == Darwin ]]; then
-    mode=$(/usr/bin/stat -f '%Lp' "$file")
-  else
-    mode=$(stat -c '%a' "$file")
-  fi
+  mode=$(file_mode "$file")
   tmp=$(mktemp "$(dirname -- "$file")/.$(basename -- "$file").leos-profiles.tmp.XXXXXX")
   track_temp "$tmp"
   awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
@@ -1005,6 +1088,46 @@ zshenv_managed_content() {
   printf '%s\n' 'typeset -U path
 path=("$HOME/.local/bin" "$HOME/.local/npm/bin" $path)
 export PATH'
+}
+
+# Strip a managed block, leaving the rest of the user's file alone.
+#
+# This is the supported way to undo the loader, and is strictly safer than
+# restoring $file.leos-profiles.bak: that backup is only written the first time a
+# block is installed, so months of later edits are not in it.
+remove_managed_block() {
+  local file=$1 marker=$2 tmp mode
+  file=$(resolve_config_path "$file")
+  if [[ ! -e $file ]]; then
+    say "$file does not exist; nothing to remove"
+    return 0
+  fi
+  managed_block_well_formed "$file" "$marker" || die "Refusing to rewrite malformed managed block in $file"
+  if ! grep -qF "# >>> leos-profiles ${marker} >>>" "$file"; then
+    say "No leos-profiles $marker block in $file"
+    return 0
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would remove the leos-profiles $marker block from $file"
+    return 0
+  fi
+  mode=$(file_mode "$file")
+  tmp=$(mktemp "$(dirname -- "$file")/.$(basename -- "$file").leos-profiles.tmp.XXXXXX")
+  track_temp "$tmp"
+  awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
+    $0 == begin { skip=1; next }
+    $0 == end { skip=0; next }
+    !skip { print }
+  ' "$file" > "$tmp"
+  chmod "$mode" "$tmp"
+  mv -f "$tmp" "$file"
+  say "Removed the leos-profiles $marker block from $file"
+}
+
+remove_managed_blocks() {
+  remove_managed_block "$HOME/.zshrc" loader
+  remove_managed_block "$HOME/.zshenv" environment
+  say "Packages, plugins and credentials are left untouched; remove those manually if wanted."
 }
 
 install_zsh_config() {
@@ -1144,6 +1267,11 @@ provision_ssh() {
       if [[ $SSH_PASSPHRASE_MODE == prompt ]]; then
         run ssh-keygen -t ed25519 -f "$key"
       else
+        # The default stays "empty" so an unattended apply cannot block, but say
+        # so plainly: this leaves usable private key material on disk, and it is
+        # about to be registered with GitHub. Re-run with --ssh-passphrase prompt
+        # to encrypt it instead.
+        warn "Generating $key WITHOUT a passphrase (--ssh-passphrase empty). Anyone who can read the file can use the key."
         run ssh-keygen -t ed25519 -f "$key" -N "" -q
       fi
     fi
@@ -1243,6 +1371,9 @@ provision_gpg() {
       if [[ $GPG_PASSPHRASE_MODE == prompt ]]; then
         creation_output=$(gpg --status-fd 1 --quick-generate-key "$name <$email>" ed25519 sign never)
       else
+        # See the SSH note above: default kept for unattended runs, but warn that
+        # the signing key is unprotected. --gpg-passphrase prompt encrypts it.
+        warn "Creating a GPG signing key WITHOUT a passphrase (--gpg-passphrase empty). Anyone who can read your keyring can sign as you."
         creation_output=$(gpg --batch --status-fd 1 --pinentry-mode loopback --passphrase '' --quick-generate-key "$name <$email>" ed25519 sign never)
       fi
       keyid=$(awk '$2 == "KEY_CREATED" {print $4; exit}' <<< "$creation_output")
@@ -1269,9 +1400,7 @@ provision_gpg() {
     die "GPG key cannot sign a Git commit"
   fi
   rm -rf "$temp_repo"
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would export and add GPG key $keyid to GitHub"
-  elif ! github_gpg_key_present "$keyid"; then
+  if ! github_gpg_key_present "$keyid"; then
     exported_key=$(mktemp)
     track_temp "$exported_key"
     gpg --armor --export "$keyid" > "$exported_key"
@@ -1307,11 +1436,19 @@ set_default_shell() {
     current_shell=$(current_login_shell)
     [[ ${current_shell##*/} == zsh ]] && { say "Default shell is already zsh"; return 0; }
   fi
+  # Identical on both families, so it is hoisted above the branch. The path is
+  # passed as an argument rather than interpolated into the program text: this is
+  # the one place that would otherwise regress from the argv-safe `run` used
+  # everywhere else, and string-built commands are invisible to shellcheck.
+  if ! grep -qxF "$zsh_path" /etc/shells; then
+    # "$1" is expanded by the inner bash, not here — that is the whole point.
+    # shellcheck disable=SC2016
+    run_shell "Add $zsh_path to /etc/shells" \
+      'printf "%s\n" "$1" | sudo tee -a /etc/shells >/dev/null' "$zsh_path"
+  fi
   if [[ $OS_FAMILY == macos ]]; then
-    grep -qxF "$zsh_path" /etc/shells || run_shell "Add $zsh_path to /etc/shells" "printf '%s\\n' '$zsh_path' | sudo tee -a /etc/shells >/dev/null"
     run sudo chsh -s "$zsh_path" "$USER"
   else
-    grep -qxF "$zsh_path" /etc/shells || run_shell "Add $zsh_path to /etc/shells" "printf '%s\\n' '$zsh_path' | sudo tee -a /etc/shells >/dev/null"
     run chsh -s "$zsh_path"
   fi
 }
@@ -1457,7 +1594,7 @@ inspect_tsv() {
   printf 'channel\tnode\t%s\n' "$NODE_CHANNEL"
   printf 'channel\tai-cli-updates\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
   printf 'group\tinternal\tbootstrap\tselected\n'
-  local canonical="bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell"
+  local canonical="$CANONICAL_STEPS"
   local old_ifs=$IFS
   IFS=,
   for step in $canonical; do
@@ -1465,7 +1602,9 @@ inspect_tsv() {
     if has_csv_item "$REQUESTED_STEPS" "$step"; then origin=selected; else origin=implied; fi
     printf 'group\tcomponent\t%s\t%s\n' "$step" "$origin"
   done
-  for group in core-utils shell dev-tools languages media network system; do
+  # IFS is still "," from the step loop above, so the CSV splits directly. Do not
+  # rewrite this as a space-separated list: the global IFS has no space in it.
+  for group in $CANONICAL_GROUPS; do
     has_csv_item "$SELECTED_GROUPS" "$group" || continue
     if has_csv_item "$REQUESTED_GROUPS" "$group"; then origin=selected; else origin=implied; fi
     printf 'group\tpackage\t%s\t%s\n' "$group" "$origin"
@@ -1565,6 +1704,11 @@ main() {
     inspect_tsv
     return 0
   fi
+  # Touches only the two managed blocks, so it needs neither --yes nor the lock.
+  if [[ $COMMAND == remove-blocks ]]; then
+    remove_managed_blocks
+    return 0
+  fi
   [[ $ASSUME_YES -eq 1 ]] || die "Apply/reconcile requires --yes after the AI-presented plan is approved"
   acquire_lock
   migrate_local_state
@@ -1587,7 +1731,11 @@ main() {
     run_step "$step"
   done
   IFS=$old_ifs
-  say "Profile reconciliation complete. Restart the terminal; default-shell changes apply at next login."
+  if [[ $COMMAND == reconcile ]]; then
+    say "Profile reconciliation complete. Restart the terminal; default-shell changes apply at next login."
+  else
+    say "Profile apply complete. Restart the terminal; default-shell changes apply at next login."
+  fi
 }
 
 if [[ ${LEOS_PROFILES_INSTALL_LIB_ONLY:-0} != 1 ]]; then

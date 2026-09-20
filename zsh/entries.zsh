@@ -2,6 +2,11 @@
 
 entry "path/brew"
 entry "path/gnu"
+# add-path prepends, so PATH order is the reverse of load order: user-local bins
+# are loaded here, BEFORE the version managers below, so their shims end up in
+# front. Otherwise a stale node/python/ruby left in ~/.local/bin permanently
+# shadows whatever fnm/pyenv/rbenv selected, defeating per-directory switching.
+entry "path/bin"
 entry "path/apt"
 entry "path/dnf"
 entry "path/pacman"
@@ -10,13 +15,11 @@ entry "path/pyenv"
 entry "path/rbenv"
 entry "path/fnm"
 entry "path/direnv"
-entry "path/zoxide"
 entry "path/go"
 entry "path/flutter"
 entry "path/thefuck"
 entry "path/gcloud"
 entry "path/gpg"
-entry "path/bin"
 
 # Load aliases and completion styles only after PATH initialisation, so tools
 # discovered by Homebrew/local-bin setup are available to env.zsh.
@@ -26,7 +29,32 @@ entry "commands"
 
 # Private definitions live outside version control and load after the public
 # command layer so a machine-specific override can intentionally win.
-[[ ! -r $LEOS_PROFILES/local/private.zsh ]] || source "$LEOS_PROFILES/local/private.zsh"
+#
+# compinit has not run yet, so `compdef` does not exist here: completion and ZLE
+# widget overrides belong in local/private-interactive.zsh, which interactive.zsh
+# sources at the very end instead.
+if [[ -r $LEOS_PROFILES/local/private.zsh ]]; then
+  # This file routinely holds API keys, and a group-traversable home (the macOS
+  # default, where every local account is in staff) makes a permissive mode a
+  # real exposure. Warn instead of rewriting it: the mode is the owner's call,
+  # and the installer already enforces 600 on every apply.
+  #
+  # Checked inside an anonymous function so EXTENDED_GLOB — needed for the
+  # (#q...) qualifiers, and normally set by env.zsh, which has not run yet —
+  # stays local, and so the `source` below still sees the ambient option set
+  # that a machine-specific override may depend on.
+  () {
+    emulate -L zsh
+    setopt extended_glob
+    local f=$LEOS_PROFILES/local/private.zsh
+    # `-f` follows symlinks: a bare `f:...:` qualifier lstats, and a symlink's
+    # own mode is 0777, so a link to a correctly-locked file would warn forever
+    # with no way to silence it.
+    [[ -n $f(#qN-f:g+r:) || -n $f(#qN-f:o+r:) ]] || return 0
+    puts-err "$f is readable beyond its owner and usually holds secrets. Fix with: chmod 600 ${(q)f}"
+  }
+  source "$LEOS_PROFILES/local/private.zsh"
+fi
 
 entry "interactive"
 

@@ -27,10 +27,16 @@ if [[ ${LEOS_DISABLE_ALIASES:-0} != 1 ]]; then
     alias ls='eza --color=auto --group-directories-first'
   elif command ls --color=auto -d . >/dev/null 2>&1; then
     alias ls='ls --color=auto'
-  elif [[ $(uname -s) == Darwin ]]; then
+  elif [[ $OSTYPE == darwin* ]]; then
     alias ls='ls -G'
   fi
-  command -v bat >/dev/null 2>&1 && alias cat='bat --style=plain --paging=never'
+  if command -v bat >/dev/null 2>&1; then
+    alias cat='bat --style=plain --paging=never'
+    # Colorized man pages from the same pager. `col -bx` strips the overstrike
+    # sequences groff emits, which bat would otherwise render literally.
+    export MANPAGER="sh -c 'col -bx | bat -l man -p'"
+    export MANROFFOPT='-c'          # keeps groff from re-adding those sequences
+  fi
   if command grep --color=auto '' /dev/null >/dev/null 2>&1 || [[ $? == 1 ]]; then
     alias grep='grep --color=auto'
     alias fgrep='fgrep --color=auto'
@@ -42,20 +48,34 @@ fi
 HISTFILE=$HOME/.zsh_history
 HISTSIZE=100000
 SAVEHIST=100000
-setopt SHARE_HISTORY HIST_IGNORE_ALL_DUPS HIST_IGNORE_SPACE HIST_REDUCE_BLANKS INC_APPEND_HISTORY HIST_VERIFY EXTENDED_HISTORY
+# SHARE_HISTORY already implies incremental appending (plus import from other
+# shells), and the manual advises picking one of SHARE_HISTORY /
+# INC_APPEND_HISTORY / INC_APPEND_HISTORY_TIME rather than combining them.
+setopt SHARE_HISTORY HIST_IGNORE_ALL_DUPS HIST_IGNORE_SPACE HIST_REDUCE_BLANKS HIST_VERIFY EXTENDED_HISTORY
 
 # Interactive behavior
 setopt AUTO_CD EXTENDED_GLOB INTERACTIVE_COMMENTS NO_BEEP NO_CASE_GLOB NUMERIC_GLOB_SORT
 
 # Completion styling (compinit itself runs in interactive.zsh)
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'   # case-insensitive
-zstyle ':completion:*' menu select
+# `menu no`, not `menu select`: fzf-tab provides the menu UI and its README asks
+# for this so it can capture the unambiguous prefix before opening the finder.
+zstyle ':completion:*' menu no
 zstyle ':completion:*' list-colors ${(s.:.)LS_COLORS}        # colorize menu; also picked up by fzf-tab
+zstyle ':completion:*:descriptions' format '[%d]'            # fzf-tab uses these as group headers
+# Directory preview in fzf-tab's finder, matching the eza/bat aesthetic above.
+if command -v eza >/dev/null 2>&1; then
+  zstyle ':fzf-tab:complete:cd:*' fzf-preview 'eza -1 --color=always $realpath'
+fi
 zstyle ':completion:*' rehash true                           # find newly-installed executables without a restart
 zstyle ':completion:*' accept-exact '*(N)'
 zstyle ':completion:*' use-cache on
-mkdir -p "$HOME/.zsh/cache"
-zstyle ':completion:*' cache-path "$HOME/.zsh/cache"
+# One cache root for the whole profile (path/node.zsh and start.zsh's init cache
+# live here too), and skip the mkdir syscall on the hot path once it exists.
+_leos_zcompcache=${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/zcompcache
+[[ -d $_leos_zcompcache ]] || mkdir -p "$_leos_zcompcache"
+zstyle ':completion:*' cache-path "$_leos_zcompcache"
+unset _leos_zcompcache
 
 # iTerm2 integration is deliberately opt-in: it is external shell code and is
 # no longer downloaded by the installer. Install it through iTerm2, then set

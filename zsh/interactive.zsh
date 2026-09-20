@@ -1,10 +1,26 @@
 # Leo's Profiles — interactive stack: plugins, completion, Starship.
 # Loaded LAST so zsh-syntax-highlighting is the final plugin sourced.
 
+# Every other file reads flags from $LEOS_PROFILES, but this one is also sourced
+# standalone by the test suite with only LEOS_PROFILES_ZSH set. Derive the root
+# once from either, so a flag cannot resolve against a different root here than
+# it does everywhere else.
+typeset -g _leos_root=${LEOS_PROFILES:-${LEOS_PROFILES_ZSH:h}}
+
 _leos_plugin() {
   [[ -e $LEOS_PROFILES_ZSH/plugins/$1 ]] || return 0
   source "$LEOS_PROFILES_ZSH/plugins/$1"
 }
+
+# Pin the keymap before any plugin binds a key. Without this zsh picks the
+# initial keymap from $VISUAL/$EDITOR, so a machine that exports EDITOR=vim
+# silently starts in vi mode — with none of the plugins or the prompt set up for
+# it. This states today's behaviour (env.zsh defaults EDITOR to nano) explicitly
+# instead of leaving it to inherited environment.
+#
+# Unguarded on purpose: verified that `bindkey -e` returns 0 and prints nothing
+# even when the shell has no line editor, so there is nothing to guard against.
+bindkey -e
 
 # zsh-completions must extend fpath BEFORE compinit.
 [[ -d $LEOS_PROFILES_ZSH/plugins/zsh-completions/src ]] && \
@@ -29,14 +45,35 @@ autoload -Uz compinit compaudit
   else
     compinit -d "$dump" || { puts-err "Zsh completion initialization failed; continuing without completion."; return 0; }
   fi
+  # Compile the dump so later shells map it instead of re-parsing ~60KB of Zsh
+  # source; compinit prefers a .zwc that is newer than its origin.
+  if [[ -s $dump && ( ! -s $dump.zwc || $dump -nt $dump.zwc ) ]]; then
+    zcompile -R "$dump" 2>/dev/null || true
+  fi
   return 0
 }
 
-# fzf completion and widgets load after compinit, but before fzf-tab.
+# These all register completions with `compdef`, so they must load after
+# compinit — during the PATH phase their registrations silently no-op.
+# fzf specifically must also come before fzf-tab, per fzf-tab's docs.
+#
+# heroku goes FIRST: its zsh_setup runs a second compinit, which discards every
+# compdef registered up to that point. Loading it ahead of the others means it
+# only ever clears an empty slate, instead of silently undoing zoxide's `cd`
+# completion (the exact thing moving these after compinit was meant to fix).
+entry "path/heroku"
 entry "path/fzf"
+entry "path/zoxide"
+entry "path/gcloud-completion"
 
 # fzf-tab must load after compinit but BEFORE plugins that wrap ZLE widgets.
 _leos_plugin fzf-tab/fzf-tab.plugin.zsh
+
+# Suggest from the completion system as well as history, so a command typed for
+# the first time still gets a suggestion. Capped buffer size keeps the
+# completion strategy from adding latency on very long lines.
+ZSH_AUTOSUGGEST_STRATEGY=(history completion)
+ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE=20
 _leos_plugin zsh-autosuggestions/zsh-autosuggestions.zsh
 
 # Custom completions (after compinit).
@@ -61,8 +98,13 @@ fi
 # completion definitions and prompt widget setup.
 _leos_plugin zsh-syntax-highlighting/zsh-syntax-highlighting.zsh   # MUST be last
 
-# Starship prompt.
-if command -v starship >/dev/null 2>&1; then
+# Starship prompt. The built-in fallback is used whenever Starship cannot drive
+# the prompt, whether because it is absent or because its init produced nothing.
+typeset -g _leos_fallback_prompt='%F{cyan}%n@%m%f %F{blue}%~%f %# '
+
+# $+commands, not `command -v`: the cached init below needs the binary's path,
+# and only $commands is guaranteed to hold one.
+if (( $+commands[starship] )); then
   # Keep Leo's established themed prompt as the default.  The plain prompt is
   # an explicit fallback for terminals without Nerd Font support.
   if [[ ${LEOS_PLAIN_PROMPT:-0} == 1 ]]; then
@@ -70,12 +112,33 @@ if command -v starship >/dev/null 2>&1; then
   else
     export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship.toml"
   fi
-  eval "$(starship init zsh)"
+  # Cached: the init script is deterministic, and the parts that must vary per
+  # shell (the session key, PROMPT2) are expanded when it is sourced.
+  typeset -g _leos_starship_status=0
+  leos-source-cached starship-init $commands[starship] init zsh || _leos_starship_status=$?
+  if (( _leos_starship_status )); then
+    # Only warn on a fresh failure (1); 2 means an earlier shell already said so.
+    (( _leos_starship_status == 1 )) &&
+      puts-err "starship init produced no output; using the built-in fallback prompt."
+    # Actually install that fallback, rather than leaving the prompt unset.
+    PROMPT=$_leos_fallback_prompt
+  fi
+  unset _leos_starship_status
 else
-  if [[ ! -f ${LEOS_PROFILES_ZSH:h}/local/flags/no-starship-warning ]]; then
+  if [[ ! -f $_leos_root/local/flags/no-starship-warning ]]; then
     puts-err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore it, or touch local/flags/no-starship-warning under the profile root to silence this."
   fi
-  PROMPT='%F{cyan}%n@%m%f %F{blue}%~%f %# '
+  PROMPT=$_leos_fallback_prompt
 fi
+unset _leos_fallback_prompt
+
+# Machine-local interactive overrides, last of all: this is the counterpart to
+# local/private.zsh for anything that needs `compdef`, a ZLE widget, or the final
+# word over the plugin stack — none of which exist yet when private.zsh loads.
+if [[ -r $_leos_root/local/private-interactive.zsh ]]; then
+  source "$_leos_root/local/private-interactive.zsh"
+fi
+
+unset _leos_root
 
 :

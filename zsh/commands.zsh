@@ -94,9 +94,12 @@ bye() {
   local keep_history non_interactive no_exit aggressive_history purge_recycle_bins shutdown_wsl arg exit_code=0
   for arg in "$@"; do
     case $arg in
-      --keep-history|keep-history) keep_history=1 ;;
-      --non-interactive|non-interactive) non_interactive=1 ;;
-      --no-exit|no-exit) no_exit=1 ;;
+      # Dashed forms only: the usage string and the _leos_bye completion define
+      # the supported surface, and the bare aliases only ever existed for three
+      # of these six options.
+      --keep-history) keep_history=1 ;;
+      --non-interactive) non_interactive=1 ;;
+      --no-exit) no_exit=1 ;;
       --aggressive-history) aggressive_history=1 ;;
       --purge-recycle-bins) purge_recycle_bins=1 ;;
       --shutdown-wsl) shutdown_wsl=1 ;;
@@ -189,6 +192,13 @@ ai-checkup() {
   fi
   if command -v codex >/dev/null 2>&1; then
     found=1; puts "Updating Codex..."; codex update || exit_code=1
+  fi
+  # Skip a Homebrew-managed opencode: brew-checkup already owns that copy, and
+  # `opencode upgrade` would fight it. Only self-installed copies are updated.
+  # `command -v` for detection (so it can be stubbed like claude/codex above),
+  # $commands for the prefix test — empty for a stub, which reads as non-brew.
+  if command -v opencode >/dev/null 2>&1 && [[ ${commands[opencode]:-} != ${HOMEBREW_PREFIX:-/opt/homebrew}/* ]]; then
+    found=1; puts "Updating opencode..."; opencode upgrade || exit_code=1
   fi
   (( found )) || puts "No supported installed AI CLI was detected; nothing to update."
   return $exit_code
