@@ -19,7 +19,7 @@ an account that can authenticate through GitHub CLI.
 `apply` and `reconcile` never ask *setup* questions, but they are not unattended:
 depending on the selection they can still pause for the Homebrew installer's own
 confirmation and `sudo` prompt, `sudo` authentication and re-prompts on Linux,
-`chsh` asking for the user's password on Linux, `gh auth login --web`, and an
+`chsh` asking for the user's password on Linux, and an
 `ssh-keygen`/`gpg` passphrase prompt when passphrase mode is `prompt`. Tell the
 user this before invoking apply so they know to stay at the keyboard.
 
@@ -46,25 +46,35 @@ installer is only your deterministic execution engine.
 5. A selected group means every member. Preserve dependency closure: rpatool,
    Bun, fnm, Yarn, and pnpm imply `packages` plus `languages`; pyenv/rbenv
    imply `packages` plus `dev-tools`; plugins, Zsh config, and default shell
-   imply `packages` plus `shell`.
+   imply `packages` plus `shell`. Yarn and pnpm also imply fnm; install fnm
+   before either npm tool.
 6. Ask conditional choices in later stages of no more than three questions:
    fonts; full initial host upgrade; default-shell policy; SSH; GPG; missing
    Git identity; and exact key selection. SSH and GPG must have **Skip**
    preselected. Reuse must select one specifically discovered key. Never pick
-   a key for the user.
+   a key for the user. For generation, explain both passphrase policies:
+   `empty` (supported default, unencrypted) and `prompt`. The default new SSH
+   path is `~/.ssh/id_ed25519`; a different unused absolute path can be chosen.
+   Never replace or silently reuse an existing key.
 7. For GPG, ensure the selected Git email is verified on the authenticated
-   GitHub account. If `gh` lacks `user:email`, explain and request approval to
-   run `gh auth refresh -s user:email` before continuing.
+   GitHub account. Missing login or `user:email` access is a manual step: show
+   the engine's guidance and let the user authenticate or grant scope. Do not
+   execute login, key uploads, or SSH identity/protocol changes for the user.
 8. Run the checkout's `bash install.sh inspect ...` with the explicit choices.
    Parse its typed TSV; do not expose the CLI as a second questionnaire. Use
    the engine's internal `none` value for an empty component/package
    multi-select.
 9. Before approval, present one complete resolved plan showing:
    - selected and implied component, package, bootstrap, SSH, and GPG groups;
-   - every package member and the full-upgrade effect;
+   - every package member and the full-upgrade effect; explain that
+     `--no-full-upgrade` requests only missing selected packages but dependency
+     resolution may still upgrade dependencies;
    - external repositories/taps and locked direct artifacts;
-   - the resolved current Node LTS for this run;
-   - credential actions and selected references;
+   - the preserved fnm default, adopted existing Node version, or resolved LTS
+     fallback, with its compatibility against selected tools;
+   - credential actions, selected references, and manual GitHub registration
+     or SSH configuration steps;
+   - any schema-1 to schema-2 profile migration reported by inspection;
    - files and managed blocks, global Git settings, shell changes, and every
      irreversible or privileged action.
 10. Obtain one explicit approval. Then invoke `bash install.sh apply --yes ...`
@@ -72,7 +82,16 @@ installer is only your deterministic execution engine.
 11. The checkout containing `install.sh` is authoritative and is installed in
     place. Local edits are valid. Do not add release, ref, origin, commit,
     ownership, or signature checks for that checkout.
-12. On success, summarize verified outcomes, saved local state, any skips, and
+12. Exit 3 means manual action is required, not successful completion. Parse
+    `manual-action` records, show the public-key path and destination, and wait
+    for the user to complete that action. Never upload keys or configure SSH
+    identities automatically. Resume with `reconcile --yes` after completion;
+    saved references are reused. If another initially selected generation had
+    not yet run, resume the originally approved apply choices, changing already
+    created keys to reuse their saved references. Obtain new approval only if
+    the requested choices change. Reconciliation never creates keys. For
+    failure exits, report the actual failure; do not guess registration.
+13. On success, summarize verified outcomes, saved local state, any skips, and
     that a new login is needed if the default shell changed.
 
 ## Obtaining the checkout
@@ -100,10 +119,29 @@ sudo apt-get update && sudo apt-get install -y git curl ca-certificates
 sudo dnf install -y git curl ca-certificates
 
 # Arch Linux
-sudo pacman -Sy --needed --noconfirm git curl ca-certificates
+sudo pacman -Syu --needed --noconfirm git curl ca-certificates
 ```
 
 Stop on an unrecognized existing target instead of overwriting it. After the
 clone, execute only the `install.sh` inside that checkout. The engine saves the
 approved normalized profile before provisioning, so rerunning or reconciling
 can safely repair a partial failure.
+
+## Inspection and resume contract
+
+The inspection stream starts with `meta<TAB>schema<TAB>1`; this identifies the
+inspection format, not the saved profile schema. Saved profiles use schema 2.
+Read records by their type and preserve empty fields:
+
+- `policy<TAB>node<TAB>preserve-compatible` describes runtime selection.
+- `runtime<TAB>node<TAB>VERSION<TAB>ORIGIN` identifies `preserved-fnm`,
+  `adopted-existing`, or `current-lts`; an unresolved preview is labeled as such.
+- `migration<TAB>profile-schema<TAB>1<TAB>2` announces automatic migration on
+  the next approved execution; inspection does not migrate files.
+- `manual-action<TAB>ACTION<TAB>PUBLIC_PATH<TAB>DESTINATION` accompanies exit 3.
+  Some actions, such as login, have no public-key path.
+
+Preserve a compatible fnm default, otherwise adopt the exact compatible Node
+version found on PATH, otherwise resolve current LTS. Compatibility is based on
+locked Yarn/pnpm engine metadata, not simply the newest available runtime.
+Read [docs/development.md](./docs/development.md) for the full engine contract.

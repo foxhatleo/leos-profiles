@@ -19,17 +19,12 @@ LOCK_DIR="$LOCAL_DIR/.install.lock"
 LEGACY_STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/leos-profiles/install-state.tsv"
 
 COMMAND=""
-# Single source of truth for the step and package-group vocabularies. These
-# drive validation, ordering, the usage text and inspect output alike: keeping
-# them in one place stops a step from passing validation while being silently
-# dropped by the ordering pass (they were previously spelled out 4-5 times).
-# The `case` arms in step_signature/run_step/verify_step must still gain an entry
-# for any new step; each dies (or fails verification) on an unknown one.
-readonly CANONICAL_STEPS="bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell"
+# shellcheck source=installer/registry.sh
+source "$SCRIPT_DIR/installer/registry.sh"
 readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
 # rpatool remains available as the explicit `bins` step, but is not a default
 # because its upstream does not publish a stable release.
-SELECTED_STEPS="${CANONICAL_STEPS#bins,}"
+SELECTED_STEPS="${CANONICAL_STEPS/,bins/}"
 SELECTED_GROUPS="$CANONICAL_GROUPS"
 SSH_MODE="skip"
 SSH_PASSPHRASE_MODE="empty"
@@ -49,6 +44,9 @@ GIT_EMAIL=""
 FONT_NAME=""
 RESOLVED_NODE_VERSION=""
 NODE_CHANNEL="current-lts"
+NODE_POLICY="preserve-compatible"
+NODE_SELECTION=""
+PROFILE_SCHEMA=2
 AI_CLI_UPDATE_CHANNEL="native"
 PACKAGE_CHANNEL="system"
 SELECTED_PACKAGES=()
@@ -71,7 +69,7 @@ Options:
   --groups <csv|none>             $CANONICAL_STEPS
   --package-groups <csv|none>     $CANONICAL_GROUPS
   --ssh <skip|reuse|generate>     GitHub SSH-key provisioning choice
-  --ssh-key <path>                Required explicit private key when --ssh reuse
+  --ssh-key <path>                Absolute key path (reuse requires it; generate defaults to ~/.ssh/id_ed25519)
   --ssh-passphrase <empty|prompt> New SSH-key passphrase policy
   --gpg <skip|reuse|generate>     Git commit-signing choice
   --gpg-key <fingerprint>         Required explicit secret key when --gpg reuse
@@ -91,6 +89,11 @@ The AI runbook is the supported user interface. \`inspect\` emits typed TSV for
 agents and diagnostics; \`apply\` and \`reconcile\` never ask setup questions.
 \`remove-blocks\` deletes only the two managed blocks from ~/.zshrc and ~/.zshenv,
 leaving packages, plugins and credentials in place.
+
+Node: preserve a compatible version by adopting it into fnm; otherwise use LTS.
+Credentials: local creation is supported; GitHub registration and SSH identity
+configuration are manual. Exit 3 means user action is required; resume using
+reconcile --yes after completing the emitted manual-action record.
 EOF
 }
 
@@ -175,26 +178,6 @@ add_csv_item() {
   has_csv_item "$current" "$item" || printf -v "$variable_name" '%s' "${current:+$current,}$item"
 }
 
-normalise_dependencies() {
-  # Selecting any package group selects the package executor itself.
-  [[ -z $SELECTED_GROUPS ]] || add_csv_item SELECTED_STEPS packages
-  if has_csv_item "$SELECTED_STEPS" pyenv || has_csv_item "$SELECTED_STEPS" rbenv; then
-    add_csv_item SELECTED_STEPS packages
-    add_csv_item SELECTED_GROUPS dev-tools
-  fi
-  if has_csv_item "$SELECTED_STEPS" yarn || has_csv_item "$SELECTED_STEPS" pnpm || \
-     has_csv_item "$SELECTED_STEPS" bun || has_csv_item "$SELECTED_STEPS" fnm || \
-     has_csv_item "$SELECTED_STEPS" bins; then
-    add_csv_item SELECTED_STEPS packages
-    add_csv_item SELECTED_GROUPS languages
-  fi
-  if has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" zsh-config || \
-     has_csv_item "$SELECTED_STEPS" default-shell; then
-    add_csv_item SELECTED_STEPS packages
-    add_csv_item SELECTED_GROUPS shell
-  fi
-}
-
 order_selected_steps() {
   local canonical="$CANONICAL_STEPS"
   local step old_ifs=$IFS ordered=""
@@ -219,8 +202,9 @@ validate_options() {
   [[ $SSH_MODE != reuse || -n $SSH_KEY_PATH ]] || die "--ssh reuse requires --ssh-key <private-key-path>"
   [[ $GPG_MODE != reuse || -n $GPG_KEY_ID ]] || die "--gpg reuse requires --gpg-key <fingerprint>"
   [[ $INSTALL_FONTS != yes || -n $FONT_NAME ]] || die "--fonts yes requires --font <name>"
-  [[ $SSH_MODE != reuse || $SSH_KEY_PATH == /* ]] || die "--ssh-key must be an absolute path"
+  [[ -z $SSH_KEY_PATH || $SSH_KEY_PATH == /* ]] || die "--ssh-key must be an absolute path"
   [[ -z $FONT_NAME || $FONT_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "--font must be a Nerd Fonts directory name"
+  [[ $NODE_POLICY == preserve-compatible ]] || die "Unsupported Node policy: $NODE_POLICY"
   [[ $NODE_CHANNEL == current-lts ]] || die "Unsupported Node channel in saved profile: $NODE_CHANNEL"
   [[ $AI_CLI_UPDATE_CHANNEL == native ]] || die "Unsupported AI CLI update channel in saved profile: $AI_CLI_UPDATE_CHANNEL"
   [[ $PACKAGE_CHANNEL == system ]] || die "Unsupported package channel in saved profile: $PACKAGE_CHANNEL"
@@ -240,174 +224,16 @@ validate_tsv_value() {
     die "$label may not contain tabs or newlines"
 }
 
-prepare_local_dir() {
-  [[ $DRY_RUN -eq 0 ]] || return 0
-  mkdir -p "$LOCAL_DIR/flags"
-  chmod 700 "$LOCAL_DIR" "$LOCAL_DIR/flags"
-  # private.zsh routinely holds API keys and is created by hand, so its mode is
-  # enforced on every run — migrate_one_local_file only chmods files it moves.
-  [[ ! -f $LOCAL_DIR/private.zsh ]] || chmod 600 "$LOCAL_DIR/private.zsh"
-}
-
-track_temp() { TEMP_PATHS+=("$1"); }
-
-cleanup() {
-  local path
-  for path in "${TEMP_PATHS[@]-}"; do [[ -z $path ]] || rm -rf -- "$path"; done
-  # Only remove the lock if it is still ours — never delete a lock a different
-  # run now holds (defensive backstop for the reclaim race).
-  if [[ $LOCK_HELD -eq 1 && -f $LOCK_DIR/pid ]] && [[ $(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null) == "$$" ]]; then
-    rm -rf -- "$LOCK_DIR"
-  fi
-}
-
-acquire_lock() {
-  [[ $DRY_RUN -eq 0 ]] || return 0
-  prepare_local_dir
-  # The ONLY state-changing operation here is the atomic exclusive `mkdir`, so
-  # two concurrent runs can never both acquire and there is no reclaim TOCTOU.
-  # A stale lock is only left by an unclean kill (SIGKILL/power loss) — the EXIT
-  # trap clears it on any normal or signalled exit — so we fail closed and tell
-  # the operator how to remove it rather than racily auto-reclaiming it.
-  if mkdir "$LOCK_DIR" 2>/dev/null; then
-    printf '%s\n' "$$" > "$LOCK_DIR/pid"
-    chmod 600 "$LOCK_DIR/pid"
-    LOCK_HELD=1
-    return 0
-  fi
-  local owner=""
-  [[ -f $LOCK_DIR/pid ]] && owner=$(sed -n '1p' "$LOCK_DIR/pid")
-  if [[ ! $owner =~ ^[0-9]+$ ]]; then
-    # No readable pid: a kill between the mkdir and the pid write left this
-    # behind, so there is no process to point at. Give the removal guidance
-    # rather than claiming another operation is running.
-    die "A previous Leo's Profiles operation left a lock with no usable owner record, which means it exited uncleanly. If no install is running, remove it and retry: rm -rf -- '$LOCK_DIR'"
-  fi
-  if ! kill -0 "$owner" 2>/dev/null; then
-    die "A previous Leo's Profiles operation (PID $owner) exited uncleanly and left a lock. If no such process is running, remove it and retry: rm -rf -- '$LOCK_DIR'"
-  fi
-  die "Another Leo's Profiles operation is running (PID $owner)"
-}
-
-write_profile() {
-  [[ $DRY_RUN -eq 0 ]] || return 0
-  local tmp
-  prepare_local_dir
-  tmp=$(mktemp "$LOCAL_DIR/.install-profile.tmp.XXXXXX")
-  track_temp "$tmp"
-  {
-    printf 'schema\t1\n'
-    printf 'groups\t%s\n' "$SELECTED_STEPS"
-    printf 'package-groups\t%s\n' "$SELECTED_GROUPS"
-    printf 'full-upgrade\t%s\n' "$SAVED_FULL_UPGRADE"
-    printf 'fonts\t%s\n' "$INSTALL_FONTS"
-    printf 'font\t%s\n' "$FONT_NAME"
-    printf 'default-shell\t%s\n' "$CHANGE_DEFAULT_SHELL"
-    printf 'git-name\t%s\n' "$GIT_NAME"
-    printf 'git-email\t%s\n' "$GIT_EMAIL"
-    printf 'ssh\t%s\n' "$SSH_MODE"
-    printf 'ssh-key\t%s\n' "$SSH_KEY_PATH"
-    printf 'ssh-passphrase\t%s\n' "$SSH_PASSPHRASE_MODE"
-    printf 'gpg\t%s\n' "$GPG_MODE"
-    printf 'gpg-key\t%s\n' "$GPG_KEY_ID"
-    printf 'gpg-passphrase\t%s\n' "$GPG_PASSPHRASE_MODE"
-    printf 'node-channel\t%s\n' "$NODE_CHANNEL"
-    printf 'ai-cli-update-channel\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
-    printf 'package-channel\t%s\n' "$PACKAGE_CHANNEL"
-  } > "$tmp"
-  chmod 600 "$tmp"
-  mv -f "$tmp" "$PROFILE_FILE"
-}
-
-read_profile() {
-  [[ -f $PROFILE_FILE ]] || die "No saved install profile. Run the AI setup flow first: $PROFILE_FILE"
-  local key value extra schema="" seen=","
-  while IFS=$'\t' read -r key value extra || [[ -n $key ]]; do
-    [[ -z ${extra:-} ]] || die "Malformed install profile row: $key"
-    validate_tsv_value "$key" "${value:-}"
-    [[ $seen != *",$key,"* ]] || die "Duplicate install profile key: $key"
-    seen+="$key,"
-    case $key in
-      schema) schema=$value ;;
-      groups) SELECTED_STEPS=$value ;;
-      package-groups) SELECTED_GROUPS=$value ;;
-      full-upgrade) SAVED_FULL_UPGRADE=$value ;;
-      fonts) INSTALL_FONTS=$value ;;
-      font) FONT_NAME=$value ;;
-      default-shell) CHANGE_DEFAULT_SHELL=$value ;;
-      git-name) GIT_NAME=$value ;;
-      git-email) GIT_EMAIL=$value ;;
-      ssh) SSH_MODE=$value ;;
-      ssh-key) SSH_KEY_PATH=$value ;;
-      ssh-passphrase) SSH_PASSPHRASE_MODE=$value ;;
-      gpg) GPG_MODE=$value ;;
-      gpg-key) GPG_KEY_ID=$value ;;
-      gpg-passphrase) GPG_PASSPHRASE_MODE=$value ;;
-      node-channel) NODE_CHANNEL=$value ;;
-      ai-cli-update-channel) AI_CLI_UPDATE_CHANNEL=$value ;;
-      package-channel) PACKAGE_CHANNEL=$value ;;
-      '') ;;
-      *) die "Unknown install profile key: $key" ;;
-    esac
-  done < "$PROFILE_FILE"
-  [[ $schema == 1 ]] || die "Unsupported install profile schema: ${schema:-missing}"
-}
-
-migrate_one_local_file() {
-  local legacy=$1 destination=$2
-  [[ -e $legacy || -L $legacy ]] || return 0
-  if [[ -e $destination || -L $destination ]]; then
-    # The conflict check runs in dry-run too — see migrate_local_state.
-    cmp -s "$legacy" "$destination" || die "Conflicting local settings: $legacy and $destination"
-    [[ $DRY_RUN -eq 0 ]] || { say "Would remove the superseded $legacy"; return 0; }
-    rm -f -- "$legacy"
-    return 0
-  fi
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would move $legacy to $destination (mode 600)"
-    return 0
-  fi
-  mkdir -p "$(dirname -- "$destination")"
-  mv -- "$legacy" "$destination"
-  chmod 600 "$destination"
-}
-
-# Dry-run performs the *detection* half of the migration but none of the
-# mutations, so `apply --dry-run` surfaces the same conflicts a real apply would
-# die on. Previously it returned early and reported success, then the real apply
-# failed immediately on a legacy-state conflict the dry-run never looked at.
-migrate_local_state() {
-  prepare_local_dir
-  if [[ -f $LEGACY_STATE_FILE && ! -e $STATE_FILE ]]; then
-    if [[ $DRY_RUN -eq 1 ]]; then
-      say "Would migrate $LEGACY_STATE_FILE to $STATE_FILE"
-    else
-      cp -p "$LEGACY_STATE_FILE" "$STATE_FILE"
-      chmod 600 "$STATE_FILE"
-      rm -f "$LEGACY_STATE_FILE"
-    fi
-  elif [[ -f $LEGACY_STATE_FILE && -f $STATE_FILE ]]; then
-    cmp -s "$LEGACY_STATE_FILE" "$STATE_FILE" ||
-      die "Conflicting installer state: $LEGACY_STATE_FILE and $STATE_FILE"
-    if [[ $DRY_RUN -eq 1 ]]; then
-      say "Would remove the superseded $LEGACY_STATE_FILE"
-    else
-      rm -f "$LEGACY_STATE_FILE"
-    fi
-  fi
-  migrate_one_local_file "$TARGET/zsh/_private.zsh" "$LOCAL_DIR/private.zsh"
-  migrate_one_local_file "$HOME/.brew-china" "$LOCAL_DIR/flags/brew-china"
-  migrate_one_local_file "$HOME/.lp-no-gnu" "$LOCAL_DIR/flags/no-gnu"
-  migrate_one_local_file "$HOME/.lp-nobrew" "$LOCAL_DIR/flags/no-brew"
-  migrate_one_local_file "$HOME/.lp-nopyenv" "$LOCAL_DIR/flags/no-pyenv"
-  migrate_one_local_file "$HOME/.lp-norbenv" "$LOCAL_DIR/flags/no-rbenv"
-}
+# shellcheck source=installer/state.sh
+source "$SCRIPT_DIR/installer/state.sh"
 
 run() {
   printf '+ '
   printf '%q ' "$@"
   printf '\n'
-  [[ $DRY_RUN -eq 1 ]] || "$@"
+  [[ $DRY_RUN -eq 0 ]] || return 0
+  if [[ $EUID -eq 0 && ${1:-} == sudo ]]; then shift; fi
+  "$@"
 }
 
 # run_shell <description> <program> [args...]
@@ -481,1074 +307,24 @@ download_verified() {
   mv -f "$tmp" "$destination"
 }
 
-state_done() {
-  local step=$1 signature
-  signature=$(step_signature "$step")
-  [[ -f $STATE_FILE ]] && awk -F '\t' -v step="$step" -v signature="$signature" \
-    '$1 == step && $2 == signature { found=1 } END { exit !found }' "$STATE_FILE"
-}
+# shellcheck source=installer/packages.sh
+source "$SCRIPT_DIR/installer/packages.sh"
 
-mark_done() {
-  local step=$1 signature tmp detail=""
-  [[ $DRY_RUN -eq 1 ]] && return 0
-  signature=$(step_signature "$step")
-  prepare_local_dir
-  tmp=$(mktemp "$LOCAL_DIR/.install-state.tmp.XXXXXX")
-  track_temp "$tmp"
-  if [[ -f $STATE_FILE ]]; then
-    awk -F '\t' -v step="$step" '$1 != step' "$STATE_FILE" > "$tmp"
-  else
-    : > "$tmp"
-  fi
-  # Column 4 is diagnostic only — nothing reads it back; it records which Node
-  # version the fnm step resolved so a state file can be inspected by hand.
-  [[ $step != fnm ]] || detail=$RESOLVED_NODE_VERSION
-  printf '%s\t%s\t%s\t%s\n' "$step" "$signature" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$detail" >> "$tmp"
-  chmod 600 "$tmp"
-  mv -f "$tmp" "$STATE_FILE"
-}
+# shellcheck source=installer/tools.sh
+source "$SCRIPT_DIR/installer/tools.sh"
 
-ensure_sudo() {
-  [[ $OS_FAMILY == macos ]] && return 0
-  [[ $DRY_RUN -eq 1 ]] || sudo -v
-}
 
-ensure_brew() {
-  command -v brew >/dev/null 2>&1 && return 0
-  local installer
-  installer=$(mktemp "${TMPDIR:-/tmp}/leos-homebrew-install.XXXXXX")
-  track_temp "$installer"
-  say "Installing Homebrew from a pinned, SHA-256-verified script"
-  download_verified "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256" "$installer"
-  run /bin/bash "$installer"
-  [[ $DRY_RUN -eq 0 ]] || return 0
-  local candidate
-  for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
-    if [[ -x $candidate ]]; then
-      eval "$("$candidate" shellenv)"
-      break
-    fi
-  done
-  command -v brew >/dev/null 2>&1 || die "Homebrew installation did not put brew on PATH"
-}
+# shellcheck source=installer/config.sh
+source "$SCRIPT_DIR/installer/config.sh"
 
-bootstrap_tools() {
-  local -a missing=()
-  command -v git >/dev/null 2>&1 || missing+=(git)
-  command -v curl >/dev/null 2>&1 || missing+=(curl)
-  if [[ $OS_FAMILY == macos ]]; then
-    # ensure_brew stays unconditional: macOS ships git and curl, so gating on
-    # them would skip installing Homebrew itself on a fresh machine.
-    ensure_brew
-    # But only install what is missing. `brew install` upgrades an outdated
-    # formula, so doing this unconditionally let a plain `reconcile` — documented
-    # as repairing without a host upgrade — silently upgrade git, curl and their
-    # dependency trees on every run.
-    if (( ${#missing[@]} )); then
-      run brew install "${missing[@]}"
-    else
-      say "git and curl are already present; skipping their bootstrap install"
-    fi
-    return 0
-  fi
-  # unzip must be part of the check, not just git and curl: the Linux bootstrap
-  # is also what provides the archive tools, and install_locked_archive_binary
-  # unzips both bun and fnm (a default step) while unzip belongs to no package
-  # group. macOS ships unzip, hence checking it only here.
-  command -v unzip >/dev/null 2>&1 || missing+=(unzip)
-  if (( ${#missing[@]} == 0 )); then
-    say "git, curl and unzip are already present; skipping bootstrap"
-    return 0
-  fi
-  ensure_sudo
-  case $OS_FAMILY in
-    apt)
-      run sudo apt-get update
-      run sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y git curl ca-certificates unzip ;;
-    fedora)
-      run sudo dnf install -y git curl ca-certificates unzip ;;
-    arch)
-      run sudo pacman -S --needed --noconfirm git curl ca-certificates unzip ;;
-  esac
-}
+# shellcheck source=installer/credentials.sh
+source "$SCRIPT_DIR/installer/credentials.sh"
 
-package_list_for_group() {
-  local group=$1
-  case "$OS_FAMILY:$group" in
-    macos:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils gnu-indent gnu-sed gnu-tar gnu-which grep gawk gzip less nano' ;;
-    macos:shell) printf '%s\n' 'zsh' ;;
-    macos:dev-tools) printf '%s\n' 'bat direnv eza fd fzf git pkg-config openssl@3 readline ripgrep sqlite3 tcl-tk vim xz zlib zoxide' ;;
-    macos:languages) printf '%s\n' 'node python ruby' ;;
-    macos:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
-    macos:network) printf '%s\n' 'wget rclone gnutls heroku ssh-copy-id' ;;
-    macos:system) printf '%s\n' 'smartmontools' ;;
-    apt:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
-    apt:shell) printf '%s\n' 'zsh' ;;
-    apt:dev-tools) printf '%s\n' 'bat build-essential clang direnv fd-find fzf gcc git libbz2-dev libffi-dev liblzma-dev libncurses-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-dev libxmlsec1-dev llvm ripgrep tk-dev vim xz-utils zlib1g-dev zoxide' ;;
-    apt:languages) printf '%s\n' 'nodejs npm python-is-python3 ruby' ;;
-    apt:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
-    apt:network) printf '%s\n' 'wget rclone' ;;
-    apt:system) printf '%s\n' 'smartmontools' ;;
-    fedora:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
-    fedora:shell) printf '%s\n' 'zsh' ;;
-    fedora:dev-tools) printf '%s\n' 'bat bzip2 bzip2-devel direnv fd-find fzf gcc gdbm-libs git libffi-devel libnsl2 libuuid-devel make openssl-devel patch readline-devel ripgrep sqlite sqlite-devel tk-devel vim xz-devel zlib-devel zoxide' ;;
-    fedora:languages) printf '%s\n' 'nodejs python-unversioned-command ruby' ;;
-    fedora:media) printf '%s\n' 'ImageMagick ffmpeg yt-dlp' ;;
-    fedora:network) printf '%s\n' 'wget rclone' ;;
-    fedora:system) printf '%s\n' 'smartmontools' ;;
-    arch:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
-    arch:shell) printf '%s\n' 'zsh' ;;
-    arch:dev-tools) printf '%s\n' 'base-devel bat direnv eza fd fzf git libffi openssl ripgrep tk vim xz zlib zoxide' ;;
-    arch:languages) printf '%s\n' 'nodejs npm python ruby' ;;
-    arch:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
-    arch:network) printf '%s\n' 'wget rclone' ;;
-    arch:system) printf '%s\n' 'smartmontools' ;;
-  esac
-}
+# shellcheck source=installer/verification.sh
+source "$SCRIPT_DIR/installer/verification.sh"
 
-collect_selected_packages() {
-  local group package_list
-  local -a group_packages
-  local old_ifs=$IFS
-  SELECTED_PACKAGES=()
-  IFS=,
-  for group in $SELECTED_GROUPS; do
-    package_list=$(package_list_for_group "$group")
-    IFS=' '
-    read -r -a group_packages <<< "$package_list"
-    SELECTED_PACKAGES+=("${group_packages[@]}")
-    IFS=,
-  done
-  IFS=$old_ifs
-}
-
-package_installed() {
-  local package=$1
-  case $OS_FAMILY in
-    macos) brew list --versions "$package" >/dev/null 2>&1 ;;
-    apt) dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -qx 'install ok installed' ;;
-    fedora) rpm -q --whatprovides "$package" >/dev/null 2>&1 ;;
-    arch) pacman -Q "$package" >/dev/null 2>&1 ;;
-  esac
-}
-
-selected_packages_installed() {
-  local package installed_lines
-  collect_selected_packages
-  (( ${#SELECTED_PACKAGES[@]} > 0 )) || return 0
-  if [[ $OS_FAMILY == macos ]]; then
-    # One brew invocation: it prints one line per installed formula among
-    # the arguments (aliases resolve to their real names).
-    installed_lines=$(brew list --versions "${SELECTED_PACKAGES[@]}" 2>/dev/null | grep -c . || true)
-    (( installed_lines == ${#SELECTED_PACKAGES[@]} ))
-    return
-  fi
-  for package in "${SELECTED_PACKAGES[@]}"; do
-    package_installed "$package" || return 1
-  done
-}
-
-install_os_packages() {
-  collect_selected_packages
-  (( ${#SELECTED_PACKAGES[@]} > 0 )) || return 0
-  ensure_sudo
-  # INVARIANT: a full upgrade upgrades installed packages within the current OS
-  # release only (apt-get upgrade / dnf upgrade / pacman -Syu / brew upgrade).
-  # It must never perform a distribution/release upgrade (e.g. Ubuntu's
-  # do-release-upgrade, Fedora's dnf system-upgrade, or apt full-upgrade against
-  # a bumped sources list). Arch is rolling, so pacman -Syu is inherently
-  # in-release. Keep this true; the guard test in tests/install-test.sh enforces it.
-  case $OS_FAMILY in
-    macos)
-      ensure_brew
-      if has_csv_item "$SELECTED_GROUPS" network; then run brew tap heroku/brew; fi
-      if [[ $FULL_UPGRADE -eq 1 ]]; then
-        run brew update
-        run brew upgrade
-        run brew upgrade --cask
-      fi
-      run brew install "${SELECTED_PACKAGES[@]}" ;;
-    apt)
-      run sudo apt-get update
-      [[ $FULL_UPGRADE -eq 0 ]] || run sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-      run sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${SELECTED_PACKAGES[@]}"
-      run mkdir -p "$HOME/.local/bin"
-      if [[ $DRY_RUN -eq 0 ]]; then
-        command -v fd >/dev/null 2>&1 || { command -v fdfind >/dev/null 2>&1 && ln -sf "$(command -v fdfind)" "$HOME/.local/bin/fd"; }
-        command -v bat >/dev/null 2>&1 || { command -v batcat >/dev/null 2>&1 && ln -sf "$(command -v batcat)" "$HOME/.local/bin/bat"; }
-      fi ;;
-    fedora)
-      [[ $FULL_UPGRADE -eq 0 ]] || run sudo dnf upgrade -y
-      if has_csv_item "$SELECTED_GROUPS" dev-tools; then run sudo dnf group install -y development-tools; fi
-      if has_csv_item "$SELECTED_GROUPS" media; then
-        run sudo dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
-      fi
-      if has_csv_item "$SELECTED_GROUPS" media; then
-        run sudo dnf install -y --allowerasing "${SELECTED_PACKAGES[@]}"
-      else
-        run sudo dnf install -y "${SELECTED_PACKAGES[@]}"
-      fi ;;
-    arch)
-      [[ $FULL_UPGRADE -eq 0 ]] || run sudo pacman -Syu --noconfirm
-      run sudo pacman -S --needed --noconfirm "${SELECTED_PACKAGES[@]}" ;;
-  esac
-}
-
-github_repo_slug() {
-  local url=$1 slug
-  case $url in
-    https://github.com/*) slug=${url#https://github.com/} ;;
-    git@github.com:*) slug=${url#git@github.com:} ;;
-    ssh://git@github.com/*) slug=${url#ssh://git@github.com/} ;;
-    *) return 1 ;;
-  esac
-  slug=${slug%/}
-  slug=${slug%.git}
-  [[ $slug == */* && $slug != */*/* ]] || return 1
-  printf '%s\n' "$slug" | tr '[:upper:]' '[:lower:]'
-}
-
-github_origins_equivalent() {
-  local actual expected actual_slug expected_slug
-  actual=$1
-  expected=$2
-  actual_slug=$(github_repo_slug "$actual") || return 1
-  expected_slug=$(github_repo_slug "$expected") || return 1
-  [[ $actual_slug == "$expected_slug" ]]
-}
-
-clone_pinned() {
-  local repository=$1 commit=$2 destination=$3 label=$4 origin
-  if [[ -d $destination ]]; then
-    [[ -d $destination/.git ]] || die "$label exists but is not a Git checkout: $destination"
-    origin=$(git -C "$destination" remote get-url origin 2>/dev/null || true)
-    github_origins_equivalent "$origin" "$repository" || die "$label checkout has an unexpected origin: $destination"
-    [[ -z $(git -C "$destination" status --porcelain) ]] || die "$label checkout has local changes: $destination"
-    if [[ $origin != "$repository" ]]; then
-      run git -C "$destination" remote set-url origin "$repository"
-    fi
-  else
-    run mkdir -p "$(dirname -- "$destination")"
-    run git clone "$repository" "$destination"
-  fi
-  if [[ $DRY_RUN -eq 0 ]] && ! git -C "$destination" cat-file -e "$commit^{commit}" 2>/dev/null; then
-    run git -C "$destination" fetch --depth 1 origin "$commit"
-  fi
-  run git -C "$destination" checkout --detach "$commit"
-  [[ $DRY_RUN -eq 1 ]] || [[ $(git -C "$destination" rev-parse HEAD) == "$commit" ]] || die "$label did not resolve pinned commit"
-}
-
-install_local_bins() {
-  local destination="$HOME/.local/bin/rpatool"
-  download_verified "$RPATOOL_URL" "$RPATOOL_SHA256" "$destination"
-  [[ $DRY_RUN -eq 1 ]] || chmod 700 "$destination"
-}
-
-install_pyenv() {
-  clone_pinned "$PYENV_REPOSITORY" "$PYENV_COMMIT" "$HOME/.pyenv" pyenv
-  if [[ $DRY_RUN -eq 0 ]]; then
-    (cd "$HOME/.pyenv" && src/configure && make -C src)
-  fi
-}
-
-install_rbenv() {
-  clone_pinned "$RBENV_REPOSITORY" "$RBENV_COMMIT" "$HOME/.rbenv" rbenv
-  clone_pinned "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT" "$HOME/.rbenv/plugins/ruby-build" ruby-build
-  if [[ $DRY_RUN -eq 0 && -x $HOME/.rbenv/src/configure ]]; then
-    (cd "$HOME/.rbenv" && src/configure && make -C src)
-  fi
-}
-
-install_plugins() {
-  local directory="$TARGET/zsh/plugins"
-  clone_pinned "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT" "$directory/zsh-autosuggestions" zsh-autosuggestions
-  clone_pinned "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT" "$directory/zsh-syntax-highlighting" zsh-syntax-highlighting
-  clone_pinned "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT" "$directory/zsh-completions" zsh-completions
-  clone_pinned "$FZF_TAB_REPOSITORY" "$FZF_TAB_COMMIT" "$directory/fzf-tab" fzf-tab
-}
-
-is_desktop() {
-  [[ $OS_FAMILY == macos || -n ${DISPLAY:-}${WAYLAND_DISPLAY:-}${XDG_CURRENT_DESKTOP:-} ]]
-}
-
-font_should_install() {
-  [[ $INSTALL_FONTS == yes ]] || { [[ $INSTALL_FONTS == auto ]] && is_desktop; }
-}
-
-# Blobless, shallow, cone-sparse checkout of a pinned commit limited to the
-# given paths. For a huge monorepo (nerd-fonts) this fetches only the requested
-# font's blobs instead of the whole multi-GB tree/history. Returns non-zero on
-# any failure so callers can fall back to a full checkout; content trust is
-# unchanged (the pinned commit is still asserted).
-sparse_checkout_pinned() {
-  local repository=$1 commit=$2 destination=$3 label=$4
-  shift 4
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would sparse-checkout $label ($*) at the pinned commit"
-    return 0
-  fi
-  mkdir -p "$destination" &&
-    git -C "$destination" init -q &&
-    git -C "$destination" remote add origin "$repository" &&
-    git -C "$destination" config extensions.partialClone origin &&
-    git -C "$destination" sparse-checkout init --cone &&
-    git -C "$destination" sparse-checkout set "$@" &&
-    git -C "$destination" fetch --depth 1 --filter=blob:none origin "$commit" &&
-    git -C "$destination" checkout --detach FETCH_HEAD || return 1
-  [[ $(git -C "$destination" rev-parse HEAD) == "$commit" ]] || return 1
-}
-
-install_fonts() {
-  if ! font_should_install; then
-    say "Skipping Nerd Fonts ($INSTALL_FONTS policy)"
-    return 0
-  fi
-  local font=${FONT_NAME:-JetBrainsMono}
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would download pinned Nerd Fonts and install $font"
-    return 0
-  fi
-  local temp checkout
-  temp=$(mktemp -d)
-  track_temp "$temp"
-  checkout="$temp/nerd-fonts"
-  # Fast path: fetch only this font's files. Fall back to a full pinned checkout
-  # (the original behavior) if the sparse layout doesn't satisfy the upstream
-  # installer, so no supported font can regress.
-  if sparse_checkout_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$checkout" nerd-fonts \
-       install.sh bin "patched-fonts/$font" && "$checkout/install.sh" "$font"; then
-    :
-  else
-    say "Sparse Nerd Fonts install did not complete; retrying with a full pinned checkout"
-    rm -rf "$checkout"
-    clone_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$checkout" nerd-fonts
-    run "$checkout/install.sh" "$font"
-  fi
-  rm -rf "$temp"
-}
-
-ensure_user_npm_prefix() {
-  local prefix="$HOME/.local/npm"
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would prepare user-local npm prefix: $prefix"
-    return 0
-  fi
-  mkdir -p "$prefix"
-}
-
-install_locked_npm_package() {
-  local package=$1 url=$2 expected=$3 temp archive
-  ensure_user_npm_prefix
-  temp=$(mktemp -d)
-  track_temp "$temp"
-  archive="$temp/$package.tgz"
-  download_verified "$url" "$expected" "$archive"
-  run npm install --global --prefix "$HOME/.local/npm" "$archive"
-  rm -rf "$temp"
-}
-
-install_yarn() {
-  install_locked_npm_package yarn "$YARN_URL" "$YARN_SHA256"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/npm/bin/yarn" --version | grep -qx "$YARN_VERSION" || die "Yarn version verification failed"
-}
-
-install_pnpm() {
-  install_locked_npm_package pnpm "$PNPM_URL" "$PNPM_SHA256"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/npm/bin/pnpm" --version | grep -qx "$PNPM_VERSION" || die "pnpm version verification failed"
-}
-
-machine_arch() {
-  case $(uname -m) in
-    arm64|aarch64) printf '%s\n' aarch64 ;;
-    x86_64|amd64) printf '%s\n' x64 ;;
-    *) die "Unsupported CPU architecture: $(uname -m)" ;;
-  esac
-}
-
-platform_asset() {
-  local tool=$1 arch
-  arch=$(machine_arch)
-  case "$tool:$OS_FAMILY:$arch" in
-    bun:macos:aarch64) printf '%s\t%s\n' "$BUN_DARWIN_AARCH64_URL" "$BUN_DARWIN_AARCH64_SHA256" ;;
-    bun:macos:x64) printf '%s\t%s\n' "$BUN_DARWIN_X64_URL" "$BUN_DARWIN_X64_SHA256" ;;
-    bun:apt:aarch64|bun:fedora:aarch64|bun:arch:aarch64) printf '%s\t%s\n' "$BUN_LINUX_AARCH64_URL" "$BUN_LINUX_AARCH64_SHA256" ;;
-    bun:apt:x64|bun:fedora:x64|bun:arch:x64) printf '%s\t%s\n' "$BUN_LINUX_X64_URL" "$BUN_LINUX_X64_SHA256" ;;
-    fnm:macos:aarch64|fnm:macos:x64) printf '%s\t%s\n' "$FNM_MACOS_URL" "$FNM_MACOS_SHA256" ;;
-    fnm:apt:aarch64|fnm:fedora:aarch64|fnm:arch:aarch64) printf '%s\t%s\n' "$FNM_LINUX_AARCH64_URL" "$FNM_LINUX_AARCH64_SHA256" ;;
-    fnm:apt:x64|fnm:fedora:x64|fnm:arch:x64) printf '%s\t%s\n' "$FNM_LINUX_X64_URL" "$FNM_LINUX_X64_SHA256" ;;
-    starship:macos:aarch64) printf '%s\t%s\n' "$STARSHIP_DARWIN_AARCH64_URL" "$STARSHIP_DARWIN_AARCH64_SHA256" ;;
-    starship:macos:x64) printf '%s\t%s\n' "$STARSHIP_DARWIN_X64_URL" "$STARSHIP_DARWIN_X64_SHA256" ;;
-    starship:apt:aarch64|starship:fedora:aarch64|starship:arch:aarch64) printf '%s\t%s\n' "$STARSHIP_LINUX_AARCH64_URL" "$STARSHIP_LINUX_AARCH64_SHA256" ;;
-    starship:apt:x64|starship:fedora:x64|starship:arch:x64) printf '%s\t%s\n' "$STARSHIP_LINUX_X64_URL" "$STARSHIP_LINUX_X64_SHA256" ;;
-    *) die "No locked $tool artifact for $OS_FAMILY/$arch" ;;
-  esac
-}
-
-step_signature() {
-  local step=$1 material asset
-  material="state-v2|$OS_FAMILY|$step"
-  case $step in
-    bins) material+="|$RPATOOL_URL|$RPATOOL_SHA256" ;;
-    packages)
-      collect_selected_packages
-      material+="|$SELECTED_GROUPS|${SELECTED_PACKAGES[*]}" ;;
-    pyenv) material+="|$PYENV_REPOSITORY|$PYENV_COMMIT" ;;
-    rbenv) material+="|$RBENV_REPOSITORY|$RBENV_COMMIT|$RUBY_BUILD_REPOSITORY|$RUBY_BUILD_COMMIT" ;;
-    bun)
-      asset=$(platform_asset bun)
-      material+="|$BUN_VERSION|$asset" ;;
-    yarn) material+="|$YARN_VERSION|$YARN_URL|$YARN_SHA256|$HOME/.local/npm" ;;
-    pnpm) material+="|$PNPM_VERSION|$PNPM_URL|$PNPM_SHA256|$HOME/.local/npm" ;;
-    fnm)
-      asset=$(platform_asset fnm)
-      material+="|$FNM_VERSION|$asset|${RESOLVED_NODE_VERSION:-unresolved}" ;;
-    plugins)
-      asset=$(platform_asset starship)
-      material+="|$TARGET|$STARSHIP_VERSION|$asset|$ZSH_AUTOSUGGESTIONS_COMMIT|$ZSH_SYNTAX_HIGHLIGHTING_COMMIT|$ZSH_COMPLETIONS_COMMIT|$FZF_TAB_COMMIT" ;;
-    fonts) material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_COMMIT" ;;
-    zsh-config) material+="|loader-v2|$TARGET" ;;
-    default-shell) material+="|$CHANGE_DEFAULT_SHELL" ;;
-    *) die "Cannot compute state signature for unknown step: $step" ;;
-  esac
-  printf '%s' "$material" | hash_text
-}
-
-install_locked_archive_binary() {
-  local tool=$1 extension=$2 destination=$3 url sha temp archive binary asset
-  asset=$(platform_asset "$tool")
-  local IFS=$'\t'
-  read -r url sha <<< "$asset"
-  temp=$(mktemp -d)
-  track_temp "$temp"
-  archive="$temp/$tool.$extension"
-  download_verified "$url" "$sha" "$archive"
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would extract verified $tool to $destination"
-    rmdir "$temp" 2>/dev/null || true
-    return 0
-  fi
-  mkdir -p "$temp/extract"
-  case $extension in
-    zip) unzip -q "$archive" -d "$temp/extract" ;;
-    tar.gz) tar -xzf "$archive" -C "$temp/extract" ;;
-    *) die "Unsupported archive extension: $extension" ;;
-  esac
-  binary=$(find "$temp/extract" -type f -name "$tool" -print | sed -n '1p')
-  [[ -n $binary ]] || die "Verified $tool archive did not contain its executable"
-  mkdir -p "$(dirname -- "$destination")"
-  install -m 755 "$binary" "$destination"
-  rm -rf "$temp"
-}
-
-install_bun() {
-  install_locked_archive_binary bun zip "$HOME/.local/bin/bun"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/bun" --version | grep -qx "$BUN_VERSION" || die "Bun version verification failed"
-}
-
-install_fnm() {
-  install_locked_archive_binary fnm zip "$HOME/.local/bin/fnm"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/fnm" --version | grep -qx "fnm $FNM_VERSION" || die "fnm version verification failed"
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would resolve the current Node LTS once, install that exact version, and make it default"
-    return 0
-  fi
-  resolve_node_lts || die "Could not resolve the current Node LTS"
-  eval "$("$HOME/.local/bin/fnm" env --shell bash)"
-  run "$HOME/.local/bin/fnm" install "$RESOLVED_NODE_VERSION"
-  run "$HOME/.local/bin/fnm" default "$RESOLVED_NODE_VERSION"
-}
-
-node_version_ok() { [[ ${1:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
-
-resolve_node_lts() {
-  [[ -z $RESOLVED_NODE_VERSION ]] || return 0
-  local fnm_bin latest
-  if command -v curl >/dev/null 2>&1; then
-    # Timeouts matter here: this runs inside apply while the install lock is
-    # held, and inside the otherwise read-only `inspect`, so a stalled
-    # connection would hang the whole operation.
-    # index.tab columns: $1 = version, $10 = the LTS codename ("-" when current).
-    latest=$(curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
-      --connect-timeout 15 --max-time 30 \
-      https://nodejs.org/dist/index.tab 2>/dev/null | awk -F '\t' 'NR > 1 && $10 != "-" { print $1; exit }') || true
-  fi
-  if ! node_version_ok "${latest:-}"; then
-    if [[ -x $HOME/.local/bin/fnm ]]; then
-      fnm_bin="$HOME/.local/bin/fnm"
-    else
-      fnm_bin=$(command -v fnm 2>/dev/null || true)
-    fi
-    if [[ -n ${fnm_bin:-} ]]; then
-      latest=$("$fnm_bin" list-remote --lts 2>/dev/null | tail -n 1 | awk '{print $1}') || true
-    fi
-  fi
-  # Return non-zero (do not die) so callers can degrade gracefully: `inspect`
-  # falls back to "resolve-during-apply" and verify_step reports "needed".
-  # Callers that genuinely require a version (install_fnm, apply's main) add
-  # their own `|| die`.
-  node_version_ok "${latest:-}" || return 1
-  RESOLVED_NODE_VERSION=$latest
-}
-
-install_starship() {
-  install_locked_archive_binary starship tar.gz "$HOME/.local/bin/starship"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/starship" --version | grep -q "starship $STARSHIP_VERSION" || die "Starship version verification failed"
-}
-
-resolve_config_path() {
-  local path=$1 link directory hops=0
-  while [[ -L $path ]]; do
-    (( hops += 1 ))
-    (( hops <= 40 )) || die "Too many symbolic-link hops while resolving $1"
-    link=$(readlink "$path")
-    if [[ $link == /* ]]; then
-      path=$link
-    else
-      directory=$(CDPATH='' cd -- "$(dirname -- "$path")" && pwd -P)
-      path="$directory/$link"
-    fi
-  done
-  printf '%s\n' "$path"
-}
-
-managed_block_well_formed() {
-  local file=$1 marker=$2
-  [[ ! -e $file ]] && return 0
-  awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
-    $0 == begin {
-      begins++
-      if (open || begins > 1) invalid=1
-      open=1
-      next
-    }
-    $0 == end {
-      ends++
-      if (!open || ends > 1) invalid=1
-      open=0
-      next
-    }
-    END { exit invalid || open || begins != ends }
-  ' "$file"
-}
-
-managed_block_equals() {
-  local file=$1 marker=$2 expected=$3 actual
-  file=$(resolve_config_path "$file")
-  managed_block_well_formed "$file" "$marker" || return 1
-  [[ -e $file ]] || return 1
-  actual=$(awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
-    $0 == begin { capture=1; found=1; next }
-    $0 == end { capture=0; next }
-    capture { print }
-    END { if (!found) exit 1 }
-  ' "$file") || return 1
-  [[ $actual == "$expected" ]]
-}
-
-install_managed_block() {
-  local file=$1 marker=$2 content=$3 tmp mode backup separator=""
-  [[ $DRY_RUN -eq 1 ]] && { say "Would install managed block in $file"; return 0; }
-  file=$(resolve_config_path "$file")
-  mkdir -p "$(dirname -- "$file")"
-  managed_block_well_formed "$file" "$marker" || die "Refusing to rewrite malformed managed block in $file"
-  managed_block_equals "$file" "$marker" "$content" && return 0
-  backup="$file.leos-profiles.bak"
-  if [[ -e $file && ! -e $backup ]]; then
-    cp -p "$file" "$backup"
-  fi
-  touch "$file"
-  mode=$(file_mode "$file")
-  tmp=$(mktemp "$(dirname -- "$file")/.$(basename -- "$file").leos-profiles.tmp.XXXXXX")
-  track_temp "$tmp"
-  awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
-    $0 == begin { skip=1; next }
-    $0 == end { skip=0; next }
-    !skip { print }
-  ' "$file" > "$tmp"
-  if [[ -s $tmp ]] && [[ -n $(tail -n 1 "$tmp") ]]; then separator=$'\n'; fi
-  printf '%s# >>> leos-profiles %s >>>\n%s\n# <<< leos-profiles %s <<<\n' "$separator" "$marker" "$content" "$marker" >> "$tmp"
-  chmod "$mode" "$tmp"
-  mv -f "$tmp" "$file"
-}
-
-zshrc_managed_content() {
-  local quoted_target
-  printf -v quoted_target '%q' "$TARGET"
-  printf '%s\n' "if [[ -z \${LEOS_PROFILES_HOME:-} ]]; then
-  LEOS_PROFILES_HOME=$quoted_target
-fi
-if [[ -o interactive ]]; then
-  source \"\$LEOS_PROFILES_HOME/zsh/start.zsh\"
-fi"
-}
-
-zshenv_managed_content() {
-  # These are intentional zsh runtime expansions.
-  # shellcheck disable=SC2016
-  printf '%s\n' 'typeset -U path
-path=("$HOME/.local/bin" "$HOME/.local/npm/bin" $path)
-export PATH'
-}
-
-# Strip a managed block, leaving the rest of the user's file alone.
-#
-# This is the supported way to undo the loader, and is strictly safer than
-# restoring $file.leos-profiles.bak: that backup is only written the first time a
-# block is installed, so months of later edits are not in it.
-remove_managed_block() {
-  local file=$1 marker=$2 tmp mode
-  file=$(resolve_config_path "$file")
-  if [[ ! -e $file ]]; then
-    say "$file does not exist; nothing to remove"
-    return 0
-  fi
-  managed_block_well_formed "$file" "$marker" || die "Refusing to rewrite malformed managed block in $file"
-  if ! grep -qF "# >>> leos-profiles ${marker} >>>" "$file"; then
-    say "No leos-profiles $marker block in $file"
-    return 0
-  fi
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would remove the leos-profiles $marker block from $file"
-    return 0
-  fi
-  mode=$(file_mode "$file")
-  tmp=$(mktemp "$(dirname -- "$file")/.$(basename -- "$file").leos-profiles.tmp.XXXXXX")
-  track_temp "$tmp"
-  awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
-    $0 == begin { skip=1; next }
-    $0 == end { skip=0; next }
-    !skip { print }
-  ' "$file" > "$tmp"
-  chmod "$mode" "$tmp"
-  mv -f "$tmp" "$file"
-  say "Removed the leos-profiles $marker block from $file"
-}
-
-remove_managed_blocks() {
-  remove_managed_block "$HOME/.zshrc" loader
-  remove_managed_block "$HOME/.zshenv" environment
-  say "Packages, plugins and credentials are left untouched; remove those manually if wanted."
-}
-
-install_zsh_config() {
-  local zshrc_content zshenv_content
-  zshrc_content=$(zshrc_managed_content)
-  zshenv_content=$(zshenv_managed_content)
-  install_managed_block "$HOME/.zshrc" loader "$zshrc_content"
-  install_managed_block "$HOME/.zshenv" environment "$zshenv_content"
-}
-
-install_credential_prerequisites() {
-  [[ $SSH_MODE == skip && $GPG_MODE == skip ]] && return 0
-  case $OS_FAMILY in
-    macos)
-      ensure_brew
-      run brew install gh
-      [[ $GPG_MODE == skip ]] || run brew install gnupg ;;
-    apt)
-      ensure_sudo
-      run sudo apt-get update
-      run sudo apt-get install -y gh
-      [[ $GPG_MODE == skip ]] || run sudo apt-get install -y gnupg ;;
-    fedora)
-      ensure_sudo
-      run sudo dnf install -y gh
-      [[ $GPG_MODE == skip ]] || run sudo dnf install -y gnupg2 ;;
-    arch)
-      ensure_sudo
-      run sudo pacman -S --needed --noconfirm github-cli
-      [[ $GPG_MODE == skip ]] || run sudo pacman -S --needed --noconfirm gnupg ;;
-  esac
-}
-
-ensure_git_identity() {
-  local existing_name existing_email
-  existing_name=$(git config --global user.name || true)
-  existing_email=$(git config --global user.email || true)
-  if [[ -z $existing_name ]]; then
-    [[ -n $GIT_NAME ]] || die "GPG provisioning needs a Git name; pass --git-name"
-    run git config --global user.name "$GIT_NAME"
-    existing_name=$GIT_NAME
-  fi
-  if [[ -z $existing_email ]]; then
-    [[ -n $GIT_EMAIL ]] || die "GPG provisioning needs a Git email; pass --git-email"
-    run git config --global user.email "$GIT_EMAIL"
-    existing_email=$GIT_EMAIL
-  fi
-  GIT_NAME=$existing_name
-  GIT_EMAIL=$existing_email
-}
-
-ssh_public_material() {
-  awk 'NF >= 2 { print $1 " " $2; exit }' "$1"
-}
-
-github_ssh_key_present() {
-  local public_key=$1 material remote_keys
-  material=$(ssh_public_material "$public_key")
-  [[ -n $material ]] || return 1
-  remote_keys=$(gh api --paginate user/keys --jq '.[].key') \
-    || die "Could not list GitHub SSH keys; refusing to guess (check network and gh auth)"
-  awk 'NF >= 2 { print $1 " " $2 }' <<< "$remote_keys" | grep -qxF "$material"
-}
-
-ensure_github_auth() {
-  gh auth status >/dev/null 2>&1 && return 0
-  gh auth login --hostname github.com --git-protocol https --web
-  gh auth status >/dev/null 2>&1 || die "GitHub CLI authentication did not complete"
-}
-
-verify_github_api() {
-  gh api user --jq '.login' >/dev/null 2>&1 || die "GitHub API authentication/connectivity verification failed"
-}
-
-github_email_is_verified() {
-  local email=$1 verified
-  if ! verified=$(gh api user/emails --jq '.[] | select(.verified == true) | .email' 2>/dev/null); then
-    die "GitHub email verification requires gh scope user:email; let the AI run: gh auth refresh -s user:email"
-  fi
-  grep -qxiF "$email" <<< "$verified"
-}
-
-ensure_github_known_hosts() {
-  local approved scanned verified known_tmp host key_type key material existing
-  approved=$(mktemp)
-  scanned=$(mktemp)
-  verified=$(mktemp)
-  track_temp "$approved"
-  track_temp "$scanned"
-  track_temp "$verified"
-  gh api meta --jq '.ssh_keys[]' > "$approved" || die "Could not obtain GitHub's published SSH host keys"
-  ssh-keyscan -T 15 -t rsa,ecdsa,ed25519 github.com > "$scanned" 2>/dev/null ||
-    die "Could not scan GitHub SSH host keys"
-  # ssh-keyscan output is space-separated; the global IFS ($'\n\t') has no space,
-  # so this read must set a space-splitting IFS or the whole line lands in $host.
-  while IFS=$' \t' read -r host key_type key _; do
-    material="$key_type $key"
-    grep -qxF "$material" "$approved" && printf '%s %s %s\n' "$host" "$key_type" "$key" >> "$verified"
-  done < "$scanned"
-  [[ -s $verified ]] || die "GitHub SSH host keys did not match GitHub's published metadata"
-  mkdir -p "$HOME/.ssh"
-  chmod 700 "$HOME/.ssh"
-  known_tmp=$(mktemp "$HOME/.ssh/.known-hosts.tmp.XXXXXX")
-  track_temp "$known_tmp"
-  if [[ -f $HOME/.ssh/known_hosts ]]; then cp "$HOME/.ssh/known_hosts" "$known_tmp"; fi
-  while IFS=$' \t' read -r host key_type key; do
-    material="$key_type $key"
-    existing=$(awk 'NF >= 3 { print $2 " " $3 }' "$known_tmp")
-    grep -qxF "$material" <<< "$existing" || printf '%s %s %s\n' "$host" "$key_type" "$key" >> "$known_tmp"
-  done < "$verified"
-  chmod 600 "$known_tmp"
-  mv -f "$known_tmp" "$HOME/.ssh/known_hosts"
-}
-
-provision_ssh() {
-  [[ $SSH_MODE == skip ]] && return 0
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would provision SSH mode '$SSH_MODE' and verify GitHub authentication"
-    return 0
-  fi
-  command -v gh >/dev/null 2>&1 || die "SSH provisioning requires gh; install/authenticate it first"
-  ensure_github_auth
-  verify_github_api
-  local key="" existing_generate=0
-  if [[ $SSH_MODE == reuse ]]; then
-    key=$SSH_KEY_PATH
-    [[ -f $key ]] || die "Chosen SSH private key does not exist: $key"
-  else
-    key="$HOME/.ssh/id_ed25519"
-    if [[ -e $key || -e $key.pub ]]; then
-      [[ -f $key && -f $key.pub ]] || die "Refusing a partial existing SSH key pair at $key"
-      existing_generate=1
-      say "Found an existing default SSH key pair; it will be reused only if GitHub already has it"
-    else
-      run mkdir -p "$HOME/.ssh"
-      chmod 700 "$HOME/.ssh"
-      if [[ $SSH_PASSPHRASE_MODE == prompt ]]; then
-        run ssh-keygen -t ed25519 -f "$key"
-      else
-        # The default stays "empty" so an unattended apply cannot block, but say
-        # so plainly: this leaves usable private key material on disk, and it is
-        # about to be registered with GitHub. Re-run with --ssh-passphrase prompt
-        # to encrypt it instead.
-        warn "Generating $key WITHOUT a passphrase (--ssh-passphrase empty). Anyone who can read the file can use the key."
-        run ssh-keygen -t ed25519 -f "$key" -N "" -q
-      fi
-    fi
-  fi
-  local derived_public
-  derived_public=$(mktemp)
-  track_temp "$derived_public"
-  ssh-keygen -y -f "$key" > "$derived_public"
-  if [[ ! -f "$key.pub" ]]; then
-    mv -f "$derived_public" "$key.pub"
-    chmod 644 "$key.pub"
-    derived_public=""
-  elif [[ $(ssh_public_material "$derived_public") != "$(ssh_public_material "$key.pub")" ]]; then
-    rm -f "$derived_public"
-    die "Existing public key does not match the selected private key: $key.pub"
-  fi
-  [[ -z $derived_public ]] || rm -f "$derived_public"
-  local title
-  title="leos-profiles-$(hostname)-$(date +%Y%m%d)"
-  local key_present=0
-  github_ssh_key_present "$key.pub" && key_present=1
-  if (( existing_generate && ! key_present )); then
-    die "The existing default SSH key is not on GitHub; use --ssh reuse --ssh-key $key to select it explicitly"
-  fi
-  # Persist an explicitly reused or newly generated reference before remote
-  # upload/testing. A retry then repairs this key without replacing it.
-  SSH_KEY_PATH=$key
-  SSH_MODE=reuse
-  write_profile
-  if (( ! key_present )); then
-    gh ssh-key add "$key.pub" --title "$title" || die "GitHub rejected SSH-key upload"
-  fi
-  ensure_github_known_hosts
-  local ssh_output
-  ssh_output=$(ssh -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
-  grep -q 'successfully authenticated' <<< "$ssh_output" || die "SSH key upload did not produce GitHub authentication"
-  gh config set git_protocol ssh --host github.com
-}
-
-gpg_secret_fingerprint() {
-  gpg --batch --with-colons --list-secret-keys "$1" 2>/dev/null | awk -F: '/^fpr:/{print $10; exit}'
-}
-
-gpg_key_has_email() {
-  local fingerprint=$1 email=$2
-  gpg --batch --with-colons --list-keys "$fingerprint" 2>/dev/null | awk -F: -v email="<$email>" '
-    BEGIN { email=tolower(email) }
-    /^uid:/ && index(tolower($10), email) { found=1 }
-    END { exit !found }
-  '
-}
-
-github_gpg_key_present() {
-  local fingerprint=$1 remote_ids
-  remote_ids=$(gh api --paginate user/gpg_keys --jq '.[].key_id') \
-    || die "Could not list GitHub GPG keys; refusing to guess (check network and gh auth)"
-  awk -v fingerprint="$fingerprint" '
-    BEGIN { fingerprint=toupper(fingerprint) }
-    {
-      remote=toupper($0)
-      if (length(remote) <= length(fingerprint) &&
-          substr(fingerprint, length(fingerprint) - length(remote) + 1) == remote) found=1
-    }
-    END { exit !found }
-  ' <<< "$remote_ids"
-}
-
-provision_gpg() {
-  [[ $GPG_MODE == skip ]] && return 0
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would provision GPG mode '$GPG_MODE', configure Git signing, upload the public key, and sign a verification commit"
-    return 0
-  fi
-  command -v gpg >/dev/null 2>&1 || die "GPG provisioning requires gpg; install it first"
-  command -v gh >/dev/null 2>&1 || die "GPG provisioning requires gh; install/authenticate it first"
-  ensure_github_auth
-  verify_github_api
-  ensure_git_identity
-  local name email keyid="" candidate creation_output exported_key
-  name=$(git config --global user.name || true)
-  email=$(git config --global user.email || true)
-  [[ -n $name && -n $email ]] || die "Set global git user.name and user.email before GPG provisioning"
-  github_email_is_verified "$email" || die "Git email is not verified on the authenticated GitHub account: $email"
-  if [[ $GPG_MODE == reuse ]]; then
-    keyid=$(gpg_secret_fingerprint "$GPG_KEY_ID")
-    [[ -n $keyid ]] || die "The selected GPG secret key was not found: $GPG_KEY_ID"
-  else
-    while IFS= read -r candidate; do
-      if [[ -n $candidate ]] && github_gpg_key_present "$candidate"; then
-        keyid=$candidate
-        say "Reusing an already-provisioned GPG key for $email: $keyid"
-        break
-      fi
-    done < <(gpg --batch --with-colons --list-secret-keys "<$email>" 2>/dev/null | \
-      awk -F: '/^sec:/{want=1; next} want && /^fpr:/{print $10; want=0}')
-    if [[ -z $keyid ]]; then
-      if [[ $GPG_PASSPHRASE_MODE == prompt ]]; then
-        creation_output=$(gpg --status-fd 1 --quick-generate-key "$name <$email>" ed25519 sign never)
-      else
-        # See the SSH note above: default kept for unattended runs, but warn that
-        # the signing key is unprotected. --gpg-passphrase prompt encrypts it.
-        warn "Creating a GPG signing key WITHOUT a passphrase (--gpg-passphrase empty). Anyone who can read your keyring can sign as you."
-        creation_output=$(gpg --batch --status-fd 1 --pinentry-mode loopback --passphrase '' --quick-generate-key "$name <$email>" ed25519 sign never)
-      fi
-      keyid=$(awk '$2 == "KEY_CREATED" {print $4; exit}' <<< "$creation_output")
-    fi
-  fi
-  [[ -n $keyid ]] || die "No matching GPG secret key found"
-  gpg_key_has_email "$keyid" "$email" || die "Selected GPG key has no user ID for the Git email $email"
-  # Save the fingerprint before signing/upload verification so a partial
-  # failure retries this exact key instead of creating another one.
-  GPG_KEY_ID=$keyid
-  GPG_MODE=reuse
-  write_profile
-  local temp_repo
-  temp_repo=$(mktemp -d)
-  track_temp "$temp_repo"
-  git -C "$temp_repo" init -q
-  git -C "$temp_repo" config user.name "$name"
-  git -C "$temp_repo" config user.email "$email"
-  git -C "$temp_repo" config gpg.format openpgp
-  git -C "$temp_repo" config user.signingkey "$keyid"
-  git -C "$temp_repo" config commit.gpgsign true
-  if ! git -C "$temp_repo" commit --allow-empty -S -m 'Verify Leo profiles signing setup' >/dev/null; then
-    rm -rf "$temp_repo"
-    die "GPG key cannot sign a Git commit"
-  fi
-  rm -rf "$temp_repo"
-  if ! github_gpg_key_present "$keyid"; then
-    exported_key=$(mktemp)
-    track_temp "$exported_key"
-    gpg --armor --export "$keyid" > "$exported_key"
-    if ! gh gpg-key add "$exported_key"; then
-      rm -f "$exported_key"
-      die "GitHub rejected GPG-key upload"
-    fi
-    rm -f "$exported_key"
-  fi
-  git config --global user.signingkey "$keyid"
-  git config --global gpg.format openpgp
-  git config --global commit.gpgsign true
-}
-
-current_login_shell() {
-  local current_shell
-  current_shell=$(getent passwd "$USER" 2>/dev/null | awk -F: '{print $7}' || true)
-  [[ -n $current_shell ]] || current_shell=$(dscl . -read /Users/"$USER" UserShell 2>/dev/null | awk '{print $2}' || true)
-  printf '%s\n' "$current_shell"
-}
-
-set_default_shell() {
-  [[ $CHANGE_DEFAULT_SHELL == no ]] && { say "Skipping default shell (--default-shell no)"; return 0; }
-  local zsh_path
-  zsh_path=$(command -v zsh || true)
-  if [[ -z $zsh_path && $DRY_RUN -eq 1 ]]; then
-    say "Would configure the zsh path installed by the package step as the login shell"
-    return 0
-  fi
-  [[ -n $zsh_path ]] || die "zsh is not installed"
-  if [[ $CHANGE_DEFAULT_SHELL == auto ]]; then
-    local current_shell
-    current_shell=$(current_login_shell)
-    [[ ${current_shell##*/} == zsh ]] && { say "Default shell is already zsh"; return 0; }
-  fi
-  # Identical on both families, so it is hoisted above the branch. The path is
-  # passed as an argument rather than interpolated into the program text: this is
-  # the one place that would otherwise regress from the argv-safe `run` used
-  # everywhere else, and string-built commands are invisible to shellcheck.
-  if ! grep -qxF "$zsh_path" /etc/shells; then
-    # "$1" is expanded by the inner bash, not here — that is the whole point.
-    # shellcheck disable=SC2016
-    run_shell "Add $zsh_path to /etc/shells" \
-      'printf "%s\n" "$1" | sudo tee -a /etc/shells >/dev/null' "$zsh_path"
-  fi
-  if [[ $OS_FAMILY == macos ]]; then
-    run sudo chsh -s "$zsh_path" "$USER"
-  else
-    run chsh -s "$zsh_path"
-  fi
-}
-
-git_checkout_at() {
-  local directory=$1 repository=$2 commit=$3 origin
-  [[ -d $directory/.git ]] || return 1
-  origin=$(git -C "$directory" remote get-url origin 2>/dev/null || true)
-  github_origins_equivalent "$origin" "$repository" || return 1
-  [[ -z $(git -C "$directory" status --porcelain) ]] || return 1
-  [[ $(git -C "$directory" rev-parse HEAD 2>/dev/null || true) == "$commit" ]]
-}
-
-font_is_installed() {
-  local font=${FONT_NAME:-JetBrainsMono} installed_family directory
-  if [[ $OS_FAMILY == macos ]]; then
-    directory="$HOME/Library/Fonts"
-  else
-    directory="$HOME/.local/share/fonts"
-  fi
-  [[ -d $directory ]] || return 1
-  # Nerd Fonts renames families whose upstream names are reserved. These
-  # aliases match the filenames in the pinned nerd-fonts commit. Keep the
-  # check family-specific: another installed Nerd Font must not satisfy the
-  # requested family's postcondition.
-  case $font in
-    AnonymousPro) installed_family=AnonymicePro ;;
-    AurulentSansMono) installed_family=AurulentSansM ;;
-    BigBlueTerminal) installed_family=BigBlueTerm ;;
-    BitstreamVeraSansMono) installed_family=BitstromWera ;;
-    CascadiaCode) installed_family=CaskaydiaCove ;;
-    DejaVuSansMono) installed_family=DejaVuSansM ;;
-    DroidSansMono) installed_family=DroidSansM ;;
-    FantasqueSansMono) installed_family=FantasqueSansM ;;
-    Go-Mono) installed_family=GoMono ;;
-    Hasklig) installed_family=Hasklug ;;
-    Hermit) installed_family=Hurmit ;;
-    IBMPlexMono) installed_family=BlexMono ;;
-    LiberationMono) installed_family=LiterationMono ;;
-    MPlus) installed_family='M+' ;;
-    NerdFontsSymbolsOnly) installed_family=Symbols ;;
-    ShareTechMono) installed_family=ShureTechMono ;;
-    SourceCodePro) installed_family=SauceCodePro ;;
-    Terminus) installed_family=Terminess ;;
-    iA-Writer) installed_family=iMWriting ;;
-    *) installed_family=$font ;;
-  esac
-  find "$directory" -type f -iname "*${installed_family}*NerdFont*" -print -quit | grep -q .
-}
-
-verify_step() {
-  local step=$1 directory
-  case $step in
-    bins)
-      [[ -x $HOME/.local/bin/rpatool ]] && [[ $(sha256 "$HOME/.local/bin/rpatool") == "$RPATOOL_SHA256" ]] ;;
-    packages) selected_packages_installed ;;
-    pyenv)
-      [[ -x $HOME/.pyenv/bin/pyenv ]] && git_checkout_at "$HOME/.pyenv" "$PYENV_REPOSITORY" "$PYENV_COMMIT" ;;
-    rbenv)
-      [[ -x $HOME/.rbenv/bin/rbenv ]] &&
-        git_checkout_at "$HOME/.rbenv" "$RBENV_REPOSITORY" "$RBENV_COMMIT" &&
-        git_checkout_at "$HOME/.rbenv/plugins/ruby-build" "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT" ;;
-    bun)
-      [[ -x $HOME/.local/bin/bun ]] && "$HOME/.local/bin/bun" --version 2>/dev/null | grep -qx "$BUN_VERSION" ;;
-    yarn)
-      [[ -x $HOME/.local/npm/bin/yarn ]] && "$HOME/.local/npm/bin/yarn" --version 2>/dev/null | grep -qx "$YARN_VERSION" ;;
-    pnpm)
-      [[ -x $HOME/.local/npm/bin/pnpm ]] && "$HOME/.local/npm/bin/pnpm" --version 2>/dev/null | grep -qx "$PNPM_VERSION" ;;
-    fnm)
-      [[ -n $RESOLVED_NODE_VERSION ]] || resolve_node_lts || return 1
-      [[ -x $HOME/.local/bin/fnm ]] &&
-        "$HOME/.local/bin/fnm" --version 2>/dev/null | grep -qx "fnm $FNM_VERSION" &&
-        [[ $("$HOME/.local/bin/fnm" default 2>/dev/null) == "$RESOLVED_NODE_VERSION" ]] &&
-        [[ $("$HOME/.local/bin/fnm" exec --using="$RESOLVED_NODE_VERSION" -- node --version 2>/dev/null) == "$RESOLVED_NODE_VERSION" ]] ;;
-    plugins)
-      [[ -x $HOME/.local/bin/starship ]] &&
-        "$HOME/.local/bin/starship" --version 2>/dev/null | sed -n '1p' | grep -qx "starship $STARSHIP_VERSION" &&
-        directory="$TARGET/zsh/plugins" &&
-        git_checkout_at "$directory/zsh-autosuggestions" "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT" &&
-        git_checkout_at "$directory/zsh-syntax-highlighting" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT" &&
-        git_checkout_at "$directory/zsh-completions" "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT" &&
-        git_checkout_at "$directory/fzf-tab" "$FZF_TAB_REPOSITORY" "$FZF_TAB_COMMIT" ;;
-    fonts)
-      ! font_should_install || font_is_installed ;;
-    zsh-config)
-      managed_block_equals "$HOME/.zshrc" loader "$(zshrc_managed_content)" &&
-        managed_block_equals "$HOME/.zshenv" environment "$(zshenv_managed_content)" ;;
-    default-shell)
-      if [[ $CHANGE_DEFAULT_SHELL == no ]]; then
-        return 0
-      elif [[ $CHANGE_DEFAULT_SHELL == auto ]]; then
-        local current_shell
-        current_shell=$(current_login_shell)
-        [[ ${current_shell##*/} == zsh ]]
-      else
-        [[ $(current_login_shell) == "$(command -v zsh)" ]]
-      fi ;;
-    *) return 1 ;;
-  esac
-}
+# shellcheck source=installer/signatures.sh
+source "$SCRIPT_DIR/installer/signatures.sh"
 
 run_step() {
   local step=$1 force_rerun=0
@@ -1565,21 +341,9 @@ run_step() {
     warn "$step was recorded complete but failed verification; repairing it"
   fi
   say "Running $step"
-  case $step in
-    bins) install_local_bins ;;
-    packages) install_os_packages ;;
-    pyenv) install_pyenv ;;
-    rbenv) install_rbenv ;;
-    bun) install_bun ;;
-    yarn) install_yarn ;;
-    pnpm) install_pnpm ;;
-    fnm) install_fnm ;;
-    plugins) install_starship; install_plugins ;;
-    fonts) install_fonts ;;
-    zsh-config) install_zsh_config ;;
-    default-shell) set_default_shell ;;
-    *) die "Unknown step: $step" ;;
-  esac
+  local handler
+  handler=$(component_handler "$step" install)
+  "$handler"
   [[ $DRY_RUN -eq 1 ]] || verify_step "$step" || die "$step did not pass post-install verification"
   mark_done "$step"
 }
@@ -1592,6 +356,8 @@ inspect_tsv() {
   printf 'policy\tfull-upgrade\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf yes || printf no)"
   printf 'channel\tpackages\t%s\n' "$PACKAGE_CHANNEL"
   printf 'channel\tnode\t%s\n' "$NODE_CHANNEL"
+  printf 'policy\tnode\t%s\n' "$NODE_POLICY"
+  report_profile_migration
   printf 'channel\tai-cli-updates\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
   printf 'group\tinternal\tbootstrap\tselected\n'
   local canonical="$CANONICAL_STEPS"
@@ -1631,13 +397,13 @@ inspect_tsv() {
     fi
   fi
   if [[ $SSH_MODE != skip ]]; then
-    printf 'action\tssh\tverify or provision explicit key and GitHub upload\n'
-    printf 'external\tgithub\tSSH public-key upload and Git protocol setting\n'
+    printf 'action\tssh\tprepare explicit local key and verify manual GitHub registration\n'
+    printf 'external\tgithub\tmanual SSH public-key registration and guided SSH/Git protocol configuration\n'
     printf 'file\tssh-known-hosts\t~/.ssh/known_hosts\n'
   fi
   if [[ $GPG_MODE != skip ]]; then
-    printf 'action\tgpg\tverify GitHub email, configure commit signing, and upload public key\n'
-    printf 'external\tgithub\tverified-email query and GPG public-key upload\n'
+    printf 'action\tgpg\tverify GitHub email, manual public-key registration, and configure commit signing\n'
+    printf 'external\tgithub\tverified-email query and manual GPG public-key registration\n'
   fi
   if has_csv_item "$SELECTED_STEPS" zsh-config; then printf 'action\tzsh-config\tmanaged blocks in ~/.zshrc and ~/.zshenv\n'; fi
   if has_csv_item "$SELECTED_STEPS" default-shell; then printf 'action\tdefault-shell\t%s\n' "$CHANGE_DEFAULT_SHELL"; fi
@@ -1675,7 +441,9 @@ inspect_tsv() {
     printf 'artifact\tgit\tnerd-fonts\t%s\t%s\n' "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT"
   fi
   if has_csv_item "$SELECTED_STEPS" fnm; then
-    if resolve_node_lts; then printf 'moving\tnode-lts\t%s\n' "$RESOLVED_NODE_VERSION"; else printf 'moving\tnode-lts\tresolve-during-apply\n'; fi
+    if resolve_node_version; then
+      printf 'runtime\tnode\t%s\t%s\n' "$RESOLVED_NODE_VERSION" "$NODE_SELECTION"
+    else printf 'runtime\tnode\tunresolved\tresolve-during-apply\n'; fi
   fi
   old_ifs=$IFS
   IFS=,
@@ -1687,6 +455,7 @@ inspect_tsv() {
 }
 
 main() {
+  validate_component_registry
   parse_args "$@"
   trap cleanup EXIT
   trap 'exit 130' INT
@@ -1710,7 +479,10 @@ main() {
     return 0
   fi
   [[ $ASSUME_YES -eq 1 ]] || die "Apply/reconcile requires --yes after the AI-presented plan is approved"
+  # Capture the existing runtime before any bootstrap/package changes.
+  if has_csv_item "$SELECTED_STEPS" fnm; then select_existing_node || true; fi
   acquire_lock
+  report_profile_migration
   migrate_local_state
   if [[ $COMMAND == apply ]]; then
     if [[ $FULL_UPGRADE -eq 1 ]]; then SAVED_FULL_UPGRADE=yes; else SAVED_FULL_UPGRADE=no; fi
@@ -1718,8 +490,8 @@ main() {
   fi
   bootstrap_tools
   if has_csv_item "$SELECTED_STEPS" fnm && [[ $DRY_RUN -eq 0 ]]; then
-    resolve_node_lts || die "Could not resolve the current Node LTS"
-    say "Resolved Node current LTS for this run: $RESOLVED_NODE_VERSION"
+    resolve_node_version || die "Could not select a compatible Node version or resolve current LTS"
+    say "Selected Node $RESOLVED_NODE_VERSION ($NODE_SELECTION)"
   fi
   install_credential_prerequisites
   provision_ssh

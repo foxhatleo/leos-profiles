@@ -1,10 +1,30 @@
 #!/usr/bin/env zsh
 
+# Re-exec before loading fixtures so inherited tool roots, XDG paths, function
+# exports and private shell configuration cannot reach the test process.
+if [[ ${1:-} != --isolated ]]; then
+  exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL=/bin/zsh \
+    "${commands[zsh]:-/bin/zsh}" -df "$0" --isolated
+fi
+
 emulate -L zsh
 setopt err_return no_unset pipe_fail
 
-root=${0:A:h:h}
+source_root=${0:A:h:h}
 tmp=$(mktemp -d)
+export HOME=$tmp
+root=$tmp/runtime
+mkdir -p "$root/zsh" "$root/util" "$root/local/flags"
+cp "$source_root"/zsh/*.zsh "$source_root"/zsh/*.toml "$root/zsh/"
+cp -R "$source_root/zsh/path" "$root/zsh/path"
+# Include the actual installed plugin code, but never the repository's private
+# overrides. Plugin availability remains optional for clean-checkout testing.
+[[ ! -d $source_root/zsh/plugins ]] || cp -R "$source_root/zsh/plugins" "$root/zsh/plugins"
+cp "$source_root/util/rmdsstore.py" "$root/util/"
+# Rehash is an asynchronous maintenance side effect, not part of these profile
+# assertions. Disable it in the temporary fixture so no detached writer can
+# outlive the shell or race removal of its HOME.
+print -r -- '__leos_rehash_daily() { :; }' >> "$root/zsh/cache.zsh"
 trap 'rm -rf "$tmp"' EXIT
 fail() { print -u2 -r -- "FAIL: $*"; exit 1; }
 
@@ -20,7 +40,24 @@ chmod +x "$tmp/fakebin/starship"
 # (Homebrew) copy would otherwise decide the branch — and could really be upgraded.
 print -rl -- '#!/bin/sh' 'printf "%s\n" "opencode $*" >> "$AI_LOG"' > "$tmp/fakebin/opencode"
 chmod +x "$tmp/fakebin/opencode"
-fakepath="$tmp/fakebin:$PATH"
+# Shadow tools that may exist even in /usr/bin on Linux; no generator or rehash
+# in this suite is allowed to invoke a developer's installed version manager.
+for tool in pyenv rbenv fnm direnv zoxide npm pnpm bun heroku; do
+  print -rl -- '#!/bin/sh' 'printf ":\\n"' > "$tmp/fakebin/$tool"
+  chmod +x "$tmp/fakebin/$tool"
+done
+print -rl -- '#!/bin/sh' 'case "$1" in' \
+  ' shellenv) printf "export HOMEBREW_PREFIX=%s\\n" "$HOME/fake-brew" ;;' \
+  ' --prefix) printf "%s\\n" "$HOME/fake-brew" ;;' \
+  ' *) exit 91 ;;' 'esac' > "$tmp/fakebin/brew"
+chmod +x "$tmp/fakebin/brew"
+# thefuck must be absent except where a test supplies its own implementation.
+print -rl -- '#!/bin/sh' 'exit 1' > "$tmp/fakebin/thefuck"
+chmod +x "$tmp/fakebin/thefuck"
+# Make the system Zsh reachable on platforms where it is outside /usr/bin.
+ln -s "${commands[zsh]:-/bin/zsh}" "$tmp/fakebin/zsh"
+fakepath="$tmp/fakebin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH=$fakepath
 
 HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" \
   zsh -dfc '
@@ -351,7 +388,7 @@ done
 # brew-china-enable snapshots three HOMEBREW_* vars and must restore them exactly
 # when `brew update` fails — including restoring "was not set" as unset, not "".
 # This needs a real brew on disk, not a shell function: brew.zsh resolves
-# __leos_brew_bin and sources the shellenv output through the init cache.
+# __leos_brew_bin and evaluates shellenv output directly.
 mkdir -p "$tmp/brewhome/bin"
 print -rl -- '#!/bin/sh' 'case "$1" in' \
   '  shellenv) printf "%s\\n" "export HOMEBREW_PREFIX=/fake/brew" ;;' \

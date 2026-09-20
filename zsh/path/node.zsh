@@ -37,7 +37,10 @@ leos-node-completions() {
     case $tool in
       npm)  leos-source-cached npm-completion  $commands[npm]  completion     || status_=$? ;;
       pnpm) leos-source-cached pnpm-completion $commands[pnpm] completion zsh || status_=$? ;;
-      bun)  leos-source-cached bun-completion  $commands[bun]  completions    || status_=$? ;;
+      # Bun chooses its output dialect from SHELL, not the actual interpreter.
+      # A Zsh launched from Bash/Fish must still receive Zsh code. Bump the key
+      # so an older wrong-dialect cache is never reused.
+      bun)  SHELL=zsh leos-source-cached bun-completion-zsh $commands[bun] completions || status_=$? ;;
     esac
     # Only status 1 is a fresh failure; 2 means it was already reported on an
     # earlier shell, and repeating it every startup would just be noise.

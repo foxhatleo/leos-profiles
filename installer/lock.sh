@@ -54,6 +54,9 @@ readonly FNM_LINUX_AARCH64_SHA256="4eaff58b2c5bf30d0934027572dd0b5bbb60d2a1af309
 readonly YARN_VERSION="1.22.22"
 readonly YARN_URL="https://registry.npmjs.org/yarn/-/yarn-1.22.22.tgz"
 readonly YARN_SHA256="c17d3797fb9a9115bf375e31bfd30058cac6bc9c3b8807a3d8cb2094794b51ca"
+# Engine ranges copied from the pinned package manifests; artifact CI verifies them.
+readonly YARN_NODE_ENGINE=">=4.0.0"
+readonly PNPM_NODE_ENGINE=">=22.13"
 readonly PNPM_VERSION="11.11.0"
 readonly PNPM_URL="https://registry.npmjs.org/pnpm/-/pnpm-11.11.0.tgz"
 readonly PNPM_SHA256="85ef2eff216a1ae90804c00c8dfbfa6685353644650d10906a893c05aedcd884"

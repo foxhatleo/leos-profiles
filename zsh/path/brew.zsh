@@ -2,10 +2,14 @@
 
 if __leos_brew_bin_path=$(__leos_brew_bin); then
   add-path "${__leos_brew_bin_path:h}"
-  # `brew shellenv` costs ~20ms per shell for deterministic output; cache it.
-  # Its embedded path_helper call still runs at source time, as it must.
-  leos-source-cached-warn "brew shellenv produced no output; Homebrew paths may be missing." \
-    brew-shellenv "$__leos_brew_bin_path" shellenv
+  # shellenv may legitimately emit nothing when PATH is already configured.
+  # Its result depends on this process, so do not cache it or a failure marker.
+  if __leos_brew_env=$("$__leos_brew_bin_path" shellenv zsh); then
+    eval "$__leos_brew_env"
+  else
+    puts-err "brew shellenv failed; Homebrew paths may be missing."
+  fi
+  unset __leos_brew_env
 
   # Single definition of the mirror endpoints, used both by the startup block
   # below and by brew-china-enable, so the two cannot drift apart.
@@ -21,8 +25,8 @@ if __leos_brew_bin_path=$(__leos_brew_bin); then
 
   brew-checkup() {
     brew update && brew upgrade && brew upgrade --cask && brew cleanup -s || return 1
-    # A brew upgrade can rewrite a tool's init logic (brew's own shellenv.sh,
-    # starship, direnv, zoxide) without touching the launcher the init cache is
+    # A brew upgrade can rewrite a tool's init logic (for example pyenv-init)
+    # without touching the launcher the init cache is
     # keyed on, so drop the cache here rather than leaving a stale copy behind.
     (( $+functions[leos-refresh-init-cache] )) && leos-refresh-init-cache
     return 0

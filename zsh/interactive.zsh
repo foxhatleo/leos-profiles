@@ -94,8 +94,8 @@ if (( $+functions[compdef] )); then
   (( $+functions[leos-node-completions] )) && leos-node-completions
 fi
 
-# Syntax highlighting must be the final interactive plugin action, after
-# completion definitions and prompt widget setup.
+# Syntax highlighting is the final plugin, after completion definitions.
+# Prompt initialization and private interactive overrides follow below.
 _leos_plugin zsh-syntax-highlighting/zsh-syntax-highlighting.zsh   # MUST be last
 
 # Starship prompt. The built-in fallback is used whenever Starship cannot drive

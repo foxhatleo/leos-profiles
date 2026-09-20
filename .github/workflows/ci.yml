@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
   schedule:
     - cron: "23 8 * * 1"
 
@@ -22,7 +23,7 @@ jobs:
       - name: Syntax-check zsh files
         run: |
           rc=0
-          for f in zsh/*.zsh zsh/path/*.zsh; do
+          for f in zsh/*.zsh zsh/path/*.zsh tests/*.zsh; do
             zsh -n "$f" || { echo "syntax error: $f"; rc=1; }
           done
           exit "$rc"
@@ -46,10 +47,21 @@ jobs:
         run: python3 tests/rmdsstore_test.py
       - name: Test deterministic installer logic
         run: bash tests/install-test.sh
+      - name: Test credential workflows without external mutations
+        run: bash tests/credentials-test.sh
+      - name: Test Node dependency and activation logic
+        run: bash tests/node-test.sh
+      - name: Test runtime cache and completion integration
+        run: zsh tests/runtime-cache-test.zsh
       - name: Verify locked Linux artifacts and digests
         run: bash tests/locked-artifacts-test.sh
       - name: Lint deterministic installer
-        run: shellcheck -s bash -x install.sh installer/lock.sh tests/*.sh
+        run: shellcheck -s bash -x install.sh installer/*.sh tests/*.sh
+      - name: Syntax-check installer modules and shell tests
+        run: |
+          for script in install.sh installer/*.sh tests/*.sh; do
+            bash -n "$script"
+          done
       - name: Validate starship TOML
         run: python3 -c "import tomllib; tomllib.load(open('zsh/starship.toml','rb')); tomllib.load(open('zsh/starship-plain.toml','rb'))"
       - name: Syntax-check the installer's fenced bash blocks
@@ -169,5 +181,46 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Install completion verification dependency
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - name: Verify every locked Linux arm64 binary and digest
         run: bash tests/locked-artifacts-test.sh
+
+  provision-linux:
+    name: Real provisioning / ${{ matrix.image }} / ${{ matrix.runner }} (gating)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'ubuntu:26.04', 'debian:12', 'debian:13', 'fedora:43', 'fedora:44']
+        include:
+          - runner: ubuntu-24.04
+            image: archlinux:latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Provision a fresh user in a disposable native-architecture container
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          # No emulation and no privileged container: each runner pulls its
+          # native image architecture. The source checkout stays read-only.
+          docker run --rm --init -e GITHUB_ACTIONS=true \
+            -v "$PWD:/repo:ro" "$IMAGE" \
+            bash /repo/tests/provisioning-container.sh
+
+  provision-macos:
+    name: Real provisioning / ${{ matrix.runner }} (gating)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15, macos-15-intel, macos-26, macos-26-intel]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Provision a fresh HOME on the existing hosted macOS image
+        # Hosted images already contain Homebrew and other tools. This exercises
+        # real installations/upgrades, not a factory-fresh macOS bootstrap.
+        run: bash tests/provisioning-test.sh

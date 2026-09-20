@@ -40,7 +40,7 @@ if [[ -r $LEOS_PROFILES/local/private.zsh ]]; then
   # and the installer already enforces 600 on every apply.
   #
   # Checked inside an anonymous function so EXTENDED_GLOB — needed for the
-  # (#q...) qualifiers, and normally set by env.zsh, which has not run yet —
+  # (#q...) qualifiers, and normally set by env.zsh —
   # stays local, and so the `source` below still sees the ambient option set
   # that a machine-specific override may depend on.
   () {

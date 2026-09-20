@@ -2,7 +2,8 @@
 *.bak
 .omc/
 .ai/
-docs/
+docs/*
+!docs/development.md
 ssh-shortcuts.zsh
 zsh/_private.zsh
 zsh/plugins/

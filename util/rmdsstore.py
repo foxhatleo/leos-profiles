@@ -9,6 +9,8 @@ paths, which stay unreadable even under sudo) are skipped rather than counted as
 failures, so a clean sweep still exits 0; a metadata file that is found but
 cannot be deleted still counts as a failure.  Use --dry-run to inspect scope
 before deleting anything.
+Linux mount boundaries include same-device bind mounts from /proc/self/mountinfo;
+if that table cannot be read, scanning fails closed before deleting anything.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import argparse
 import errno
 import os
 import re
-import shutil
+import stat
 import sys
 from dataclasses import dataclass
 
@@ -68,17 +70,47 @@ def progress(path: str, root: str, prompt: str = "Scanning: {}...", newline: boo
     sys.stdout.flush()
 
 
-def remove_path(path: str, root: str, dry_run: bool, result: Result, is_dir: bool) -> None:
+def _linux_mount_points() -> set[str]:
+    """Read this process's mount namespace, including same-device bind mounts."""
+    if not sys.platform.startswith("linux"):
+        return set()
+    mount_points = set()
+    with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as table:
+        for line in table:
+            fields = line.split()
+            if len(fields) < 10 or "-" not in fields[6:]:
+                raise OSError(errno.EINVAL, "Malformed Linux mount table", "/proc/self/mountinfo")
+            # mountinfo escapes whitespace and backslashes as octal sequences.
+            # Decode once: a literal '\\040' is encoded '\\134040', not a space.
+            decoded = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4])
+            mount_points.add(os.path.normpath(decoded))
+    if not mount_points:
+        raise OSError(errno.EINVAL, "Empty Linux mount table", "/proc/self/mountinfo")
+    return mount_points
+
+
+def _is_mount_boundary(path: str, mount_points: set[str]) -> bool:
+    # A link to a mount is still a link, not another filesystem to traverse.
+    return not os.path.islink(path) and (
+        os.path.ismount(path) or os.path.realpath(path) in mount_points
+    )
+
+
+def remove_path(
+    path: str, root: str, dry_run: bool, result: Result, is_dir: bool,
+    mount_points: set[str] | None = None,
+) -> None:
+    if is_dir:
+        _, removed = _purge_tree(path, root, dry_run, result, mount_points)
+        result.removed += removed
+        return
     verb = "Would remove" if dry_run else "Removing"
     progress(path, root, prompt=f"{verb} {{}}...", newline=True)
     if dry_run:
         result.removed += 1
         return
     try:
-        if is_dir and not os.path.islink(path):
-            shutil.rmtree(path)
-        else:
-            os.remove(path)
+        os.remove(path)
         result.removed += 1
     except OSError as error:
         # A metadata file we found but cannot delete (permission, immutable flag,
@@ -88,6 +120,137 @@ def remove_path(path: str, root: str, dry_run: bool, result: Result, is_dir: boo
         result.failures += 1
         detail = str(error).replace("{", "{{").replace("}", "}}")
         progress(path, root, prompt=f"Could not remove ({{}}): {detail}", newline=True)
+
+
+# Check capabilities once: unsupported platforms fail closed rather than falling
+# back to path-based recursive deletion. Python 3.9+ on macOS/Linux provides
+# these APIs. Keeping the check separate also lets tests simulate unavailable
+# descriptor support without executing an unsafe fallback.
+_FD_PURGE_SUPPORTED = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and all(fn in os.supports_dir_fd for fn in (os.open, os.stat, os.unlink, os.rmdir))
+    and os.scandir in os.supports_fd
+    and os.stat in os.supports_follow_symlinks
+)
+
+
+def _same_entry(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino, left.st_mode) == (right.st_dev, right.st_ino, right.st_mode)
+
+
+def _require_same_entry(observed: os.stat_result, current: os.stat_result, path: str) -> None:
+    if not _same_entry(observed, current):
+        raise OSError(errno.ESTALE, "Entry changed during recycle-bin purge", path)
+
+
+def _open_purge_directory(name: str, parent_fd: int | None, observed: os.stat_result, path: str) -> int:
+    descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        _require_same_entry(observed, os.fstat(descriptor), path)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _purge_error(path: str, root: str, result: Result, error: OSError) -> None:
+    result.failures += 1
+    detail = str(error).replace("{", "{{").replace("}", "}}")
+    progress(path, root, prompt=f"Could not remove ({{}}): {detail}", newline=True)
+
+
+def _purge_mount(path: str, root: str, result: Result) -> None:
+    result.skipped_mounts += 1
+    progress(path, root, prompt="Skipping mounted filesystem {}...", newline=True)
+
+
+def _purge_tree(
+    path: str, root: str, dry_run: bool, result: Result, mount_points: set[str] | None = None,
+) -> tuple[bool, int]:
+    """Anchor the purge to the selected root, opening each parent without links."""
+    parent_fd = None
+    try:
+        if not _FD_PURGE_SUPPORTED:
+            raise OSError(errno.ENOTSUP, "Safe descriptor-relative recycle purge is unavailable", path)
+        if mount_points is None:
+            mount_points = _linux_mount_points()
+        relative = os.path.relpath(path, root)
+        parts = relative.split(os.sep)
+        if relative == "." or ".." in parts:
+            raise OSError(errno.EINVAL, "Recycle bin must be below the scan root", path)
+        observed = os.stat(root, follow_symlinks=False)
+        parent_fd = _open_purge_directory(root, None, observed, root)
+        display = root
+        for name in parts[:-1]:
+            display = os.path.join(display, name)
+            observed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if observed.st_dev != os.fstat(parent_fd).st_dev or _is_mount_boundary(display, mount_points):
+                _purge_mount(display, root, result)
+                return False, 0
+            next_fd = _open_purge_directory(name, parent_fd, observed, display)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        observed = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        return _purge_entry(parts[-1], parent_fd, observed, path, root, dry_run, result, mount_points)
+    except OSError as error:
+        _purge_error(path, root, result, error)
+        return False, 0
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _purge_entry(
+    name: str, parent_fd: int, observed: os.stat_result, path: str,
+    root: str, dry_run: bool, result: Result, mount_points: set[str],
+) -> tuple[bool, int]:
+    """Purge an anchored entry without following a raced directory replacement.
+
+    A fully removed subtree counts once; a partial purge counts its fully
+    removed child subtrees. Dry runs use the identical traversal and accounting.
+    Full paths are for display/mount checks only, never traversal or deletion.
+    """
+    removed = 0
+    directory_fd = None
+    try:
+        _require_same_entry(observed, os.stat(name, dir_fd=parent_fd, follow_symlinks=False), path)
+        if observed.st_dev != os.fstat(parent_fd).st_dev or _is_mount_boundary(path, mount_points):
+            _purge_mount(path, root, result)
+            return False, 0
+        is_directory = stat.S_ISDIR(observed.st_mode)
+        if is_directory:
+            directory_fd = _open_purge_directory(name, parent_fd, observed, path)
+            # The opened descriptor and the parent's entry must still identify
+            # the same directory before enumerating it.
+            _require_same_entry(observed, os.stat(name, dir_fd=parent_fd, follow_symlinks=False), path)
+            with os.scandir(directory_fd) as entries:
+                children = [(entry.name, entry.stat(follow_symlinks=False)) for entry in entries]
+            complete = True
+            for child_name, child_stat in children:
+                child_complete, child_removed = _purge_entry(
+                    child_name, directory_fd, child_stat, os.path.join(path, child_name),
+                    root, dry_run, result, mount_points,
+                )
+                complete = child_complete and complete
+                removed += child_removed
+            if not complete:
+                return False, removed
+        _require_same_entry(observed, os.stat(name, dir_fd=parent_fd, follow_symlinks=False), path)
+        verb = "Would remove" if dry_run else "Removing"
+        progress(path, root, prompt=f"{verb} {{}}...", newline=True)
+        if not dry_run:
+            if is_directory:
+                os.rmdir(name, dir_fd=parent_fd)
+            else:
+                os.unlink(name, dir_fd=parent_fd)
+        return True, 1
+    except OSError as error:
+        _purge_error(path, root, result, error)
+        return False, removed
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
 
 
 def _directory_key(path: str) -> tuple[int, int]:
@@ -148,6 +311,12 @@ def scan(root: str, dry_run: bool, purge_recycle_bins: bool = False) -> Result:
 
     result = Result()
 
+    try:
+        mount_points = _linux_mount_points()
+    except OSError as error:
+        _purge_error(root, root, result, error)
+        return result
+
     def walk_error(error: OSError) -> None:
         failed_path = error.filename or root
         # The error text contains the path; escape braces so progress()'s
@@ -170,20 +339,24 @@ def scan(root: str, dry_run: bool, purge_recycle_bins: bool = False) -> Result:
         retained_dirs = []
         for name in dirs:
             candidate = os.path.join(current_root, name)
-            if os.path.ismount(candidate):
+            if _is_mount_boundary(candidate, mount_points):
                 result.skipped_mounts += 1
                 progress(candidate, root, prompt="Skipping mounted filesystem {}...", newline=True)
                 continue
             if name == RECYCLE_BIN:
                 if purge_recycle_bins:
-                    remove_path(candidate, root, dry_run, result, is_dir=True)
+                    remove_path(candidate, root, dry_run, result, is_dir=True, mount_points=mount_points)
                 continue
             retained_dirs.append(name)
         dirs[:] = retained_dirs
 
         for name in files:
             if name in METADATA_FILES:
-                remove_path(os.path.join(current_root, name), root, dry_run, result, is_dir=False)
+                candidate = os.path.join(current_root, name)
+                if _is_mount_boundary(candidate, mount_points):
+                    _purge_mount(candidate, root, result)
+                    continue
+                remove_path(candidate, root, dry_run, result, is_dir=False)
     return result
 
 

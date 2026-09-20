@@ -1,5 +1,5 @@
 # rbenv
-export RBENV_ROOT=$HOME/.rbenv
+export RBENV_ROOT=${RBENV_ROOT:-$HOME/.rbenv}
 add-path "$RBENV_ROOT/bin"
 # PATH-wide detection (mirrors fish `type -q rbenv`): finds an rbenv under
 # $RBENV_ROOT/bin OR one installed elsewhere on PATH (e.g. Homebrew).

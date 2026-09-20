@@ -419,18 +419,12 @@ test_prepare_local_dir_hardens_private_zsh() (
   rm -rf "$temp"
 )
 
-test_canonical_lists_are_single_sourced() {
-  # The vocabularies must exist in exactly one place each, so a new step cannot
-  # pass validation while being silently dropped by the ordering pass.
-  local steps_hits groups_hits
-  steps_hits=$(grep -c 'bins,packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell' "$ROOT/install.sh")
-  groups_hits=$(grep -c 'core-utils,shell,dev-tools,languages,media,network,system' "$ROOT/install.sh")
-  assert_equals "$steps_hits" "1"
-  assert_equals "$groups_hits" "1"
-  # And the default step list is derived from the canonical one, not retyped.
-  assert_equals "$SELECTED_STEPS" "${CANONICAL_STEPS#bins,}"
-  [[ $CANONICAL_STEPS == bins,* ]] || fail "bins is expected to lead CANONICAL_STEPS"
-}
+test_canonical_lists_are_single_sourced() (
+  validate_component_registry
+  assert_equals "$SELECTED_STEPS" "${CANONICAL_STEPS/,bins/}"
+  unset -f verify_bun
+  if (validate_component_registry) >/dev/null 2>&1; then fail "registry accepted missing verifier"; fi
+)
 
 test_valid_csv_rejects_duplicates() {
   valid_csv "core-utils,shell" "$CANONICAL_GROUPS" || fail "a valid group list was rejected"
@@ -441,7 +435,7 @@ test_valid_csv_rejects_duplicates() {
 test_node_lts_curl_and_download_have_timeouts() {
   # A stalled connection must not hang an apply that is holding the lock.
   local resolve
-  resolve=$(sed -n '/^resolve_node_lts()/,/^}/p' "$ROOT/install.sh")
+  resolve=$(sed -n '/^resolve_node_lts()/,/^}/p' "$ROOT/installer/tools.sh")
   assert_contains "$resolve" '--connect-timeout 15'
   assert_contains "$resolve" '--max-time 30'
   local download
@@ -510,6 +504,7 @@ test_remove_blocks_strips_only_the_managed_block() (
 test_bootstrap_skips_present_tools_on_linux() (
   local out
   OS_FAMILY=apt
+  package_installed() { return 0; }
   # DRY_RUN=1 so that if the host is missing one of these, the test echoes the
   # install command instead of really running sudo apt-get on a non-apt machine.
   DRY_RUN=1
@@ -526,6 +521,7 @@ test_bootstrap_skips_present_tools_on_linux() (
 test_bootstrap_installs_unzip_when_missing() (
   local out
   OS_FAMILY=apt
+  package_installed() { return 0; }
   DRY_RUN=1
   # unzip is in no package group, so the bootstrap is the only thing that can
   # provide it — and install_locked_archive_binary needs it for bun and fnm.
@@ -561,7 +557,7 @@ test_equivalent_github_origins() {
 }
 
 test_recommended_and_whole_group_closure() (
-  [[ $SELECTED_STEPS == 'packages,pyenv,rbenv,bun,yarn,pnpm,fnm,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
+  [[ $SELECTED_STEPS == 'packages,pyenv,rbenv,bun,fnm,yarn,pnpm,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
   [[ $SELECTED_GROUPS == 'core-utils,shell,dev-tools,languages,media,network,system' ]] || fail "Recommended package groups changed"
   SELECTED_STEPS=bun
   SELECTED_GROUPS=core-utils
@@ -576,12 +572,14 @@ test_node_lts_is_resolved_once_per_run() (
   HOME="$temp/home"
   mkdir -p "$HOME/.local/bin"
   curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv22.1.0\tx\tx\tx\tx\tx\tx\tx\tx\tIron\tfalse\n'; }
+  SELECTED_STEPS=fnm
   RESOLVED_NODE_VERSION=""
   resolve_node_lts
   assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
   curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv24.2.0\tx\tx\tx\tx\tx\tx\tx\tx\tKrypton\tfalse\n'; }
   resolve_node_lts
   assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
+  SELECTED_STEPS=fnm
   RESOLVED_NODE_VERSION=""
   resolve_node_lts
   assert_equals "$RESOLVED_NODE_VERSION" v24.2.0
@@ -596,11 +594,11 @@ test_node_verifier_checks_the_real_executable() (
   printf '%s\n' '#!/bin/sh' \
     'case "$1" in' \
     '  --version) printf "fnm 1.39.0\\n" ;;' \
-    '  default) printf "v22.1.0\\n" ;;' \
-    '  exec) printf "%s\\n" "${FAKE_NODE_VERSION:-v22.1.0}" ;;' \
+    '  default) printf "v22.14.0\\n" ;;' \
+    '  exec) printf "%s\\n" "${FAKE_NODE_VERSION:-v22.14.0}" ;;' \
     'esac' > "$HOME/.local/bin/fnm"
   chmod +x "$HOME/.local/bin/fnm"
-  RESOLVED_NODE_VERSION=v22.1.0
+  RESOLVED_NODE_VERSION=v22.14.0
   verify_step fnm || fail "valid default Node executable was rejected"
   export FAKE_NODE_VERSION=v20.0.0
   ! verify_step fnm || fail "wrong actual Node executable version was accepted"
@@ -641,7 +639,7 @@ test_empty_custom_selection_is_inspectable() (
 
 test_runtime_and_signing_invariants() {
   [[ $(grep '^_leos_plugin ' "$ROOT/zsh/interactive.zsh" | tail -n 1) == *zsh-syntax-highlighting* ]] || fail "syntax highlighting is not the last plugin action"
-  ! grep -q 'tag\.gpgsign' "$ROOT/install.sh" || fail "installer modifies tag signing"
+  ! grep -q 'tag\.gpgsign' "$ROOT/install.sh" "$ROOT"/installer/*.sh || fail "installer modifies tag signing"
   ! grep -Eq 'npm (install|update).*(claude|codex)|(@anthropic-ai/claude-code|@openai/codex)' "$ROOT/zsh/commands.zsh" || fail "AI updater contains an npm fallback"
 }
 
@@ -691,10 +689,10 @@ test_inspect_degrades_when_node_lts_unresolvable() (
   REQUESTED_GROUPS=$SELECTED_GROUPS
   normalise_dependencies
   order_selected_steps
-  resolve_node_lts() { return 1; }      # graceful failure must be reachable now
+  resolve_node_version() { return 1; } # no network or host runtime discovery
   verify_step() { return 1; }
   output=$(inspect_tsv)
-  assert_contains "$output" $'moving\tnode-lts\tresolve-during-apply'
+  assert_contains "$output" $'runtime\tnode\tunresolved\tresolve-during-apply'
 )
 
 test_packages_full_upgrade_rerun_has_no_false_warning() (
@@ -761,7 +759,7 @@ test_no_os_release_upgrade_tooling() {
   # Full-upgrade / checkup paths must stay in-release. Strip comments first so
   # the intentional mentions in guard comments don't count as usage.
   local file code
-  for file in "$ROOT/install.sh" "$ROOT/zsh/path/apt.zsh" "$ROOT/zsh/path/dnf.zsh" "$ROOT/zsh/path/pacman.zsh"; do
+  for file in "$ROOT/install.sh" "$ROOT"/installer/*.sh "$ROOT/zsh/path/apt.zsh" "$ROOT/zsh/path/dnf.zsh" "$ROOT/zsh/path/pacman.zsh"; do
     code=$(sed 's/#.*//' "$file")
     if grep -Eq 'do-release-upgrade|dnf[[:space:]]+system-upgrade|apt(-get)?[[:space:]]+(dist-upgrade|full-upgrade)' <<< "$code"; then
       fail "release-upgrade tooling found in $file; a full upgrade must stay in-release"
@@ -845,7 +843,7 @@ test_known_hosts_matches_metadata_and_dedupes() (
   HOME="$temp"
   TEMP_PATHS=()
   gh() {
-    [[ ${1:-} == api && ${2:-} == meta ]] || return 1
+    [[ ${1:-} == api && ${2:-} == --hostname && ${3:-} == github.com && ${4:-} == meta ]] || return 1
     printf '%s\n' 'ssh-ed25519 AAAAGOOD' 'ssh-rsa AAAARSAGOOD'
   }
   ssh-keyscan() { printf '%s\n' 'github.com ssh-ed25519 AAAAGOOD' 'github.com ssh-ed25519 AAAAEVIL'; }

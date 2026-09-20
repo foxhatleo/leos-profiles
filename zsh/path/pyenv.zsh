@@ -1,5 +1,5 @@
 # pyenv
-export PYENV_ROOT=$HOME/.pyenv
+export PYENV_ROOT=${PYENV_ROOT:-$HOME/.pyenv}
 add-path "$PYENV_ROOT/bin"
 # PATH-wide detection (mirrors fish `type -q pyenv`): finds a pyenv under
 # $PYENV_ROOT/bin OR one installed elsewhere on PATH (e.g. Homebrew).

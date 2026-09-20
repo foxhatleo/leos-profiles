@@ -8,8 +8,9 @@ shell engine.
 
 Recommended is intentionally broad. A first installation installs the full
 default workstation selection and performs a full package-manager/host upgrade.
-It can write shell configuration, install packages and tools, configure GitHub
-credentials, and change the login shell. Optional rpatool (`bins`) is excluded;
+It can write shell configuration, install packages and tools, prepare credentials
+for manual GitHub registration, and change the login shell. Optional rpatool
+(`bins`) is excluded;
 SSH and GPG default to Skip; fonts and the Zsh default-shell policy are Auto.
 
 ## Start here
@@ -38,7 +39,7 @@ The dotfile surface here is deliberately tiny — two managed blocks plus a
 little of the actual problem. What `install.sh` mostly does is *machine
 provisioning*: OS packages across four distribution families, SHA-256-pinned
 bun/fnm/starship/yarn/pnpm artifacts, commit-pinned pyenv/rbenv/plugin clones,
-SSH and GPG provisioning against the GitHub API, a sparse Nerd Fonts checkout,
+local SSH/GPG preparation and read-only GitHub verification, a sparse Nerd Fonts checkout,
 and `chsh`. chezmoi covers that only through `run_once_` escape hatches, which
 would leave the same amount of shell to maintain plus a second tool to learn.
 
@@ -60,7 +61,8 @@ and `system`. Internal `bootstrap`, `ssh`, and `gpg` groups make the remaining
 mutations visible in the approved plan.
 
 Groups are atomic: selecting one selects every member. rpatool, Bun, fnm, Yarn,
-and pnpm imply the full `languages` package group; pyenv/rbenv imply `dev-tools`;
+and pnpm imply the full `languages` package group. Yarn and pnpm also imply
+fnm, which runs before their installation; pyenv/rbenv imply `dev-tools`;
 plugins, Zsh configuration, and default-shell setup imply `shell`. The AI shows
 all selected and implied groups plus exact OS package membership before asking
 for approval.
@@ -68,19 +70,24 @@ for approval.
 Recommended selects all current default component and package groups except
 `bins`. Customize allows whole-group selection. The initial package pass keeps
 the broad full-upgrade default, but the AI offers a no-full-upgrade choice.
+With `--no-full-upgrade`, only missing selected packages are requested from the
+package manager. Dependency resolution can still install or upgrade dependencies;
+this does not freeze the host package set.
 
 ## Deterministic engine and local state
 
 `install.sh` derives the profile root only from its own physical directory.
-It has three internal operations: a typed TSV inspection stream, an explicit
-approved apply, and reconciliation from the saved local profile. It is not a
+It provides a typed TSV inspection stream, an explicit approved apply,
+reconciliation from the saved local profile, and managed-block removal. It is not a
 second wizard and never asks setup questions.
 
 The entire ignored `local/` directory is machine-owned:
 
 - `local/install-profile.tsv` records the normalized groups, upgrade/font/shell
   policies, Git identity, selected SSH path, GPG fingerprint, and moving-tool
-  channel choices.
+  channel choices. Schema 2 records `node-policy=preserve-compatible`; an
+  existing schema-1 profile migrates on approved apply/reconcile. Inspection
+  reports the migration without writing it.
 - `local/install-state.tsv` records verified step signatures, timestamps, and
   resolved moving versions such as Node LTS.
 - `local/private.zsh` contains private machine overrides and loads after public
@@ -88,8 +95,9 @@ The entire ignored `local/` directory is machine-owned:
 - `local/flags/` stores GNU preference, Homebrew mirror, and optional-tool
   warning choices.
 
-No passphrases, tokens, private keys, or exported secret-key material are
-stored there. The directory uses mode 700 and files mode 600 as ordinary local
+The installer stores no passphrases, tokens, private keys, or exported
+secret-key material there. User-managed `private.zsh` may contain secrets.
+Public GPG exports awaiting manual registration are also kept under `local/`. The directory uses mode 700 and files mode 600 as ordinary local
 hygiene. On first use, legacy XDG installer state, `zsh/_private.zsh`, and the
 old home-directory markers are migrated. Conflicting old/new values stop with
 both paths for the AI to resolve.
@@ -107,19 +115,40 @@ are accepted and normalized; dirty installer-managed dependency checkouts are
 refused. This locked-direct-artifact promise intentionally excludes OS package
 manager channels and Node.
 
-Node is an explicit moving `current-lts` channel. Each initial apply or later
-reconciliation resolves one exact current LTS version for that run, installs
-and makes it default, records it, and verifies the actual default Node
-executable/version. A later reconciliation advances to the then-current LTS.
+Node uses the saved `preserve-compatible` policy. The installer first preserves
+a compatible fnm default; otherwise it adopts the exact version of a compatible
+Node already on PATH into fnm. Only if neither is compatible does it resolve
+one current LTS version from the `current-lts` fallback channel. Compatibility
+uses the selected locked tools' engine ranges: currently pnpm requires Node
+`>=22.13`, and Yarn requires `>=4.0.0`. A reconciliation does not advance an
+already-compatible default merely because another LTS exists. Yarn/pnpm install
+and verification commands run through explicit `fnm exec`, so they do not depend
+on an interactive shell's PATH.
 
-SSH/GPG are AI-selected and default to Skip. Reuse requires an exact selected
-key. Reconciliation checks the saved reference and automatically re-uploads
-its public key if it is missing from the authenticated GitHub account; it never
-generates a replacement. SSH derives public material from the private key,
-matches GitHub host keys against GitHub's API metadata, and tests the explicit
-key. GPG requires a verified GitHub email, verifies a real signed temporary
-commit, and enables global **commit** signing only. It does not set or unset the
-independent `tag.gpgsign` preference.
+SSH/GPG default to Skip. Reuse requires a specifically selected SSH private-key
+path or full GPG fingerprint; existing keys are never silently chosen. New SSH
+keys default to `~/.ssh/id_ed25519`, or an explicitly chosen unused absolute
+path. Existing files are not replaced. Both `empty` and `prompt` passphrase
+policies are supported; `empty` is the default and is warned about explicitly.
+
+GitHub operations are read-only. The installer never uploads keys, logs into
+GitHub for you, or changes SSH identity configuration or GitHub CLI's Git
+protocol. Missing registration produces a `manual-action` TSV record and exits
+with status **3**, including the public-key file and destination URL. The
+selected reference is saved first, and a public GPG export remains available
+after cleanup. Register it yourself, then run the guided reconciliation again.
+Missing login, email-read permission, or ordinary SSH configuration similarly
+produces manual guidance. A network/API failure remains an error, not evidence
+that a key is missing.
+
+SSH derives matching public material, compares GitHub host keys with the API,
+and verifies both the selected identity and ordinary SSH against the same
+GitHub account. GPG requires a verified email, signs a real temporary commit,
+and enables global **commit** signing only after registration is confirmed.
+The independent `tag.gpgsign` preference is preserved. Reconciliation never
+generates credentials. If an initial run paused before another requested key
+was generated, resume the originally approved apply choices while reusing keys
+already created; do not expect reconciliation to create the pending key.
 
 ## Zsh runtime
 
@@ -133,26 +162,36 @@ The `~/.zshrc` block is interactive-only and the `~/.zshenv` block is silent, so
 trade-off: a **non-interactive** shell (`ssh host cmd`, cron, scripts) sees only
 `~/.local/bin` and `~/.local/npm/bin` on PATH — no Homebrew, fnm, pyenv, rbenv or
 Go — so remote one-liners that need those tools should use absolute paths or
-start a login shell explicitly.
+activate just the required tool explicitly. A non-interactive login shell
+alone does not source the interactive profile. For example, after fnm setup:
+
+```bash
+"$HOME/.local/bin/fnm" exec --using=default -- node --version
+```
 
 Starship and custom completions initialize before zsh-syntax-highlighting,
 which is the final interactive plugin action.
 
-Tool initialization that is deterministic — `brew shellenv`, `pyenv`/`rbenv`
-`init`, `direnv hook`, `zoxide init`, `fzf --zsh`, `starship init`, and the
-npm/pnpm/bun completion generators — is cached under
-`${XDG_CACHE_HOME:-~/.cache}/leos-profiles/init`, keyed by the resolved binary
-path and regenerated only when that binary changes, then `zcompile`d. This is
-what keeps startup near 0.1s. Freshness is keyed on the *launcher* binary, so an
-upgrade that rewrites a tool's init logic without touching that binary is not
-detected automatically: run `leos-refresh-init-cache` (which `brew-checkup`
-already does for you) or delete the directory. `fnm env`
-is deliberately never cached because it mints a per-process
-`FNM_MULTISHELL_PATH`. pyenv and rbenv are initialized with `--no-rehash` and
-their shims are refreshed in the background at most once a day, so a console
-script installed by `pip install`/`gem install` still appears without paying a
-~240ms rehash on every shell. Yarn ships no completion generator, so it uses the
-bundled zsh-completions `_yarn`.
+Deterministic initialization scripts for pyenv/rbenv, direnv, zoxide, fzf,
+Starship, and npm/pnpm/Bun completions are cached under
+`${XDG_CACHE_HOME:-~/.cache}/leos-profiles/init`. Cache identities hash the
+resolved binary path, arguments, HOME, and version-manager roots with distinct
+field boundaries. Newly created directories are private; ownership, permissions,
+ancestors, and symlinks are checked before cached code or compiled siblings are
+used. Unsafe storage falls back to fresh initialization without trusting its
+contents. Failed generators' partial output is not evaluated.
+
+Homebrew runs `brew shellenv zsh` directly in each shell because its output
+depends on the current environment; empty successful output is valid. `fnm env`
+also runs per shell because it creates a unique `FNM_MULTISHELL_PATH`.
+Cache freshness follows launcher mtimes. After an update changes only a separate
+implementation file, run `leos-refresh-init-cache`; `brew-checkup` does this
+automatically. pyenv/rbenv use `--no-rehash` and refresh their shims in the
+background at most once a day. Yarn uses the bundled `_yarn` completion.
+
+Startup latency depends on the host and installed tools. See the reproducible
+[benchmark procedure](./docs/development.md#startup-benchmark); no universal
+startup-time guarantee is claimed.
 
 PATH precedence is deliberate: version-manager shims come first, then
 `~/.local/bin`, then Homebrew — so a stale binary in `~/.local/bin` cannot shadow
@@ -169,8 +208,9 @@ refuses tracked or non-ignored untracked checkout changes (`local/` remains
 intentionally ignored). It fast-forwards from
 that configured upstream—official or otherwise—then launches the newly pulled
 `install.sh reconcile`. By default it installs missing selected packages and
-repairs locked tools, plugins, configuration, fonts, Node LTS, and saved
-credential references without a full host upgrade. `--full-upgrade` opts into
+repairs locked tools, plugins, configuration, fonts, and the selected Node runtime without a full host upgrade.
+It checks saved credential references and pauses for any required manual
+registration or configuration. `--full-upgrade` opts into
 the saved broad package-manager upgrade behavior.
 
 A full upgrade—here and in `bye`'s package checkups—upgrades installed packages
@@ -203,13 +243,18 @@ system-wide macOS roots: the complete writable APFS data volume and every
 mounted volume directly under `/Volumes`. It rejects symlink roots, does not
 follow symlinks or implicitly cross nested mount boundaries, supports multiple
 roots/dry-run, and reports failures. Cloud-storage directories are included.
-Recycle-bin directory removal is opt-in.
+On Linux, it reads `/proc/self/mountinfo` to preserve same-device bind mounts;
+an unreadable mount table aborts the scan before deletion.
+Recycle-bin directory removal is opt-in. The privileged wrapper uses the system
+Python interpreter in isolated mode, but executes the script from this
+user-owned checkout. Trust changes to the checkout before running maintenance
+with sudo.
 
 `brew-china-enable` remains an explicitly confirmed USTC mirror option; its
 flag now lives under `local/flags/`. `brew-china-disable` restores the official
 Homebrew remote and environment.
 
-## Support matrix (2026-07-10)
+## Support and validation matrix
 
 - macOS 14, 15, and 26 on currently supported Intel/Apple Silicon
   combinations, following [Homebrew's current support tiers](https://docs.brew.sh/Support-Tiers).
@@ -223,11 +268,21 @@ Homebrew remote and environment.
   best-effort basis without a gating promise.
 - WSL is best-effort when its guest matches a supported Linux family.
 
-CI gates Ubuntu 22.04/24.04/26.04 x64, Linux arm64 locked artifacts, Debian
-12/13, Fedora 43/44, Arch latest x86_64, and available macOS ARM/Intel runner
-combinations. A weekly schedule repeats dependency/package availability checks.
-[GitHub's runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
-is the source for runner labels.
+CI is configured to run actual provisioning in native x86_64 and arm64 Linux
+containers for each listed Ubuntu, Debian, and Fedora release, plus Arch
+x86_64. macOS jobs cover the available hosted ARM/Intel combinations with a
+fresh HOME on the runner's existing OS and Homebrew installation. This is not
+a factory-fresh macOS VM or proof of a clean Command Line Tools/Homebrew
+bootstrap. The workflow tests minimal and recommended selections, pnpm-only
+and Yarn/pnpm installation, repeated reconciliation, and repair after removing
+artifacts. Credentials are skipped, default-shell changes are disabled, and
+fonts are explicitly exercised. Separate isolated tests cover credentials.
+
+Package availability, locked digests, real plugin integration, unit tests, and
+syntax checks remain separate gates; availability alone is not installation
+coverage. The weekly workflow repeats these checks. See the
+[workflow](./.github/workflows/ci.yml) for exact jobs and runner labels, and
+[development guide](./docs/development.md) for scope and reproduction.
 
 ## Hosts list and removal
 
@@ -247,20 +302,9 @@ for explicit review.
 
 ## Development
 
-```bash
-zsh -n zsh/*.zsh zsh/path/*.zsh
-bash -n install.sh installer/lock.sh tests/*.sh
-bash tests/install-test.sh
-bash tests/apply-dryrun-test.sh
-zsh tests/profile-test.zsh
-python3 -m py_compile util/rmdsstore.py
-python3 tests/rmdsstore_test.py
-shellcheck -s bash -x install.sh installer/lock.sh tests/*.sh
-bash tests/locked-plugins-test.sh
-bash tests/locked-artifacts-test.sh
-bash tests/package-map-availability.sh macos   # or apt | fedora | arch
-```
+See [docs/development.md](./docs/development.md) for module boundaries, the TSV
+contract, regression tests, dependency updates, real provisioning, and startup
+benchmarking. All machine-owned `local/` data stays ignored. Other local files
+under `docs/` remain ignored; only this development guide is public.
 
-CI also validates Starship TOML, package maps, locked artifacts, and the
-runbook's fenced Bash snippets. Everything under `local/` must remain ignored.
-The project is GPL-3.0; see [`LICENSE`](./LICENSE).
+The project is GPL-3.0; see [LICENSE](./LICENSE).
