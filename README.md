@@ -206,13 +206,17 @@ cannot leave root-owned files in that HOME.
 
 Deterministic initialization scripts for pyenv/rbenv, direnv, zoxide, fzf,
 Starship, and npm/pnpm/Bun completions are cached under
-`${XDG_CACHE_HOME:-~/.cache}/leos-profiles/init`. Cache identities hash the
-resolved binary path, arguments, HOME, and version-manager roots with distinct
-field boundaries; zoxide's identity also covers `_ZO_ECHO` and
-`_ZO_RESOLVE_SYMLINKS`, which change its generated code. Newly created
-directories are private; ownership, permissions, ancestors, and symlinks are
-checked before cached code or compiled siblings are used. Unsafe storage falls
-back to fresh initialization without trusting its contents. Failed generators'
+`${XDG_CACHE_HOME:-~/.cache}/leos-profiles/init`. Each entry's first line
+records its full identity: the key, the resolved binary path, the arguments,
+HOME, and the version-manager roots, each field quoted so no value can fake a
+boundary. An entry is used only when that line matches; zoxide's identity also
+covers `_ZO_ECHO` and `_ZO_RESOLVE_SYMLINKS`, which change its generated code.
+Newly created directories are private; ownership, permissions, ancestors, and
+symlinks are checked before cached code or compiled siblings are used. The
+directory is validated in full once per shell; later lookups in the same shell
+re-check only the cache root and its two profile-owned levels, and any change
+there triggers full validation again. Unsafe storage falls back to fresh
+initialization without trusting its contents. Failed generators'
 partial output is not evaluated. The completion dump lives beside that cache
 as `zcompdump-<zsh version>` (falling back to `${ZDOTDIR:-~}/.zcompdump` if
 the cache root is unsafe); `.zcompdump*` files earlier versions left in the
@@ -232,6 +236,33 @@ background at most once a day. Yarn uses the bundled `_yarn` completion.
 Startup latency depends on the host and installed tools. See the reproducible
 [benchmark procedure](./docs/development.md#startup-benchmark); no universal
 startup-time guarantee is claimed.
+
+Performance notes:
+
+- A warm shell runs no cache bookkeeping forks: the cache directory is
+  validated once per shell and entries are named and checked in-process.
+- The completion system is audited and rebuilt at most once a day, or when
+  the completion search path changes; other shells load the dump with
+  `compinit -C`.
+- pyenv starts without forking bash to rewrite PATH and without its legacy
+  `compctl` completion; `zsh/completions/_pyenv` completes pyenv through the
+  completion system instead.
+- zsh-autosuggestions wraps its widgets once, at the first prompt; lines
+  starting with commands whose completers start a Node, Ruby or Bash program
+  (brew, npm, pnpm, yarn, bun, heroku, pyenv, rbenv, gcloud, ref-taking git
+  subcommands) get history suggestions only.
+- The installer and `leos-refresh-init-cache` compile the profile and plugin
+  sources to `.zwc` files beside them. Zsh ignores a `.zwc` that is older than
+  its source or from another Zsh version, so an edit or a pull is never
+  shadowed; reconcile (or `leos-refresh-init-cache`) recompiles them.
+- Starship's right prompt only runs when the configuration defines a
+  `right_format`, and its continuation prompt is computed when shown.
+- `brew shellenv` is deliberately **not** cached (won't fix, audit PERF-6,
+  about 20 ms). Its output depends on the shell that runs it: it returns
+  nothing when the Homebrew paths are already on PATH, and its variables follow
+  the Homebrew prefix in use. A cache would replay one shell's answer (such
+  as that empty one) into every later shell; an earlier version cached it,
+  and commit 36e6ab1 went back to running it per shell for that reason.
 
 PATH precedence is deliberate: version-manager shims come first, then
 `~/.local/bin`, then Go workspace bins, then Homebrew — so a stale binary in
