@@ -201,6 +201,80 @@ touch "$HOME/recovered"
 leos-source-cached transient "$tmp/bin/transient"
 [[ $CACHE_VALUE == recovered ]] || fail 'transient generator never retried'
 
+# Freshness is the launcher's mtime: an unchanged launcher keeps the cached
+# script even when its output would now differ, and a newer one regenerates.
+# Backdate the cache rather than future-date the launcher, so no clock skew or
+# one-second mtime granularity can make the comparison a tie.
+cat > "$tmp/bin/versioned" <<'GENERATOR'
+#!/bin/sh
+printf '%s\n' "$0" >> "$HOME/versioned-calls"
+printf 'typeset -g CACHE_VALUE=%s\n' "$(cat "$HOME/version")"
+GENERATOR
+chmod +x "$tmp/bin/versioned"
+print -r -- one > "$HOME/version"
+leos-source-cached versioned "$tmp/bin/versioned"
+[[ $CACHE_VALUE == one ]] || fail 'versioned generator first run'
+print -r -- two > "$HOME/version"
+leos-source-cached versioned "$tmp/bin/versioned"
+[[ $CACHE_VALUE == one ]] || fail 'unchanged launcher did not reuse its cache'
+__leos_init_cache versioned "$tmp/bin/versioned"
+cache=$REPLY
+touch -t 202001010000 "$cache" "$cache.zwc"
+leos-source-cached versioned "$tmp/bin/versioned"
+[[ $CACHE_VALUE == two ]] || fail 'launcher newer than its cache did not regenerate'
+[[ $(wc -l < "$HOME/versioned-calls") -eq 2 ]] || fail 'versioned generator ran an unexpected number of times'
+
+# A generator that succeeds with no output records a private negative marker
+# instead of publishing an empty script, and there is nothing to source.
+cat > "$tmp/bin/emptyok" <<'GENERATOR'
+#!/bin/sh
+printf '%s\n' "$0" >> "$HOME/emptyok-calls"
+printf '\n\n'
+GENERATOR
+chmod +x "$tmp/bin/emptyok"
+__leos_cache_dir
+init_dir=$REPLY
+typeset -a before_failed after_failed
+before_failed=("$init_dir"/*.failed(N))
+CACHE_VALUE=untouched
+st=0; leos-source-cached emptyok "$tmp/bin/emptyok" || st=$?
+(( st == 1 )) || fail "empty successful generator returned $st, expected 1 (nothing sourced)"
+[[ $CACHE_VALUE == untouched ]] || fail 'empty generator changed shell state'
+after_failed=("$init_dir"/*.failed(N))
+(( $#after_failed == $#before_failed + 1 )) || fail 'empty successful generation was not recorded as .failed'
+marker=${after_failed:|before_failed}
+zstat -H info -- "$marker"
+(( (info[mode] & 8#777) == 8#600 )) || fail 'negative marker is not private'
+[[ ! -e ${marker%.failed}.zsh ]] || fail 'empty generator output was published as a cache script'
+
+# A planted marker suppresses the generator (status 3, and 2 from the public
+# wrapper) until the launcher is newer than the marker; then it retries, and a
+# successful generation clears the marker.
+cat > "$tmp/bin/suppressed" <<'GENERATOR'
+#!/bin/sh
+printf '%s\n' "$0" >> "$HOME/suppressed-calls"
+printf 'typeset -g CACHE_VALUE=retried\n'
+GENERATOR
+chmod +x "$tmp/bin/suppressed"
+__leos_init_cache suppressed "$tmp/bin/suppressed"
+cache=$REPLY
+failed=${cache%.zsh}.failed
+rm -f -- "$cache" "$cache.zwc" "$HOME/suppressed-calls"
+: > "$failed"
+chmod 600 "$failed"
+touch -t 202001010000 "$tmp/bin/suppressed"
+st=0; __leos_init_cache suppressed "$tmp/bin/suppressed" || st=$?
+(( st == 3 )) || fail "planted .failed returned $st, expected 3"
+CACHE_VALUE=untouched
+st=0; leos-source-cached suppressed "$tmp/bin/suppressed" || st=$?
+(( st == 2 )) || fail "leos-source-cached with a planted .failed returned $st, expected 2"
+[[ $CACHE_VALUE == untouched && ! -e $HOME/suppressed-calls ]] ||
+  fail 'a recorded .failed still ran the generator'
+touch "$tmp/bin/suppressed"
+leos-source-cached suppressed "$tmp/bin/suppressed"
+[[ $CACHE_VALUE == retried && -e $HOME/suppressed-calls ]] || fail 'a newer launcher did not retry past .failed'
+[[ ! -e $failed && -s $cache ]] || fail 'successful retry left the .failed marker or no cache'
+
 # Concurrent cold starts publish only complete scripts/compiled files.
 typeset -a workers
 for i in 1 2 3 4; do
