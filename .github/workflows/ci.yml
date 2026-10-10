@@ -166,6 +166,8 @@ jobs:
         run: bash tests/apply-dryrun-test.sh
       - name: Prove inspect and dry-run apply are read-only (apt)
         run: bash tests/readonly-test.sh
+      - name: Drive the interactive setup wizard on a pty (apt)
+        run: bash tests/setup-wizard-test.sh
 
   package-map-macos:
     name: Package map / ${{ matrix.runner }} (gating)
@@ -215,6 +217,8 @@ jobs:
         run: /bin/bash tests/apply-dryrun-test.sh
       - name: Prove inspect and dry-run apply are read-only (macOS, system Bash 3.2)
         run: /bin/bash tests/readonly-test.sh
+      - name: Drive the interactive setup wizard on a pty (macOS, system Bash 3.2)
+        run: /bin/bash tests/setup-wizard-test.sh
 
   package-map-apt:
     name: Package map / ${{ matrix.runner }} (gating)

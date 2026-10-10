@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Leo's Profiles deterministic installer.
 #
-# This is the deterministic execution engine for the AI-led QUICK-INSTALL.md.
-# The checkout containing this file is the profile being installed.
+# The deterministic engine behind the interactive `setup` wizard
+# (installer/setup.sh), the optional AI-assisted QUICK-INSTALL.md and any
+# automation. The checkout containing this file is the profile being installed.
 
 set -Eeuo pipefail
 # The default IFS stays in force everywhere. CSV values are split explicitly
@@ -76,6 +77,7 @@ die() { printf '%s\n' "ERROR: $*" >&2; exit 1; }
 usage() {
   cat <<EOF
 Usage:
+  bash install.sh setup [--print-command] [--dry-run]
   bash install.sh inspect [options]
   bash install.sh inspect --saved [--full-upgrade]
   bash install.sh apply --yes [options]
@@ -126,11 +128,15 @@ Options:
                                   (exit 2) if it would now choose another
   --saved                         inspect: use the saved profile's selection
   --dry-run                       Print mutations without performing them
-  --yes                           Confirm that the AI-presented plan was approved
+  --yes                           Confirm that the plan was reviewed and approved
+  --print-command                 setup: print the equivalent apply command
+                                  instead of running it
   --help                          Show this help
 
-The AI runbook is the supported user interface. \`inspect\` emits typed TSV for
-agents and diagnostics; \`apply\` and \`reconcile\` never ask setup questions.
+\`setup\` is the interactive wizard: run it in your own terminal. It asks the
+questions, shows the whole plan, and runs apply (or reconcile, for a saved
+setup) with explicit flags. \`inspect\` emits typed TSV for scripts, agents
+and diagnostics; \`apply\` and \`reconcile\` never ask setup questions.
 Before changing anything they check what the run needs from you: without a
 terminal, a sudo password, passphrase prompt or chsh password ends the run
 with a run-in-terminal manual action (exit 3) and the command to run yourself.
@@ -169,9 +175,9 @@ parse_args() {
   [[ $# -gt 0 ]] || { usage >&2; exit 2; }
   reject_retired_flag "$1"
   case $1 in
-    inspect|apply|reconcile|remove-blocks|inventory) COMMAND=$1; shift ;;
+    setup|inspect|apply|reconcile|remove-blocks|inventory) COMMAND=$1; shift ;;
     --help|-h) usage; exit 0 ;;
-    *) die "Expected inspect, apply, reconcile, remove-blocks, or inventory; the AI runbook is the setup interface" ;;
+    *) die "Expected setup, inspect, apply, reconcile, remove-blocks, or inventory; run setup for the interactive wizard" ;;
   esac
   if [[ $COMMAND == reconcile ]]; then FULL_UPGRADE=0; fi
   if [[ $COMMAND == inspect && " $* " == *" --saved "* ]]; then
@@ -192,6 +198,15 @@ parse_args() {
         *)
           [[ $COMMAND == reconcile ]] || die "inspect --saved reads the selection from the saved profile and takes only --full-upgrade"
           die "reconcile reads the saved local profile and only accepts --yes, --full-upgrade, or --dry-run" ;;
+      esac
+      continue
+    fi
+    if [[ $COMMAND == setup ]]; then
+      case $1 in
+        --print-command) SETUP_PRINT_COMMAND=1; shift ;;
+        --dry-run) SETUP_DRY_RUN=1; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "setup takes only --print-command and --dry-run; it asks for everything else" ;;
       esac
       continue
     fi
@@ -430,6 +445,9 @@ source "$SCRIPT_DIR/installer/signatures.sh"
 # shellcheck source=installer/plan.sh
 source "$SCRIPT_DIR/installer/plan.sh"
 
+# shellcheck source=installer/setup.sh
+source "$SCRIPT_DIR/installer/setup.sh"
+
 run_step() {
   local step=$1 force_rerun=0
   if component_skipped_for_existing "$step"; then
@@ -652,6 +670,11 @@ main() {
   trap cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
+  # The wizard runs inspect and apply as separate processes of this script.
+  if [[ $COMMAND == setup ]]; then
+    setup_wizard
+    return 0
+  fi
   # These two only read, or remove the profile's own blocks: they work on any
   # host, supported or not (ONB-13).
   if [[ $COMMAND == remove-blocks ]]; then
@@ -682,7 +705,7 @@ main() {
     inspect_tsv
     return 0
   fi
-  [[ $ASSUME_YES -eq 1 ]] || die "Apply/reconcile requires --yes after the AI-presented plan is approved"
+  [[ $ASSUME_YES -eq 1 ]] || die "Apply/reconcile requires --yes once the plan is approved; run setup for the interactive wizard"
   local support_problem
   if support_problem=$(platform_support_problem); then
     warn "Unsupported platform. $support_problem Continuing as asked; expect long source builds or failures."

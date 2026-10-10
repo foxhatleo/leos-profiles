@@ -89,7 +89,7 @@ write_profile() {
 }
 
 read_profile() {
-  [[ -f $PROFILE_FILE ]] || die "No saved install profile. Run the AI setup flow first: $PROFILE_FILE"
+  [[ -f $PROFILE_FILE ]] || die "No saved install profile ($PROFILE_FILE). Set up first: bash $TARGET/install.sh setup"
   local key value extra schema="" seen=","
   while IFS=$'\t' read -r key value extra || [[ -n $key ]]; do
     [[ -z ${extra:-} ]] || die "Malformed install profile row: $key"

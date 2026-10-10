@@ -185,7 +185,7 @@ upgrade-leos-profiles() {
   # Without a saved setup there is nothing to reconcile: say so before
   # changing the checkout, not after (MI-12).
   if [[ ! -f $LEOS_PROFILES/local/install-profile.tsv ]]; then
-    puts-err "No saved setup in $LEOS_PROFILES/local/install-profile.tsv, so there is nothing to reconcile. Set up first (QUICK-INSTALL.md, or bash $LEOS_PROFILES/install.sh apply --yes); to update only the checkout, use git -C $LEOS_PROFILES pull --ff-only."
+    puts-err "No saved setup in $LEOS_PROFILES/local/install-profile.tsv, so there is nothing to reconcile. Set up first with $LEOS_PROFILES/install.sh setup; to update only the checkout, use git -C $LEOS_PROFILES pull --ff-only."
     return 1
   fi
   if (( verify )); then
