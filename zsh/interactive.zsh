@@ -119,6 +119,17 @@ autoload -Uz compinit compaudit
   if (( fresh )); then
     compinit -C -d "$dump" || { puts-err "Cached Zsh completion initialization failed; retrying safely."; compinit -i -d "$dump" || return 0; }
   else
+    # Whether the compiled dump matches the dump now, and the dump's mtime: if
+    # compinit leaves it as it is, the .zwc is touched with it below rather
+    # than recompiled.
+    local zwc_current=0 old_mtime=
+    local -A info
+    zmodload -F zsh/stat b:zstat 2>/dev/null
+    if [[ -f $dump && -f $dump.zwc && ! -L $dump.zwc && -O $dump.zwc && ! $dump -nt $dump.zwc ]] &&
+        zstat -H info -- "$dump" 2>/dev/null; then
+      zwc_current=1
+      old_mtime=$info[mtime]
+    fi
     insecure=$(compaudit 2>/dev/null) || true
     if [[ -n $insecure ]]; then
       puts-err "Ignoring insecure Zsh completion path(s): ${(j:, :)${(f)insecure}}"
@@ -129,7 +140,11 @@ autoload -Uz compinit compaudit
     # Mark the dump as confirmed today, even when compinit found nothing to
     # rewrite. Only this user's regular file is touched.
     if [[ -f $dump && ! -L $dump && -O $dump ]]; then
-      command touch -- "$dump" 2>/dev/null || true
+      if (( zwc_current )) && zstat -H info -- "$dump" 2>/dev/null && [[ $info[mtime] == $old_mtime ]]; then
+        command touch -- "$dump" "$dump.zwc" 2>/dev/null || true
+      else
+        command touch -- "$dump" 2>/dev/null || true
+      fi
     fi
     if [[ -n $fpath_record ]]; then
       # The directory is private; still, never write through anything but this

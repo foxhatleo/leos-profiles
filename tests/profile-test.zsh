@@ -1073,11 +1073,13 @@ run_block 'completion dump moves to the cache root; legacy dumps removed once' \
 # compinit freshness. Stubbed compinit/compaudit (first on fpath) record their
 # calls. A missing or day-old dump, or a changed fpath, takes the slow path
 # exactly once: audit, full compinit, and a touch so that the next shells take
-# the fast path, `compinit -C` with no audit. No plugins in this fixture.
+# the fast path, `compinit -C` with no audit. The compiled dump is rebuilt only
+# when compinit rewrote the dump. No plugins in this fixture.
 mkdir -p "$tmp/ci-root/zsh" "$tmp/ci-home/stubs" "$tmp/ci-home/newcomp"
 cp "$root/zsh/cache.zsh" "$root/zsh/interactive.zsh" "$tmp/ci-root/zsh/"
 print -rl -- 'print -r -- "compinit $*" >> $HOME/calls' \
-  '[[ -e ${@[-1]} ]] || print -r -- "#files: 0" > ${@[-1]}' > "$tmp/ci-home/stubs/compinit"
+  '[[ -e ${@[-1]} ]] || print -r -- "#files: 0" > ${@[-1]}' \
+  '[[ ! -e $HOME/rewrite ]] || print -r -- "#files: 1" > ${@[-1]}' > "$tmp/ci-home/stubs/compinit"
 print -rl -- 'print -r -- audit >> $HOME/calls' > "$tmp/ci-home/stubs/compaudit"
 ci_dump=$tmp/ci-home/.cache/leos-profiles/zcompdump-$("$zsh_bin" -dfc 'print -r -- $ZSH_VERSION')
 compinit_round() {
@@ -1088,6 +1090,7 @@ compinit_round() {
     TERM=xterm-256color PATH="$fakepath" CI_EXTRA="$extra" -- '
     setopt err_return no_unset pipe_fail
     puts() { :; }; puts-err() { :; }; entry() { :; }
+    zcompile() { [[ ${2-} != */zcompdump-* ]] || print -r -- "zcompile $*" >> $HOME/calls; builtin zcompile "$@"; }
     fpath=("$HOME/stubs" ${CI_EXTRA:+$CI_EXTRA} $fpath)
     source "$LEOS_PROFILES_ZSH/cache.zsh"
     source "$LEOS_PROFILES_ZSH/interactive.zsh"
@@ -1095,7 +1098,8 @@ compinit_round() {
   REPLY=$(<"$tmp/ci-home/calls")
 }
 compinit_round 'no dump'
-[[ $REPLY == $'audit\ncompinit -d '$ci_dump ]] || fail "first shell must audit and build: ${(q+)REPLY}"
+[[ $REPLY == $'audit\ncompinit -d '$ci_dump$'\nzcompile -R '$ci_dump ]] ||
+  fail "first shell must audit, build and compile: ${(q+)REPLY}"
 compinit_round 'fresh dump'
 [[ $REPLY == "compinit -C -d $ci_dump" ]] || fail "fresh dump must take the fast path: ${(q+)REPLY}"
 touch -t 202001010000 "$ci_dump"
@@ -1108,6 +1112,11 @@ compinit_round 'new fpath directory' "$tmp/ci-home/newcomp"
 [[ $REPLY == $'audit\ncompinit -d '$ci_dump ]] || fail "a changed fpath must rebuild: ${(q+)REPLY}"
 compinit_round 'same new fpath' "$tmp/ci-home/newcomp"
 [[ $REPLY == "compinit -C -d $ci_dump" ]] || fail "an unchanged fpath must take the fast path: ${(q+)REPLY}"
+touch -t 202001010000 "$ci_dump"
+: > "$tmp/ci-home/rewrite"
+compinit_round 'rewritten dump' "$tmp/ci-home/newcomp"
+[[ $REPLY == $'audit\ncompinit -d '$ci_dump$'\nzcompile -R '$ci_dump ]] ||
+  fail "a rewritten dump must be recompiled: ${(q+)REPLY}"
 
 # Starship: PROMPT2 is no longer computed (a starship run) at startup but when
 # shown, and the right prompt's starship run happens only while the active
