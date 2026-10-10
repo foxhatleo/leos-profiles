@@ -501,7 +501,13 @@ and a 32-bit FNV-1a digest of that line, computed in-process; the line itself,
 read with `read` (no fork), decides whether an entry is used. Bump the key when
 a filter's behaviour changes. The cache checks ownership, write permissions and
 symlinks before executing persisted scripts or compiled files, and creates
-private directories/files. `__leos_cache_dir` validates every ancestor once per
+private directories/files. On macOS, where mode bits do not show ACLs, it
+strips ACLs (`chmod -N`) from what it creates or repairs, and a full
+validation lists the ACLs of the cache root, the two profile-owned levels and
+their files (`/bin/ls -le`) at most once a day or when one of those
+directories' ctime changed (the `acl-checked` stamp records them): an entry
+granting another account write makes a directory unsafe (fallback, with a
+`chmod -N` hint) and a file is removed. `__leos_cache_dir` validates every ancestor once per
 shell and memoizes the result (success or failure) keyed on the cache root and
 EUID; repeat calls lstat the root and the two profile-owned levels and validate
 in full again if their owner, mode or inode changed. Tests that change
