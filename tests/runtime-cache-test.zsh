@@ -100,10 +100,48 @@ chmod 777 "$XDG_CACHE_HOME"
   [[ $CACHE_VALUE == safe ]] || fail 'unsafe-directory fallback'
 ) 2> "$tmp/fallback-warning"
 [[ $(wc -l < "$tmp/fallback-warning") -eq 1 ]] || fail 'fallback diagnostic must appear once per shell'
+grep -Fq "Unsafe path: $XDG_CACHE_HOME; if it should be private to you, run: chmod go-w $XDG_CACHE_HOME" \
+  "$tmp/fallback-warning" || fail "fallback diagnostic must name the unsafe path: $(<$tmp/fallback-warning)"
 [[ $(ls -A "${cache:h}") == $before ]] || fail 'unsafe external-directory cache write'
 zstat -H info -- "$XDG_CACHE_HOME"
 (( (info[mode] & 8#777) == 8#777 )) || fail 'external XDG root was chmodded'
 chmod 700 "$XDG_CACHE_HOME"
+
+# Debian/Ubuntu sessions often run with umask 002 and user-private groups. A
+# group-writable directory is safe only when that group is the user's own:
+# primary gid, same name as the user, no other members. Never world-writable.
+mkdir -p "$tmp/getent-bin" "$tmp/upg/cache"
+cat > "$tmp/getent-bin/getent" <<'GETENT'
+#!/bin/sh
+[ "$1" = group ] && [ "$2" = "$FAKE_GID" ] || exit 2
+printf '%s\n' "$FAKE_GROUP_ENTRY"
+GETENT
+chmod +x "$tmp/getent-bin/getent"
+chgrp "$GID" "$tmp/upg" "$tmp/upg/cache"
+chmod 775 "$tmp/upg" "$tmp/upg/cache"
+upg_case() {
+  local expect=$1 entry=$2 mode=$3
+  (
+    export PATH=$tmp/getent-bin:$PATH XDG_CACHE_HOME=$tmp/upg/cache FAKE_GID=$GID
+    export FAKE_GROUP_ENTRY=$entry
+    unset __leos_private_gid
+    chmod "$mode" "$tmp/upg/cache"
+    if __leos_cache_dir; then
+      [[ $expect == accept ]] || fail "user-private group case accepted: $entry ($mode)"
+      zstat -H info -- "$XDG_CACHE_HOME/leos-profiles/init"
+      (( (info[mode] & 8#777) == 8#700 )) || fail 'profile-owned cache directory must still be private'
+    else
+      [[ $expect == reject ]] || fail "user-private group case rejected: $entry ($mode)"
+      [[ $__leos_cache_unsafe == $tmp/upg/cache ]] || fail "unsafe path not recorded: $__leos_cache_unsafe"
+    fi
+  )
+}
+upg_case accept "${USERNAME}:x:${GID}:" 775
+upg_case accept "${USERNAME}:x:${GID}:$USERNAME" 775
+upg_case reject "${USERNAME}:x:${GID}:someone-else" 775
+upg_case reject "not-${USERNAME}:x:${GID}:" 775
+upg_case reject "${USERNAME}:x:${GID}:" 777
+rm -rf -- "$tmp/upg"
 
 # A literal symlink/.. path must not hide writable physical ancestors behind
 # an apparently safe normalized path.

@@ -15,8 +15,29 @@ fi
 [[ $(id -u) != 0 ]] || { printf '%s\n' 'Run this test as a disposable non-root user.' >&2; exit 2; }
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
-FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/leos-provisioning.XXXXXX")
-trap 'rm -rf -- "$FIXTURE"' EXIT
+# Resolve the fixture physically: install.sh records its own `pwd -P` root, and
+# macOS TMPDIR (/var/folders) and /tmp are symlinks into /private.
+FIXTURE=$(CDPATH='' cd -- "$(mktemp -d "${TMPDIR:-/tmp}/leos-provisioning.XXXXXX")" && pwd -P)
+# The session umask is deliberately inherited: Debian/Ubuntu sudo sessions use
+# pam_umask 002 with user-private groups, which the runtime cache must accept.
+collect_artifacts() {
+  local dest=${LEOS_CI_ARTIFACTS:-}
+  [[ -n $dest && -d $dest && -w $dest ]] || return 0
+  dest="$dest/$(uname -s)-$(uname -m)-$$"
+  mkdir -p -- "$dest" || return 0
+  cp -- "$FIXTURE"/*.log "$dest/" 2>/dev/null || true
+  cp -- "$PROFILE"/local/*.tsv "$dest/" 2>/dev/null || true
+  { umask; id; ls -ldn -- "$FIXTURE" "$HOME" "$XDG_CACHE_HOME"; ls -laRn -- "$XDG_CACHE_HOME"; } \
+    > "$dest/permissions.txt" 2>&1 || true
+  zsh -ic 'print -r -- "PATH=$PATH"' > "$dest/interactive-shell.txt" 2>&1 || true
+}
+on_exit() {
+  local rc=$?
+  (( rc == 0 )) || collect_artifacts
+  rm -rf -- "$FIXTURE"
+  return "$rc"
+}
+trap on_exit EXIT
 export HOME="$FIXTURE/home"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_CACHE_HOME="$HOME/.cache"
@@ -46,33 +67,36 @@ verify_npm_tool() {
 }
 real_shell_smoke() {
   EXPECTED_PROFILE="$PROFILE" SMOKE_PATH="$1" zsh -ic '
-    [[ $LEOS_PROFILES == $EXPECTED_PROFILE ]] || exit 1
+    smoke_fail() { print -u2 -r -- "FAIL: real shell smoke: $*"; exit 1; }
+    [[ $LEOS_PROFILES == $EXPECTED_PROFILE ]] ||
+      smoke_fail "LEOS_PROFILES=$LEOS_PROFILES, expected $EXPECTED_PROFILE"
     for tool in npm pnpm bun; do
-      [[ -n ${_comps[$tool]:-} ]] || {
-        print -u2 "Missing real completion registration: $tool"; exit 1
-      }
+      [[ -n ${_comps[$tool]:-} ]] || smoke_fail "missing real completion registration: $tool"
     done
-    [[ -n $FNM_MULTISHELL_PATH ]] || exit 1
+    [[ -n $FNM_MULTISHELL_PATH ]] || smoke_fail "FNM_MULTISHELL_PATH is empty"
     print -r -- "$FNM_MULTISHELL_PATH" > "$SMOKE_PATH"
-    zmodload zsh/stat || exit 1
+    zmodload zsh/stat || smoke_fail "cannot load zsh/stat"
     typeset -A info
     for directory in "$XDG_CACHE_HOME/leos-profiles" "$XDG_CACHE_HOME/leos-profiles/init"; do
-      zstat -H info -- "$directory" || exit 1
-      (( (info[mode] & 8#777) == 8#700 )) || exit 1
+      zstat -H info -- "$directory" || smoke_fail "missing cache directory $directory"
+      (( (info[mode] & 8#777) == 8#700 )) ||
+        smoke_fail "$directory has mode $(( [#8] info[mode] & 8#777 )), expected 700"
     done
     typeset -a cached
     cached=("$XDG_CACHE_HOME/leos-profiles/init/"*.zsh(N))
-    (( ${#cached} > 0 )) || exit 1
+    (( ${#cached} > 0 )) || smoke_fail "no cached init scripts were written"
     for file in "$XDG_CACHE_HOME/leos-profiles/init/"*(N); do
-      zstat -H info -- "$file" || exit 1
-      (( (info[mode] & 8#777) == 8#600 )) || exit 1
+      zstat -H info -- "$file" || smoke_fail "cannot stat $file"
+      (( (info[mode] & 8#777) == 8#600 )) ||
+        smoke_fail "$file has mode $(( [#8] info[mode] & 8#777 )), expected 600"
     done
-  '
+  ' 2> >(tee -a "$FIXTURE/smoke-stderr.log" >&2)
 }
 
 printf '%s\n' '=== Minimal zsh-config selection on a fresh HOME ==='
 apply --groups zsh-config --package-groups none --no-full-upgrade --fonts no
-EXPECTED_PROFILE="$PROFILE" zsh -ic '[[ $LEOS_PROFILES == $EXPECTED_PROFILE ]]'
+EXPECTED_PROFILE="$PROFILE" zsh -ic '[[ $LEOS_PROFILES == $EXPECTED_PROFILE ]]' ||
+  fail "interactive LEOS_PROFILES does not match $PROFILE"
 
 printf '%s\n' '=== pnpm-only selection must provision its Node dependency ==='
 apply --groups pnpm --package-groups none --no-full-upgrade --fonts no

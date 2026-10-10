@@ -170,6 +170,8 @@ grep -q 'original approved choices' "$fixture/error" || fail 'combined generatio
 grep -q -- "--ssh reuse --ssh-key '$SSH_KEY_PATH'" "$fixture/error" || fail 'already generated SSH reuse guidance missing'
 GPG_MODE=reuse
 # Credential prerequisite installation requests only missing packages.
+# The overrides below are invoked indirectly by the code under test.
+# shellcheck disable=SC2317
 (
   ensure_sudo() { :; }
   ensure_brew() { fail 'unnecessary Homebrew bootstrap'; }
