@@ -65,13 +65,19 @@ bootstrap_tools() {
   esac
 }
 
+# macOS names are canonical Homebrew formula names, not aliases: `brew list
+# --formula` prints those, and an alias can move. pkgconf and sqlite are what
+# the pkg-config and sqlite3 aliases resolve to. python is the versioned
+# formula on purpose: the `python`/`python3` aliases follow Homebrew's newest
+# minor release, so each move made reconcile install another Python next to
+# the old one. Change python@3.15 here deliberately, like the pins in lock.sh.
 package_list_for_group() {
   local group=$1
   case "$OS_FAMILY:$group" in
     macos:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils gnu-indent gnu-sed gnu-tar gnu-which grep gawk gzip less nano' ;;
     macos:shell) printf '%s\n' 'zsh' ;;
-    macos:dev-tools) printf '%s\n' 'bat direnv eza fd fzf git pkg-config openssl@3 readline ripgrep sqlite3 tcl-tk vim xz zlib zoxide' ;;
-    macos:languages) printf '%s\n' 'node python ruby' ;;
+    macos:dev-tools) printf '%s\n' 'bat direnv eza fd fzf git pkgconf openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib zoxide' ;;
+    macos:languages) printf '%s\n' 'node python@3.15 ruby' ;;
     macos:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
     macos:network) printf '%s\n' 'wget rclone gnutls heroku ssh-copy-id' ;;
     macos:system) printf '%s\n' 'smartmontools' ;;
@@ -118,23 +124,55 @@ collect_selected_packages() {
 package_installed() {
   local package=$1
   case $OS_FAMILY in
-    macos) brew list --versions "$package" >/dev/null 2>&1 ;;
+    macos)
+      # One `brew list --formula -1` answers every check (see
+      # load_brew_formulae); callers clear BREW_FORMULAE after installing.
+      [[ -n $BREW_FORMULAE ]] || load_brew_formulae || return 1
+      brew_formula_installed "$package" ;;
     apt) dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -qx 'install ok installed' ;;
     fedora) rpm -q --whatprovides "$package" >/dev/null 2>&1 ;;
     arch) pacman -Q "$package" >/dev/null 2>&1 ;;
   esac
 }
 
+# macOS: every selected package is checked against one `brew list --formula -1`
+# call (about 0.3 s) instead of a `brew list --versions` per package (about
+# 0.25 s each). The package map uses canonical formula names, which that list
+# prints. A name that is not in it can still be an alias or an old name of an
+# installed formula: Homebrew keeps an opt/<name> link for each of those, so
+# that link counts as installed. Asking brew to resolve the alias instead
+# would follow wherever the alias points today (`python` moving to a new minor
+# version) rather than what is installed. Casks are not consulted: the map
+# holds formulae only.
+BREW_FORMULAE=""
+BREW_FORMULAE_PREFIX=""
+load_brew_formulae() {
+  local listed
+  listed=$(brew list --formula -1 2>/dev/null) || return 1
+  BREW_FORMULAE=$'\n'"$listed"$'\n'
+  BREW_FORMULAE_PREFIX=${HOMEBREW_PREFIX:-}
+  [[ -n $BREW_FORMULAE_PREFIX ]] || BREW_FORMULAE_PREFIX=$(brew --prefix 2>/dev/null) || BREW_FORMULAE_PREFIX=""
+  return 0
+}
+
+brew_formula_installed() {
+  local package=$1
+  case $BREW_FORMULAE in
+    *$'\n'"$package"$'\n'*) return 0 ;;
+  esac
+  [[ -n $BREW_FORMULAE_PREFIX && $package != */* && -d $BREW_FORMULAE_PREFIX/opt/$package ]]
+}
+
 selected_packages_installed() {
-  local package installed_lines
+  local package
   collect_selected_packages
   (( ${#SELECTED_PACKAGES[@]} > 0 )) || return 0
   if [[ $OS_FAMILY == macos ]]; then
-    # One brew invocation: it prints one line per installed formula among
-    # the arguments (aliases resolve to their real names).
-    installed_lines=$(brew list --versions "${SELECTED_PACKAGES[@]}" 2>/dev/null | grep -c . || true)
-    (( installed_lines == ${#SELECTED_PACKAGES[@]} ))
-    return
+    load_brew_formulae || return 1
+    for package in "${SELECTED_PACKAGES[@]}"; do
+      brew_formula_installed "$package" || return 1
+    done
+    return 0
   fi
   for package in "${SELECTED_PACKAGES[@]}"; do
     package_installed "$package" || return 1
@@ -169,6 +207,9 @@ install_os_packages() {
   (( ${#SELECTED_PACKAGES[@]} > 0 )) || return 0
   local package
   local -a requested=()
+  # Start from a fresh formula list (macOS); without a usable brew every
+  # package is requested.
+  BREW_FORMULAE=""
   for package in "${SELECTED_PACKAGES[@]}"; do
     if [[ $FULL_UPGRADE -eq 1 ]] || ! package_installed "$package"; then requested+=("$package"); fi
   done
@@ -188,7 +229,8 @@ install_os_packages() {
         run brew upgrade
         run brew upgrade --cask
       fi
-      run brew install "${requested[@]}" ;;
+      run brew install "${requested[@]}"
+      BREW_FORMULAE="" ;;
     apt)
       run sudo apt-get update
       [[ $FULL_UPGRADE -eq 0 ]] || run sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y

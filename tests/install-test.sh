@@ -215,18 +215,54 @@ test_default_font_policy_and_npm_artifacts_are_locked() {
 test_macos_package_verification_batches_brew_calls() {
   OS_FAMILY=macos
   SELECTED_GROUPS=core-utils
+  HOMEBREW_PREFIX=$(mktemp -d)
   BREW_CALLS_FILE=$(mktemp)
+  # `brew list --formula -1` prints the installed formula names, one per line.
   brew() {
-    printf '%s\n' "call" >> "$BREW_CALLS_FILE"
-    local package
-    # $1=list $2=--versions; shift them explicitly because Bash 3.2 joins
-    # "${@:3}" when the caller uses this test suite's newline-only IFS.
-    shift 2
-    for package in "$@"; do printf '%s 1.0\n' "$package"; done
+    local IFS=' '                        # "$*" and the map are space-separated
+    printf '%s\n' "$*" >> "$BREW_CALLS_FILE"
+    [[ $1 == list && $2 == --formula ]] || return 1
+    local -a listed
+    read -r -a listed <<< "$(package_list_for_group core-utils)"
+    printf '%s\n' unrelated "${listed[@]}" also-unrelated
   }
   selected_packages_installed || fail "installed package set not recognised"
-  [[ $(grep -c call "$BREW_CALLS_FILE") == 1 ]] || fail "brew was spawned more than once for verification"
-  rm -f "$BREW_CALLS_FILE"
+  [[ $(grep -c . "$BREW_CALLS_FILE") == 1 ]] || fail "brew was spawned more than once for verification"
+  rm -rf "$BREW_CALLS_FILE" "$HOMEBREW_PREFIX"
+}
+
+# The install path also asks brew once, not once per package, and requests
+# only what is missing. A name that is an alias or old name of an installed
+# formula (Homebrew's opt/<name> link exists) counts as installed; brew is
+# never asked to resolve it, since an alias can point at a newer formula.
+test_macos_install_batches_and_resolves_aliases() {
+  local out
+  OS_FAMILY=macos
+  SELECTED_GROUPS=dev-tools
+  FULL_UPGRADE=0
+  DRY_RUN=1
+  HOMEBREW_PREFIX=$(mktemp -d)
+  mkdir -p "$HOMEBREW_PREFIX/opt/pkgconf"     # installed under another listed name
+  BREW_CALLS_FILE=$(mktemp)
+  brew() {
+    local IFS=' '
+    printf '%s\n' "$*" >> "$BREW_CALLS_FILE"
+    [[ $1 == list && $2 == --formula ]] || return 0
+    printf '%s\n' bat direnv eza fd fzf git openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib pkg-config
+  }
+  ensure_brew() { :; }
+  out=$(install_os_packages 2>&1)
+  assert_contains "$out" "+ brew install zoxide"
+  [[ $out != *"brew install"*pkgconf* && $out != *"brew install"*sqlite* ]] ||
+    fail "an installed formula or alias was requested again: $out"
+  [[ $(grep -c '^list' "$BREW_CALLS_FILE") == 1 ]] || fail "brew list ran more than once: $(cat "$BREW_CALLS_FILE")"
+  # A full upgrade requests everything without listing first.
+  FULL_UPGRADE=1
+  : > "$BREW_CALLS_FILE"
+  out=$(install_os_packages 2>&1)
+  assert_contains "$out" "+ brew install bat direnv"
+  ! grep -q '^list' "$BREW_CALLS_FILE" || fail "a full upgrade listed formulae"
+  rm -rf "$BREW_CALLS_FILE" "$HOMEBREW_PREFIX"
 }
 
 test_font_verifier_accepts_renamed_families() {
@@ -955,15 +991,19 @@ test_download_verified_rejects_bad_digest() {
 test_macos_package_verification_detects_missing() {
   OS_FAMILY=macos
   SELECTED_GROUPS=core-utils
+  HOMEBREW_PREFIX=$(mktemp -d)
   brew() {
-    shift 2                              # drop 'list --versions'
-    local first=1 package
-    for package in "$@"; do
+    local first=1 package IFS=' '
+    for package in $(package_list_for_group core-utils); do
       [[ $first == 1 ]] && { first=0; continue; }   # pretend the first is NOT installed
-      printf '%s 1.0\n' "$package"
+      printf '%s\n' "$package"
     done
   }
   ! selected_packages_installed || fail "a missing package was reported as fully installed"
+  # Its opt link alone (an alias of an installed formula) is enough.
+  mkdir -p "$HOMEBREW_PREFIX/opt/$(package_list_for_group core-utils | cut -d' ' -f1)"
+  selected_packages_installed || fail "an opt-linked package was reported missing"
+  rm -rf "$HOMEBREW_PREFIX"
 }
 
 test_set_default_shell_auto_skips_existing_zsh() {
@@ -1223,6 +1263,7 @@ TESTS=(
   test_package_maps_cover_every_supported_os
   test_default_font_policy_and_npm_artifacts_are_locked
   test_macos_package_verification_batches_brew_calls
+  test_macos_install_batches_and_resolves_aliases
   test_font_verifier_accepts_renamed_families
   test_nerd_fonts_installer_ignores_xdg_data_home_on_macos
   test_ssh_public_material_ignores_comments
