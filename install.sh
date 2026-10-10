@@ -106,7 +106,8 @@ Options:
   --gpg <skip|reuse|generate>     GPG-key provisioning choice
   --gpg-key <fingerprint>         Required explicit secret key when --gpg reuse
   --gpg-passphrase <empty|prompt> New-key passphrase policy; prompt is
-                                  recommended and sets up a GUI pinentry
+                                  recommended; a pinentry is set up (GUI on
+                                  macOS and Linux desktops)
   --gpg-expiry <duration>         New GPG key lifetime: Ny, Nm, Nw or Nd, or
                                   0/never for none (default 2y)
   --fonts <auto|yes|no>           Nerd Fonts policy
@@ -134,14 +135,20 @@ Before changing anything they check what the run needs from you: without a
 terminal, a sudo password, passphrase prompt or chsh password ends the run
 with a run-in-terminal manual action (exit 3) and the command to run yourself.
 \`remove-blocks\` deletes only the managed blocks (and a legacy unmarked loader)
-from the zsh startup files (.zshrc, .zshenv, and .zprofile on macOS), leaving
-packages, plugins and credentials in place. \`inventory\` lists everything the
+from the zsh startup files (.zshrc, .zshenv, and .zprofile on macOS), and the
+credential blocks in ~/.ssh/config and gpg-agent.conf, leaving packages,
+plugins and credentials in place. \`inventory\` lists everything the
 installer creates or manages and whether it is present.
 
 Node: preserve a compatible version by adopting it into fnm; otherwise use LTS.
-Credentials: local creation is supported; GitHub registration and SSH identity
-configuration are manual. Exit 3 means user action is required; resume using
-reconcile --yes after completing the emitted manual-action record.
+Credentials: local creation is supported; GitHub registration is manual, and
+SSH configuration is too unless --ssh-config yes. Prefer prompt passphrases:
+an empty one leaves the key readable by anything running as you. GitHub CLI
+needs read scopes to check keys (read:public_key, read:gpg_key,
+read:ssh_signing_key for the selected modes; user:email for signing); a
+missing one is a github-key-scope manual action with the gh auth refresh
+command. Exit 3 means user action is required; resume using reconcile --yes
+after completing the emitted manual-action record.
 EOF
 }
 

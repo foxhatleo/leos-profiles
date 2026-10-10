@@ -53,17 +53,34 @@ installer is only your deterministic execution engine.
    config, and default shell imply `packages` plus `shell`. Yarn and pnpm also
    imply fnm; install fnm before either npm tool.
 6. Ask conditional choices in later stages of no more than three questions:
-   fonts; full initial host upgrade; default-shell policy; SSH; GPG; missing
-   Git identity; and exact key selection. SSH and GPG must have **Skip**
-   preselected. Reuse must select one specifically discovered key. Never pick
-   a key for the user. For generation, explain both passphrase policies:
-   `empty` (supported default, unencrypted) and `prompt`. The default new SSH
-   path is `~/.ssh/id_ed25519`; a different unused absolute path can be chosen.
+   fonts; full initial host upgrade; default-shell policy; SSH; GPG; commit
+   signing; missing Git identity; and exact key selection. SSH, GPG and
+   signing must have **Skip** preselected. Reuse must select one specifically
+   discovered key (`--ssh reuse --ssh-key <path>`, `--gpg reuse --gpg-key
+   <fingerprint>`); a key held only by the user's SSH agent (1Password,
+   Secretive) is `--ssh agent --ssh-key <SHA256 fingerprint or comment from
+   ssh-add -L>`. Never pick a key for the user. For generation, explain both
+   passphrase policies and recommend `prompt`: `empty` (the default) leaves
+   the key unencrypted. New GPG keys expire after `--gpg-expiry` (default
+   `2y`; `0`/`never` only if the user asks). The default new SSH path is
+   `~/.ssh/id_ed25519`; a different unused absolute path can be chosen.
    Never replace or silently reuse an existing key.
-7. For GPG, ensure the selected Git email is verified on the authenticated
-   GitHub account. Missing login or `user:email` access is a manual step: show
-   the engine's guidance and let the user authenticate or grant scope. Do not
-   execute login, key uploads, or SSH identity/protocol changes for the user.
+   Signing: `--signing ssh` (recommended when signing: uses the SSH key, no
+   GPG needed), `--signing gpg`, or `skip` (leaves signing settings alone).
+   `--ssh-config yes` (recommended on macOS with a `prompt` passphrase) adds
+   a managed `Host github.com` block to `~/.ssh/config` (AddKeysToAgent,
+   UseKeychain on macOS, IdentityFile); without it SSH configuration is
+   never changed.
+7. GitHub CLI's default login cannot read keys. The checks need these read
+   scopes: `read:public_key` (SSH), `read:gpg_key` (GPG),
+   `read:ssh_signing_key` (`--signing ssh`), and `user:email` (GPG or SSH
+   signing, to confirm the Git email is verified), for example `gh auth
+   refresh -h github.com -s read:public_key,read:ssh_signing_key,user:email`.
+   A missing one is a `github-key-scope` (or `github-email-scope`) manual
+   action whose destination is the command to run. Missing login or scope is a
+   manual step: show the engine's guidance and let the user authenticate or
+   grant scope. Do not execute login, key uploads, or SSH identity/protocol
+   changes for the user.
 8. Run the checkout's `bash install.sh inspect ...` with the explicit choices.
    Parse its typed TSV; do not expose the CLI as a second questionnaire. Use
    the engine's internal `none` value for an empty component/package
