@@ -1,13 +1,13 @@
 # fzf — key-bindings (^R history, ^T paste, Alt-C cd) + ** completion trigger.
 # Loaded before interactive.zsh's fzf-tab, per fzf-tab's docs.
 
-if (( $+commands[fzf] )); then
+if whence -p fzf >/dev/null; then
   # fd honours .gitignore and is much faster than fzf's built-in walker. Debian
   # and Ubuntu ship it as fdfind; the installer links that to fd where it can.
   # Values the user already set (environment or local/private.zsh) win.
-  if (( $+commands[fd] )); then
+  if whence -p fd >/dev/null; then
     typeset -g _leos_fzf_fd=fd
-  elif (( $+commands[fdfind] )); then
+  elif whence -p fdfind >/dev/null; then
     typeset -g _leos_fzf_fd=fdfind
   fi
   if [[ -n ${_leos_fzf_fd:-} ]]; then
@@ -29,7 +29,7 @@ if (( $+commands[fzf] )); then
     fi
   fi
   # Ctrl-T previews files with bat when it is available.
-  if (( $+commands[bat] )) && [[ -z ${FZF_CTRL_T_OPTS:-} ]]; then
+  if whence -p bat >/dev/null && [[ -z ${FZF_CTRL_T_OPTS:-} ]]; then
     export FZF_CTRL_T_OPTS="--preview 'bat --style=numbers --color=always --line-range :500 {}'"
   fi
 fi
@@ -40,7 +40,7 @@ fi
 # stays set until zsh actually starts the editor — and fzf's own script then
 # prints "can't change option: zle" twice. So require a terminal on both stdin
 # and stdout as well.
-if [[ -o zle && -n ${TTY:-} && -t 0 && -t 1 ]] && (( $+commands[fzf] )); then
+if [[ -o zle && -n ${TTY:-} && -t 0 && -t 1 ]] && whence -p fzf >/dev/null; then
   # `fzf --zsh` is deterministic, so it is cached. A non-zero return means this
   # fzf predates that flag, in which case the distribution ships the scripts as
   # files: load the first layout that exists so multiple installed copies do

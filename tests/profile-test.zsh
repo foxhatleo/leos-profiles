@@ -17,6 +17,7 @@ root=$tmp/runtime
 mkdir -p "$root/zsh" "$root/util" "$root/local/flags"
 cp "$source_root"/zsh/*.zsh "$source_root"/zsh/*.toml "$root/zsh/"
 cp -R "$source_root/zsh/path" "$root/zsh/path"
+cp -R "$source_root/zsh/completions" "$root/zsh/completions"
 # Include the actual installed plugin code, but never the repository's private
 # overrides. Plugin availability remains optional for clean-checkout testing.
 [[ ! -d $source_root/zsh/plugins ]] || cp -R "$source_root/zsh/plugins" "$root/zsh/plugins"
@@ -409,6 +410,50 @@ run_block 'leos-refresh-init-cache clears init scripts and keeps rehash stamps' 
   [[ -e $d/pyenv-rehash ]]
 '
 
+# Compiled profile sources: every startup file and the plugin files they
+# source get a .zwc, plugin checkouts stay clean through .git/info/exclude,
+# directories others can write get none, and Zsh still prefers a newer source.
+mkdir -p "$tmp/zc/zsh/path" "$tmp/zc/zsh/plugins/zsh-autosuggestions" "$tmp/zc/shared"
+cp "$root"/zsh/*.zsh "$tmp/zc/zsh/"
+cp "$root"/zsh/path/*.zsh "$tmp/zc/zsh/path/"
+print -r -- 'typeset -g ZC_SOURCE=compiled' > "$tmp/zc/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh"
+print -r -- 'typeset -g ZC_SOURCE=shared' > "$tmp/zc/shared/x.zsh"
+chmod 700 "$tmp/zc/zsh" "$tmp/zc/zsh/path" "$tmp/zc/zsh/plugins/zsh-autosuggestions"
+chmod 777 "$tmp/zc/shared"
+run_block 'zcompile of profile and plugin sources' \
+  HOME="$tmp/zc" LEOS_TEST_ROOT="$root" ZC="$tmp/zc" PATH="$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  plugin=$ZC/zsh/plugins/zsh-autosuggestions
+  git -C "$plugin" init -q
+  git -C "$plugin" -c user.name=t -c user.email=t@example.invalid add -A
+  git -C "$plugin" -c user.name=t -c user.email=t@example.invalid commit -qm fixture
+  __leos_zcompile_profile "$ZC/zsh"
+  (( REPLY > 0 ))
+  for f in $ZC/zsh/*.zsh $ZC/zsh/path/*.zsh $plugin/zsh-autosuggestions.zsh; do
+    [[ -s $f.zwc ]] || { print -u2 -r -- "not compiled: $f"; exit 1; }
+  done
+  [[ -z $(git -C "$plugin" status --porcelain) ]] || { print -u2 -r -- "plugin checkout dirty"; exit 1; }
+  leftovers=($ZC/zsh/.compile-*(N) $plugin/.compile-*(N))
+  (( ! $#leftovers ))
+  # Not a profile path, and its directory is world-writable: never compiled.
+  cp "$ZC/shared/x.zsh" "$ZC/zsh/path/zz-shared.zsh"
+  chmod 777 "$ZC/zsh/path"
+  __leos_zcompile_profile "$ZC/zsh"
+  [[ ! -e $ZC/zsh/path/zz-shared.zsh.zwc ]]
+  chmod 700 "$ZC/zsh/path"
+  # Zsh reads the .zwc when the text is not newer, and the text when it is.
+  print -r -- "typeset -g ZC_SOURCE=edited" > "$plugin/zsh-autosuggestions.zsh"
+  touch -t 202001010000 "$plugin/zsh-autosuggestions.zsh"
+  source "$plugin/zsh-autosuggestions.zsh"
+  [[ $ZC_SOURCE == compiled ]]
+  touch "$plugin/zsh-autosuggestions.zsh"
+  touch -t 202001010000 "$plugin/zsh-autosuggestions.zsh.zwc"
+  source "$plugin/zsh-autosuggestions.zsh"
+  [[ $ZC_SOURCE == edited ]]
+'
+
 # brew-checkup gained a `|| return 1` and a cache-refresh call: it must still
 # report success on a clean run, fail when brew fails, and only clear the cache
 # when the upgrade actually succeeded.
@@ -779,6 +824,34 @@ run_block 'ls/cat wrappers route each flag to the program that understands it' \
   [[ "$(<$WRAP_LOG)" == "cat f" ]]
 '
 
+# Startup files test for tools with `whence -p`: a $+commands miss fills zsh's
+# whole command table, and each PATH edit empties it again (PERF-9).
+startup_lookups=($(command grep -l '^[^#]*\$+commands\[' "$source_root"/zsh/*.zsh "$source_root"/zsh/path/*.zsh /dev/null || true))
+(( ! $#startup_lookups )) || fail "startup files still test tools with \$+commands: $startup_lookups"
+
+# env.zsh settles the locale, the ls colour flag and grep colours from paths,
+# without running locale, ls or grep (each a fork on every shell).
+mkdir -p "$tmp/probe/gnubin"
+for tool in ls grep locale; do
+  print -rl -- '#!/bin/sh' "printf '%s\\n' \"$tool \$*\" >> \"\$PROBE_LOG\"" > "$tmp/probe/gnubin/$tool"
+  chmod +x "$tmp/probe/gnubin/$tool"
+done
+run_block 'env.zsh decides locale, ls and grep colours without running them' \
+  HOME="$tmp/wrap-home" PROBE_LOG="$tmp/probe/log" LEOS_TEST_ROOT="$root" PATH="$tmp/probe/gnubin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  unset LANG LC_ALL
+  puts() { :; }; puts-err() { :; }
+  : > "$PROBE_LOG"
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  source "$LEOS_TEST_ROOT/zsh/env.zsh"
+  [[ ! -s $PROBE_LOG ]] || { print -u2 -r -- "probed: $(<$PROBE_LOG)"; exit 1; }
+  [[ $__leos_ls_color == --color=auto ]]
+  [[ $(alias grep) == *"grep --color=auto"* ]]
+  if [[ -d /usr/lib/locale/C.utf8 || -d /usr/lib/locale/C.UTF-8 || -d /usr/share/locale/C.UTF-8 ]]; then
+    [[ $LANG == C.UTF-8 ]]
+  fi
+'
+
 run_block 'without eza ls keeps the platform colour flag' \
   HOME="$tmp/wrap-home" WRAP_LOG="$tmp/wrap-log" LEOS_TEST_ROOT="$root" PATH="$fakepath" -- '
   setopt err_return no_unset pipe_fail
@@ -995,6 +1068,91 @@ run_block 'completion dump moves to the cache root; legacy dumps removed once' \
   : > "$HOME/.zcompdump"          # some other tool writes one later
   source "$LEOS_PROFILES_ZSH/interactive.zsh"
   [[ -e $HOME/.zcompdump ]]       # ...and it is not removed again
+'
+
+# compinit freshness. Stubbed compinit/compaudit (first on fpath) record their
+# calls. A missing or day-old dump, or a changed fpath, takes the slow path
+# exactly once: audit, full compinit, and a touch so that the next shells take
+# the fast path, `compinit -C` with no audit. The compiled dump is rebuilt only
+# when compinit rewrote the dump. No plugins in this fixture.
+mkdir -p "$tmp/ci-root/zsh" "$tmp/ci-home/stubs" "$tmp/ci-home/newcomp"
+cp "$root/zsh/cache.zsh" "$root/zsh/interactive.zsh" "$tmp/ci-root/zsh/"
+print -rl -- 'print -r -- "compinit $*" >> $HOME/calls' \
+  '[[ -e ${@[-1]} ]] || print -r -- "#files: 0" > ${@[-1]}' \
+  '[[ ! -e $HOME/rewrite ]] || print -r -- "#files: 1" > ${@[-1]}' > "$tmp/ci-home/stubs/compinit"
+print -rl -- 'print -r -- audit >> $HOME/calls' > "$tmp/ci-home/stubs/compaudit"
+ci_dump=$tmp/ci-home/.cache/leos-profiles/zcompdump-$("$zsh_bin" -dfc 'print -r -- $ZSH_VERSION')
+compinit_round() {
+  local label=$1 extra=${2:-}
+  : > "$tmp/ci-home/calls"
+  run_block "compinit freshness: $label" \
+    HOME="$tmp/ci-home" ZDOTDIR="$tmp/ci-home" LEOS_PROFILES_ZSH="$tmp/ci-root/zsh" \
+    TERM=xterm-256color PATH="$fakepath" CI_EXTRA="$extra" -- '
+    setopt err_return no_unset pipe_fail
+    puts() { :; }; puts-err() { :; }; entry() { :; }
+    zcompile() { [[ ${2-} != */zcompdump-* ]] || print -r -- "zcompile $*" >> $HOME/calls; builtin zcompile "$@"; }
+    fpath=("$HOME/stubs" ${CI_EXTRA:+$CI_EXTRA} $fpath)
+    source "$LEOS_PROFILES_ZSH/cache.zsh"
+    source "$LEOS_PROFILES_ZSH/interactive.zsh"
+  '
+  REPLY=$(<"$tmp/ci-home/calls")
+}
+compinit_round 'no dump'
+[[ $REPLY == $'audit\ncompinit -d '$ci_dump$'\nzcompile -R '$ci_dump ]] ||
+  fail "first shell must audit, build and compile: ${(q+)REPLY}"
+compinit_round 'fresh dump'
+[[ $REPLY == "compinit -C -d $ci_dump" ]] || fail "fresh dump must take the fast path: ${(q+)REPLY}"
+touch -t 202001010000 "$ci_dump"
+compinit_round 'day-old dump'
+[[ $REPLY == $'audit\ncompinit -d '$ci_dump ]] || fail "day-old dump must audit and rebuild: ${(q+)REPLY}"
+[[ -n $ci_dump(#qN.mh-1) ]] || fail 'the slow path did not touch the dump'
+compinit_round 'after the daily rebuild'
+[[ $REPLY == "compinit -C -d $ci_dump" ]] || fail "after a rebuild the fast path must return: ${(q+)REPLY}"
+compinit_round 'new fpath directory' "$tmp/ci-home/newcomp"
+[[ $REPLY == $'audit\ncompinit -d '$ci_dump ]] || fail "a changed fpath must rebuild: ${(q+)REPLY}"
+compinit_round 'same new fpath' "$tmp/ci-home/newcomp"
+[[ $REPLY == "compinit -C -d $ci_dump" ]] || fail "an unchanged fpath must take the fast path: ${(q+)REPLY}"
+touch -t 202001010000 "$ci_dump"
+: > "$tmp/ci-home/rewrite"
+compinit_round 'rewritten dump' "$tmp/ci-home/newcomp"
+[[ $REPLY == $'audit\ncompinit -d '$ci_dump$'\nzcompile -R '$ci_dump ]] ||
+  fail "a rewritten dump must be recompiled: ${(q+)REPLY}"
+
+# Starship: PROMPT2 is no longer computed (a starship run) at startup but when
+# shown, and the right prompt's starship run happens only while the active
+# configuration has a right_format. The fake mimics `starship init zsh`.
+mkdir -p "$tmp/ss-home/bin"
+cat > "$tmp/ss-home/bin/starship" <<'STARSHIP'
+#!/bin/sh
+case "$1" in
+  init) cat <<'EOS'
+setopt promptsubst
+PROMPT='$(starship prompt --terminal-width="$COLUMNS")'
+RPROMPT='$(starship prompt --right --terminal-width="$COLUMNS")'
+PROMPT2="$(starship prompt --continuation)"
+EOS
+  ;;
+  prompt) printf '%s\n' "prompt $*" >> "$HOME/starship-calls"; printf '> ' ;;
+esac
+STARSHIP
+chmod +x "$tmp/ss-home/bin/starship"
+run_block 'starship continuation prompt is lazy and the right prompt runs only when configured' \
+  HOME="$tmp/ss-home" LEOS_PROFILES_ZSH="$tmp/ci-root/zsh" TERM=xterm-256color \
+  PATH="$tmp/ss-home/bin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }; entry() { :; }
+  source "$LEOS_PROFILES_ZSH/cache.zsh"
+  source "$LEOS_PROFILES_ZSH/interactive.zsh"
+  [[ ! -e $HOME/starship-calls ]] || { print -u2 -r -- "starship ran at startup: $(<$HOME/starship-calls)"; exit 1; }
+  [[ $PROMPT2 == "\$(starship prompt --continuation)" ]] || { print -u2 -r -- "PROMPT2: $PROMPT2"; exit 1; }
+  print -r -- "format = \"\$all\"" > "$HOME/starship.toml"
+  STARSHIP_CONFIG=$HOME/starship.toml
+  __leos_starship_right
+  [[ -z $RPROMPT ]]
+  print -r -- "right_format = \"\$time\"" >> "$HOME/starship.toml"
+  __leos_starship_right
+  [[ $RPROMPT == *"prompt --right"* ]]
+  (( ${precmd_functions[(Ie)__leos_starship_right]} ))
 '
 
 mkdir -p "$tmp/unsafe-home/shared"

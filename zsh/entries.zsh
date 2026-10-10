@@ -4,6 +4,13 @@
 # nested shell inherits FPATH from brew shellenv: keep the array unique.
 typeset -gU fpath
 
+# Entries test for tools with `whence -p tool >/dev/null`, then read the path
+# from $commands[tool]. Like $+commands[tool], `whence -p` ignores functions
+# and aliases, but it searches PATH for that one name and hashes it, while
+# $+commands fills zsh's whole command table (2-3 ms with Homebrew on PATH)
+# whenever the name is not hashed yet, and every PATH edit empties the table
+# again. Several fills per startup were measurable (PERF-9).
+
 entry "path/brew"
 entry "path/gnu"
 # add-path prepends, so PATH order is the reverse of load order. The resulting

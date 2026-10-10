@@ -1,5 +1,11 @@
 "$schema" = 'https://starship.rs/config-schema.json'
 
+# Upper bound, in milliseconds, for each external command a module runs (the
+# VCS status, `node --version`, ...). 500 is Starship's built-in default,
+# stated here so the per-prompt worst case is visible and tuned in one place;
+# lower it where a slow toolchain probe makes Enter feel sluggish.
+command_timeout = 500
+
 format = """
 [](color_orange)\
 $os\

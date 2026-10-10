@@ -1,0 +1,13 @@
+#compdef pyenv
+# Leo's Profiles — pyenv completion for the completion system.
+#
+# pyenv ships only an old-style `compctl` completion, whose module load cost
+# every shell about 8 ms (path/pyenv.zsh strips it from the init script). This
+# asks pyenv for the same candidates, and is autoloaded on first use only.
+local -a candidates
+if (( CURRENT == 2 )); then
+  candidates=(${(f)"$(_call_program commands pyenv commands 2>/dev/null)"})
+else
+  candidates=(${(f)"$(_call_program completions pyenv completions ${(q)${(@Q)words[2,CURRENT-1]}} 2>/dev/null)"})
+fi
+compadd -a candidates

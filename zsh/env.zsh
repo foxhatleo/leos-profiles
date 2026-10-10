@@ -2,13 +2,28 @@
 
 # Respect an existing locale/editor preference. A deterministic UTF-8 fallback
 # is useful on minimal machines, but forcing LC_ALL changes every child tool.
+#
+# The usual locale directories answer without a fork: glibc's compiled
+# C.utf8 (Debian, Ubuntu, Fedora), and the BSD/macOS per-locale directories.
+# Only when none of them settles it is `locale -a` asked (7-15 ms).
 if [[ -z ${LANG:-} ]]; then
-  if locale -a 2>/dev/null | command grep -qEi '^C\.(UTF-8|utf8)$'; then
+  if [[ -d /usr/lib/locale/C.utf8 || -d /usr/lib/locale/C.UTF-8 || -d /usr/share/locale/C.UTF-8 ]]; then
     export LANG=C.UTF-8
-  elif locale -a 2>/dev/null | command grep -qEi '^en_US\.(UTF-8|utf8)$'; then
+  elif [[ -d /usr/lib/locale/en_US.utf8 || -d /usr/lib/locale/en_US.UTF-8 || -d /usr/share/locale/en_US.UTF-8 ]]; then
     export LANG=en_US.UTF-8
   else
-    export LANG=C
+    () {
+      emulate -L zsh
+      setopt extended_glob
+      local -a available=(${(f)"$(locale -a 2>/dev/null)"})
+      if (( ${available[(I)(#i)C.(UTF-8|utf8)]} )); then
+        export LANG=C.UTF-8
+      elif (( ${available[(I)(#i)en_US.(UTF-8|utf8)]} )); then
+        export LANG=en_US.UTF-8
+      else
+        export LANG=C
+      fi
+    }
   fi
 fi
 
@@ -24,12 +39,32 @@ export EDITOR="${EDITOR:-nano}"
 
 # Which ls this is decides its colour flag: GNU (Linux, or coreutils' gnubin on
 # macOS) takes --color, BSD takes -G. Also used by the fzf-tab preview below.
+# Decided from where `ls` resolves, without running it; only an ls this cannot
+# place (BusyBox, another BSD, an unusual install) is probed.
 typeset -ga __leos_ls_color=()
-if command ls --color=auto -d . >/dev/null 2>&1; then
-  __leos_ls_color=(--color=auto)
-elif [[ $OSTYPE == darwin* ]]; then
-  __leos_ls_color=(-G)
-fi
+() {
+  local real=
+  # `whence -p` first, so reading $commands does not fill the whole command
+  # table (see entries.zsh).
+  ! whence -p ls >/dev/null || real=${commands[ls]:A}
+  if [[ ${real:t} == busybox ]]; then
+    :
+  elif [[ ${real:t} == gls || $real == */coreutils/* || $real == */gnubin/* ]]; then
+    __leos_ls_color=(--color=auto)
+    return
+  elif [[ $OSTYPE == linux* ]]; then
+    __leos_ls_color=(--color=auto)
+    return
+  elif [[ $OSTYPE == darwin* && $real == /bin/ls ]]; then
+    __leos_ls_color=(-G)
+    return
+  fi
+  if command ls --color=auto -d . >/dev/null 2>&1; then
+    __leos_ls_color=(--color=auto)
+  elif [[ $OSTYPE == darwin* ]]; then
+    __leos_ls_color=(-G)
+  fi
+}
 
 # __leos_ls_eza_compatible <ls arguments...>
 # Succeeds when eza would read every argument the way ls does, so the `ls`
@@ -122,7 +157,12 @@ if [[ ${LEOS_DISABLE_ALIASES:-0} != 1 ]]; then
       export MANROFFOPT
     fi
   fi
-  if command grep --color=auto '' /dev/null >/dev/null 2>&1 || [[ $? == 1 ]]; then
+  # GNU and BSD grep both take --color; BusyBox builds may not, so only a grep
+  # that resolves to busybox is still probed.
+  if whence -p grep >/dev/null && {
+       [[ ${commands[grep]:A:t} != busybox ]] ||
+       command grep --color=auto '' /dev/null >/dev/null 2>&1 || [[ $? == 1 ]]
+     }; then
     alias grep='grep --color=auto'
     # egrep/fgrep are obsolescent: GNU grep 3.8+ warns on every call.
     alias fgrep='grep -F --color=auto'

@@ -273,6 +273,8 @@ Measure the actual installed public checkout with the benchmark helper:
 ```bash
 zsh tests/startup-benchmark.zsh "$HOME/.leos-profiles"        # non-terminal exit time
 zsh tests/startup-benchmark.zsh --pty "$HOME/.leos-profiles"  # first prompt and command lag
+# Fixture under HOME instead of the system temporary directory (see below):
+mkdir -p ~/.cache/leos-bench && TMPDIR=~/.cache/leos-bench/ zsh tests/startup-benchmark.zsh --pty "$HOME/.leos-profiles"
 ```
 
 Each mode measures three scenarios: cold (no init cache, no completion dump),
@@ -320,17 +322,83 @@ measured, without a terminal: cold **1984.2 ms**, warm **364.4 ms**, aged-dump
 Against zsh-bench's perceptibility thresholds (50 ms first prompt, 10 ms
 command lag) both warm startup and per-prompt cost are well above the target.
 
-The cache hashes binary path, arguments, HOME and version-manager roots, plus
-any generator-specific variables the caller folds into the key (zoxide's
-`_ZO_ECHO` and `_ZO_RESOLVE_SYMLINKS`). It
-checks ownership, write permissions and symlinks before executing persisted
-scripts or compiled files, and creates private directories/files. Launcher
-mtime controls freshness; use `leos-refresh-init-cache` after updates to other
-implementation files. Homebrew shellenv and fnm env run per shell rather than
+The performance pass (audit PR 4) was measured on 2026-10-10 on the same
+machine (Zsh 5.9.2, Homebrew 7.0.9, fnm 1.39.0, Node 24.18.0, pnpm 12.11.2,
+Bun 1.3.11, Starship 1.26.0, same pyenv/rbenv; installed plugins; ten samples,
+20 Enter presses; run from a Git checkout, so Starship's Git modules are part
+of every prompt). "Before" is `origin/fix/zsh-runtime` at `9a85aa7`; "after"
+is `perf/startup`, with and without the `.zwc` files the installer now writes.
+The load on the machine varied between runs, so compare columns of one table.
+
+On this Mac the helper's default temporary directory (`/var/folders/...`)
+makes file-system-heavy work (fpath globs, compaudit, plugin loading) about
+twice as slow as the same files under HOME, where the real profile lives. Both
+locations are reported; `TMPDIR=<dir under HOME>/` selects the second.
+
+| Scenario (median ms) | Before | After | After, compiled |
+| --- | --- | --- | --- |
+| HOME: first prompt, warm | 296.2 | 130.8 | 127.1 |
+| HOME: first prompt, aged dump | 302.4 | 160.7 | 154.4 |
+| HOME: first prompt, cold | 1793.5 | 1661.2 | 1651.3 |
+| HOME: command lag | 44.9 | 29.4 | 29.7 |
+| HOME: exit time, warm / aged / cold | 228.3 / 237.5 / 1679.1 | 86.1 / 113.2 / 1568.5 | 79.8 / 107.9 / 1565.7 |
+| default TMPDIR: first prompt, warm | 533.6 | 239.2 | 227.5 |
+| default TMPDIR: first prompt, aged dump | 627.8 | 599.1 | 571.2 |
+| default TMPDIR: first prompt, cold | 2267.6 | 2409.0 | 2327.3 |
+| default TMPDIR: command lag | 51.6 | 32.8 | 31.2 |
+| default TMPDIR: exit time, warm / aged / cold | 429.8 / 510.7 / 2180.6 | 188.3 / 538.4 / 2252.6 | 173.5 / 510.9 / 2120.9 |
+
+An earlier, quieter "before" run with the default TMPDIR measured first prompt
+453.3 (warm), 537.2 (aged), 2193.8 (cold), lag 39.6, and exit time 393.8 /
+481.7 / 2089.4. Before, every shell ran compaudit; now only the first shell of
+a day (the aged-dump scenario) does. With the default TMPDIR, where compaudit
+alone costs a few hundred milliseconds, the aged-dump time therefore barely
+moves while the warm time halves. Cold startup is dominated by the generators
+themselves (heroku and the Node completions start Node) and is noise-bound.
+
+What remains, from zprof and the pty runs: `brew shellenv` (about 20 ms, kept
+per shell on purpose), `fnm env` (about 5 ms), sourcing the plugins and cached
+scripts, and on every prompt Starship (10 to 20 ms, more in a large Git
+repository), the direnv hook (about 6 ms) and the plugin hooks. The 110 ms
+first-prompt and 20 ms lag goals are not met in this harness; reaching them
+needs deferred loading or fewer per-prompt tools, outside this pass.
+
+Each cache entry starts with a `# leos-id:` line holding its identity: key,
+resolved binary path, HOME, version-manager roots, the optional output filter
+(`__leos_init_filter`, which pyenv and Starship use) and the arguments, each
+field `(q+)`-quoted so newlines or NULs cannot forge it, plus any
+generator-specific variables the caller folds into the key (zoxide's
+`_ZO_ECHO` and `_ZO_RESOLVE_SYMLINKS`). The file name is the `%XX`-encoded key
+and a 32-bit FNV-1a digest of that line, computed in-process; the line itself,
+read with `read` (no fork), decides whether an entry is used. Bump the key when
+a filter's behaviour changes. The cache checks ownership, write permissions and
+symlinks before executing persisted scripts or compiled files, and creates
+private directories/files. `__leos_cache_dir` validates every ancestor once per
+shell and memoizes the result (success or failure) keyed on the cache root and
+EUID; repeat calls lstat the root and the two profile-owned levels and validate
+in full again if their owner, mode or inode changed. Tests that change
+permissions mid-shell call `__leos_cache_forget`. A warm cache hit costs about
+0.4 ms, against 3 to 6 ms for running the cached generators directly (zoxide,
+direnv, Starship, fzf), so every generator stays cached. Launcher mtime controls
+freshness; use `leos-refresh-init-cache` after updates to other implementation
+files. It also recompiles the profile and plugin sources (`.zwc`), as the
+installer does after the plugins or zsh-config step.
+
+Startup files test for tools with `whence -p tool >/dev/null` and then read
+`$commands[tool]`; a `$+commands[tool]` miss fills zsh's whole command table
+(2 to 3 ms) and every PATH edit empties it again. A profile test keeps
+`$+commands` out of `zsh/*.zsh` and `zsh/path/*.zsh`.
+
+Homebrew shellenv and fnm env run per shell rather than
 being cached. Test both a clean PATH and an already-configured PATH, and verify
 that different shells receive different fnm multishell directories. Daily
 background jobs (shim rehash, fnm multishell pruning) share the
-`__leos_daily_due` stamp helper in `zsh/cache.zsh`; test fixtures stub
-`__leos_rehash_daily` and `__leos_fnm_prune_daily` so no detached process
-outlives a test. The completion dump is `zcompdump-$ZSH_VERSION` in the same
-private cache root.
+`__leos_daily_due` stamp helper in `zsh/cache.zsh`, which answers "not due"
+from a stamp younger than a day without validating anything (a stamp can only
+suppress a job) and validates the directory before a due job runs; test
+fixtures stub `__leos_rehash_daily` and `__leos_fnm_prune_daily` so no
+detached process outlives a test. The completion dump is `zcompdump-$ZSH_VERSION`
+in the same private cache root, with `zcompdump-$ZSH_VERSION.fpath` recording
+the fpath it was built from: a dump younger than a day built from the same
+fpath takes `compinit -C`; otherwise compaudit and a full compinit run and the
+dump is touched (with its `.zwc` when compinit left the dump unchanged).
