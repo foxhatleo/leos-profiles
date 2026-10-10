@@ -35,6 +35,8 @@ done < <(artifact_names)
 [[ $("$TEST_HOME/bin/bun" --version) == "$BUN_VERSION" ]]
 [[ $("$TEST_HOME/bin/fnm" --version) == "fnm $FNM_VERSION" ]]
 [[ $("$TEST_HOME/bin/starship" --version | sed -n '1p') == "starship $STARSHIP_VERSION" ]]
+[[ $("$TEST_HOME/bin/uv" --version) == "uv $UV_VERSION"* ]]
+[[ $("$TEST_HOME/bin/uvx" --version) == "uvx $UV_VERSION"* ]]
 
 # Check declared runtime requirements against the *verified* package manifests.
 # Changing a lock requires updating the supported engine evaluator as necessary.
@@ -61,7 +63,9 @@ verify_pnpm
 fnm_exec npm completion > "$TEST_HOME/npm-completion.zsh"
 fnm_exec "$HOME/.local/npm/bin/pnpm" completion zsh > "$TEST_HOME/pnpm-completion.zsh"
 SHELL=zsh "$TEST_HOME/bin/bun" completions > "$TEST_HOME/bun-completion.zsh"
-for package in npm pnpm bun; do
+"$TEST_HOME/bin/uv" generate-shell-completion zsh > "$TEST_HOME/uv-completion.zsh"
+"$TEST_HOME/bin/uvx" --generate-shell-completion zsh > "$TEST_HOME/uvx-completion.zsh"
+for package in npm pnpm bun uv uvx; do
   [[ -s $TEST_HOME/$package-completion.zsh ]] || die "$package emitted no completion script"
   zsh -n "$TEST_HOME/$package-completion.zsh"
 done

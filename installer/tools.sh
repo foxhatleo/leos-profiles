@@ -326,6 +326,9 @@ resolve_node_lts() {
 
 install_starship() { artifact_install starship; }
 
+# uv and uvx; their Zsh completions are cached by zsh/path/uv.zsh (MI-13).
+install_uv() { artifact_install uv; }
+
 
 # The locked packages currently declare simple lower bounds. Refuse a new range
 # syntax until its evaluator is implemented instead of silently weakening it.

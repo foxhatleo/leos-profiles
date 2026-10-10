@@ -69,6 +69,8 @@ verify_rbenv() {
 
 verify_bun() { artifact_verify bun; }
 
+verify_uv() { artifact_verify uv; }
+
 verify_yarn() {
   local directory
   [[ -x $HOME/.local/npm/bin/yarn ]] && fnm_exec "$HOME/.local/npm/bin/yarn" --version 2>/dev/null | grep -qx "$YARN_VERSION"

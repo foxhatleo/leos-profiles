@@ -61,6 +61,20 @@ readonly PNPM_VERSION="11.11.0"
 readonly PNPM_URL="https://registry.npmjs.org/pnpm/-/pnpm-11.11.0.tgz"
 readonly PNPM_SHA256="85ef2eff216a1ae90804c00c8dfbfa6685353644650d10906a893c05aedcd884"
 
+# uv ships uv and uvx in one archive. Linux uses the musl builds, as Starship
+# does: they are statically linked, so one binary runs on every supported
+# distribution with no glibc-version floor. uv still detects the host's libc
+# at run time, so the Pythons it downloads match the host. macOS is
+# Apple-silicon only (Intel Macs are unsupported). Digests are GitHub's
+# release-asset SHA-256 values for tag 0.13.0.
+readonly UV_VERSION="0.13.0"
+readonly UV_DARWIN_AARCH64_URL="https://github.com/astral-sh/uv/releases/download/0.13.0/uv-aarch64-apple-darwin.tar.gz"
+readonly UV_DARWIN_AARCH64_SHA256="a9c1b29002cf3c83f07fa9cd8a887a3be0107d90e23189721221e7257db8e3d6"
+readonly UV_LINUX_AARCH64_URL="https://github.com/astral-sh/uv/releases/download/0.13.0/uv-aarch64-unknown-linux-musl.tar.gz"
+readonly UV_LINUX_AARCH64_SHA256="281ca6cf43f4e26e35474839ad4861be86de42af2682f74134460f5b2071b96d"
+readonly UV_LINUX_X64_URL="https://github.com/astral-sh/uv/releases/download/0.13.0/uv-x86_64-unknown-linux-musl.tar.gz"
+readonly UV_LINUX_X64_SHA256="b0828fc4cdc47d65951e94b5f0a15a5364420e8dcd88723f3b21e7a2eb30bbc3"
+
 readonly STARSHIP_VERSION="1.26.0"
 readonly STARSHIP_DARWIN_AARCH64_URL="https://github.com/starship/starship/releases/download/v1.26.0/starship-aarch64-apple-darwin.tar.gz"
 readonly STARSHIP_DARWIN_AARCH64_SHA256="c40b27b11f580411e068f2fa6c1be7830a387c0bc47a94d1d37f32b054c5361d"

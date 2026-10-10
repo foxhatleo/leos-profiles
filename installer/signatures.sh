@@ -52,6 +52,8 @@ signature_rbenv() {
 
 signature_bun() { artifact_signature bun; }
 
+signature_uv() { artifact_signature uv; }
+
 signature_yarn() {
   local material="" asset
   material+="|$YARN_VERSION|$YARN_URL|$YARN_SHA256|$HOME/.local/npm|$NODE_POLICY|${RESOLVED_NODE_VERSION:-unresolved}"

@@ -181,6 +181,34 @@ test_tar_archive_install_creates_extraction_directory() {
   rm -rf "$temp"
 }
 
+# uv's archive holds uv and uvx in a versioned directory: both are installed,
+# verified and listed, from the registry alone.
+test_uv_artifact_installs_uv_and_uvx() {
+  local temp name
+  temp=$(mktemp -d)
+  mkdir -p "$temp/source/uv-aarch64-apple-darwin" "$temp/home"
+  for name in uv uvx; do
+    printf '#!/bin/sh\nprintf "%%s %%s (fixture 2026-10-01)\\n" "%s" "%s"\n' "$name" "$UV_VERSION" > "$temp/source/uv-aarch64-apple-darwin/$name"
+    chmod 755 "$temp/source/uv-aarch64-apple-darwin/$name"
+  done
+  TEST_ARCHIVE="$temp/uv.tar.gz"
+  tar -czf "$TEST_ARCHIVE" -C "$temp/source" uv-aarch64-apple-darwin
+  HOME="$temp/home"
+  DRY_RUN=0
+  OS_FAMILY=macos
+  download_verified() { mkdir -p "$(dirname -- "$3")"; cp "$TEST_ARCHIVE" "$3"; }
+  uname() { if [[ ${1:-} == -m ]]; then printf 'arm64\n'; else command uname "$@"; fi; }
+  install_uv
+  [[ -x $HOME/.local/bin/uv && -x $HOME/.local/bin/uvx ]] || fail "uv and uvx were not both installed"
+  verify_step uv || fail "the installed uv did not verify"
+  rm "$HOME/.local/bin/uvx"
+  ! verify_step uv || fail "uv verified without uvx"
+  assert_contains "$(platform_asset uv)" "uv-aarch64-apple-darwin.tar.gz"
+  OS_FAMILY=apt
+  assert_contains "$(platform_asset uv)" "uv-aarch64-unknown-linux-musl.tar.gz"
+  rm -rf "$temp"
+}
+
 test_platform_assets_are_locked() {
   OS_FAMILY=macos
   local asset expected
@@ -825,7 +853,7 @@ test_equivalent_github_origins() {
 }
 
 test_recommended_and_whole_group_closure() {
-  [[ $SELECTED_STEPS == 'packages,pyenv,rbenv,bun,fnm,yarn,pnpm,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
+  [[ $SELECTED_STEPS == 'packages,pyenv,rbenv,bun,fnm,yarn,pnpm,uv,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
   [[ $SELECTED_GROUPS == 'core-utils,shell,dev-tools,languages,media,network,system' ]] || fail "Recommended package groups changed"
   # MI-4: the Node and Bun tools bring no OS runtimes.
   SELECTED_STEPS=bun,yarn,pnpm
@@ -1619,6 +1647,7 @@ TESTS=(
   test_retired_flags_are_rejected_everywhere
   test_heroku_is_an_opt_in_macos_group
   test_dev_tools_cover_ruby_build_dependencies
+  test_uv_artifact_installs_uv_and_uvx
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

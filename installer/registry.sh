@@ -17,6 +17,7 @@ bun|packages||install_bun
 fnm|packages||install_fnm
 yarn|fnm,packages||install_yarn
 pnpm|fnm,packages||install_pnpm
+uv|packages||install_uv
 plugins|packages|shell|install_prompt_plugins
 fonts|||install_fonts
 zsh-config|packages|shell|install_zsh_config
@@ -108,6 +109,7 @@ rpatool|bins|RPATOOL|file|rpatool|
 bun|bun|BUN|zip|bun|%s
 fnm|fnm|FNM|zip|fnm|fnm %s
 starship|plugins|STARSHIP|tar.gz|starship|starship %s
+uv|uv|UV|tar.gz|uv uvx|uv %s
 ROWS
 }
 
