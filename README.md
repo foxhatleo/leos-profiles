@@ -610,10 +610,12 @@ follow symlinks or implicitly cross nested mount boundaries, supports multiple
 roots/dry-run, and reports failures. Cloud-storage directories are included.
 On Linux, it reads `/proc/self/mountinfo` to preserve same-device bind mounts;
 an unreadable mount table aborts the scan before deletion.
-Recycle-bin directory removal is opt-in. The wrapper passes every argument to the script
-(`rmdsstore --help` shows its options, without sudo). The privileged wrapper uses the system
-Python interpreter in isolated mode, but executes the script from this
-user-owned checkout. Trust changes to the checkout before running maintenance
+Recycle-bin directory removal is opt-in. Deletions are anchored to the
+directory descriptor the scan opened, so a directory swapped for a symlink
+mid-scan cannot redirect them. The wrapper passes every argument to the
+script (`rmdsstore --help` shows its options, without sudo). The privileged
+wrapper uses the system Python interpreter in isolated mode, but executes the
+script from this user-owned checkout. Trust changes to the checkout before running maintenance
 with sudo.
 
 To have fewer `.DS_Store` files to clean in the first place,

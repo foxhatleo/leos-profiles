@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import importlib.util
+import inspect
+import io
 import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
@@ -425,41 +429,42 @@ class RmdsstoreTest(unittest.TestCase):
 
         self.assertEqual(status, 2)
 
+    def _scandir_failing_for(self, directory: pathlib.Path, error: OSError):
+        """Patch os.scandir so listing `directory` (by descriptor) raises."""
+        inode = directory.stat().st_ino
+        real_scandir = rmdsstore.os.scandir
+
+        def scandir(path):
+            if isinstance(path, int) and rmdsstore.os.fstat(path).st_ino == inode:
+                raise error
+            return real_scandir(path)
+
+        return mock.patch.object(rmdsstore.os, "scandir", side_effect=scandir)
+
     def test_genuine_walk_errors_are_reported_as_failures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            def failing_walk(*_args: object, **kwargs: object) -> list[object]:
-                onerror = kwargs["onerror"]
-                assert callable(onerror)
-                onerror(OSError(errno.EIO, "I/O error", directory))
-                return []
-
-            with mock.patch.object(rmdsstore.os, "walk", side_effect=failing_walk):
+            nested = pathlib.Path(directory) / "nested"
+            nested.mkdir()
+            with self._scandir_failing_for(nested, OSError(errno.EIO, "I/O error")):
                 result = rmdsstore.scan(directory, dry_run=True)
             self.assertEqual(result.failures, 1)
             self.assertEqual(result.skipped_unreadable, 0)
 
     def test_permission_denied_walk_is_skipped_not_failed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            def denied_walk(*_args: object, **kwargs: object) -> list[object]:
-                onerror = kwargs["onerror"]
-                assert callable(onerror)
-                onerror(PermissionError(errno.EACCES, "Permission denied", directory + "/Protected"))
-                return []
-
-            with mock.patch.object(rmdsstore.os, "walk", side_effect=denied_walk):
+            protected = pathlib.Path(directory) / "Protected"
+            protected.mkdir()
+            error = PermissionError(errno.EACCES, "Permission denied")
+            with self._scandir_failing_for(protected, error):
                 result = rmdsstore.scan(directory, dry_run=True)
             self.assertEqual(result.failures, 0)
             self.assertEqual(result.skipped_unreadable, 1)
 
     def test_permission_denied_run_exits_zero(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            def denied_walk(*_args: object, **kwargs: object) -> list[object]:
-                onerror = kwargs["onerror"]
-                assert callable(onerror)
-                onerror(PermissionError(errno.EPERM, "Operation not permitted", directory))
-                return []
-
-            with mock.patch.object(rmdsstore.os, "walk", side_effect=denied_walk):
+            error = PermissionError(errno.EPERM, "Operation not permitted")
+            with self._scandir_failing_for(pathlib.Path(directory), error), \
+                    contextlib.redirect_stdout(io.StringIO()):
                 status = rmdsstore.main([directory])
             self.assertEqual(status, 0)
 
@@ -470,30 +475,143 @@ class RmdsstoreTest(unittest.TestCase):
             braced.mkdir()
             (braced / ".DS_Store").write_text("x", encoding="utf-8")
 
-            def denied_remove(path: str, *a: object, **k: object) -> None:
-                raise PermissionError(errno.EACCES, "denied {oops}", path)
+            def denied_unlink(path: str, *, dir_fd=None) -> None:
+                raise PermissionError(errno.EACCES, "denied {oops} {0}", path)
 
-            with mock.patch.object(rmdsstore.os, "remove", side_effect=denied_remove):
+            output = io.StringIO()
+            with mock.patch.object(rmdsstore.os, "unlink", side_effect=denied_unlink), \
+                    contextlib.redirect_stdout(output):
                 result = rmdsstore.scan(str(root), dry_run=False)
             # A found-but-undeletable metadata file is a real failure, not a
-            # skip, and braces in the path/error must not crash progress().
+            # skip, and braces in the path or error are printed literally.
             self.assertEqual(result.failures, 1)
             self.assertEqual(result.skipped_unreadable, 0)
+            self.assertIn("Could not remove ({weird}/.DS_Store): [Errno 13] denied {oops} {0}",
+                          output.getvalue())
 
     def test_walk_errors_with_braces_do_not_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            def brace_walk(*_args: object, **kwargs: object) -> list[object]:
-                onerror = kwargs["onerror"]
-                assert callable(onerror)
-                onerror(PermissionError(errno.EACCES, "denied {oops}", directory + "/{weird}"))
-                return []
-
-            with mock.patch.object(rmdsstore.os, "walk", side_effect=brace_walk):
+            weird = pathlib.Path(directory) / "{weird}"
+            weird.mkdir()
+            error = PermissionError(errno.EACCES, "denied {oops}")
+            output = io.StringIO()
+            with self._scandir_failing_for(weird, error), contextlib.redirect_stdout(output):
                 result = rmdsstore.scan(directory, dry_run=True)
-            # Permission-denied is skipped, not failed; braces in the error text
-            # and path must not crash progress()'s str.format template.
+            # Permission-denied is skipped, not failed; braces in the error
+            # text and path are printed as they are.
             self.assertEqual(result.skipped_unreadable, 1)
             self.assertEqual(result.failures, 0)
+            self.assertIn("Skipping unreadable ({weird}): [Errno 13] denied {oops}", output.getvalue())
+
+    # SEC-12: the default sweep deletes by name relative to the descriptor of
+    # the directory it listed, never through a path.
+    def test_default_sweep_unlinks_relative_to_directory_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            nested = root / "a" / "b"
+            nested.mkdir(parents=True)
+            for path in (root / ".DS_Store", nested / "Thumbs.db"):
+                path.write_text("metadata", encoding="utf-8")
+            real_unlink = rmdsstore.os.unlink
+            calls = []
+
+            def recording_unlink(path, *, dir_fd=None):
+                calls.append((path, dir_fd))
+                real_unlink(path, dir_fd=dir_fd)
+
+            with mock.patch.object(rmdsstore.os, "unlink", side_effect=recording_unlink), \
+                    mock.patch.object(rmdsstore.os, "remove", side_effect=AssertionError("os.remove")):
+                result = rmdsstore.scan(str(root), dry_run=False)
+
+            self.assertEqual(result.removed, 2)
+            self.assertEqual(sorted(name for name, _ in calls), [".DS_Store", "Thumbs.db"])
+            self.assertTrue(all(isinstance(fd, int) for _, fd in calls))
+            self.assertFalse((nested / "Thumbs.db").exists())
+
+    def test_default_sweep_directory_swap_never_reaches_the_link_target(self) -> None:
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                victim = root / "nested"
+                victim.mkdir()
+                (victim / ".DS_Store").write_text("metadata", encoding="utf-8")
+                outside = pathlib.Path(directory + "-outside")
+                outside.mkdir()
+                self.addCleanup(shutil.rmtree, outside, True)
+                protected = outside / ".DS_Store"
+                protected.write_text("keep", encoding="utf-8")
+                real_open = rmdsstore.os.open
+                swapped = False
+
+                # The closure is only called inside this iteration's mock.patch
+                # block, so reading the loop variables late is intended (B023).
+                def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+                    nonlocal swapped
+                    if path == "nested" and dir_fd is not None and not swapped:
+                        swapped = True
+                        victim.rename(root / "moved")  # noqa: B023
+                        victim.symlink_to(outside, target_is_directory=True)  # noqa: B023
+                    return real_open(path, flags, mode, dir_fd=dir_fd)  # noqa: B023
+
+                with mock.patch.object(rmdsstore.os, "open", side_effect=swapping_open), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    result = rmdsstore.scan(str(root), dry_run=dry_run)
+
+                self.assertTrue(swapped)
+                self.assertEqual(result.removed, 0)
+                self.assertEqual(result.failures, 1)
+                self.assertEqual(protected.read_text(encoding="utf-8"), "keep")
+
+    def test_deep_trees_do_not_hit_the_recursion_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            deepest = pathlib.Path(directory)
+            depth = 0
+            for _ in range(60):
+                deepest = deepest / "d"
+                depth += 1
+            deepest.mkdir(parents=True)
+            (deepest / ".DS_Store").write_text("metadata", encoding="utf-8")
+            limit = sys.getrecursionlimit()
+            sys.setrecursionlimit(40 + len(inspect.stack()))
+            try:
+                result = rmdsstore.scan(directory, dry_run=False)
+            finally:
+                sys.setrecursionlimit(limit)
+            self.assertEqual(depth, 60)
+            self.assertEqual(result.removed, 1)
+
+    # CQ-5: progress output.
+    def test_progress_without_a_terminal_has_no_carriage_returns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "sub {0}").mkdir()
+            (root / "sub {0}" / ".DS_Store").write_text("metadata", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rmdsstore.scan(str(root), dry_run=True)
+            text = output.getvalue()
+            self.assertNotIn("\r", text)
+            self.assertNotIn("Scanning", text)
+            self.assertEqual(text, "Would remove sub {0}/.DS_Store...\n")
+
+    def test_progress_on_a_terminal_pads_and_overwrites(self) -> None:
+        class Terminal(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        output = Terminal()
+        with contextlib.redirect_stdout(output), \
+                mock.patch.object(rmdsstore, "_term_width", return_value=30):
+            rmdsstore.progress("/r/some/long/directory/name/here", "/r")
+            rmdsstore.progress("/r/x {}", "/r", before="Removing ", newline=True)
+        transient, permanent = output.getvalue().split("\r")
+        self.assertEqual(len(transient), 30)
+        self.assertEqual(transient, "Scanning: some/long/directo...")
+        self.assertEqual(permanent, "Removing x {}...".ljust(30) + "\n")
+
+    def test_stat_module_is_not_shadowed(self) -> None:
+        self.assertNotIn("stat", rmdsstore._directory_key.__code__.co_varnames)
+        self.assertTrue(callable(rmdsstore.stat.S_ISDIR))
 
 
 if __name__ == "__main__":
