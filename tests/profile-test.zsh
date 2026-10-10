@@ -1034,6 +1034,9 @@ run_block 'zsh -ic without a terminal prints nothing to stderr' \
   PATH="$tmp/notty-bin:$fakepath" -- '
   setopt err_return no_unset pipe_fail
   err=$(zsh -dic true 2>&1 >/dev/null </dev/null)
+  # compaudit findings reflect the host (GitHub Ubuntu images ship a
+  # group-writable /usr/share/zsh), not terminal handling; ignore only those.
+  err=${(F)${(@)${(f)err}:#*Ignoring insecure Zsh completion path*}}
   [[ -z $err ]] || { print -u2 -r -- "stderr: $err"; exit 1; }
 '
 
