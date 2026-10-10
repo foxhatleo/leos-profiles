@@ -61,23 +61,33 @@ zle -N down-line-or-beginning-search
 [[ -d $LEOS_PROFILES_ZSH/plugins/zsh-completions/src ]] && \
   fpath=("$LEOS_PROFILES_ZSH/plugins/zsh-completions/src" $fpath)
 
-# compinit — regenerate at most once/day, else fast path. If the host exposes
-# insecure completion directories, ignore those directories instead of asking
-# an interactive question during shell startup.
+# compinit — rebuild and audit at most once a day, else the fast path.
+#
+# Fast path: the dump was (re)written or confirmed in the last 24 hours and was
+# built from the same fpath directories. `compinit -C` then just loads it, with
+# no audit and no scan of every fpath file. Slow path, otherwise: compaudit
+# first, then a full compinit, which rebuilds the dump if its file count no
+# longer matches. compinit leaves an up-to-date dump untouched, so the dump is
+# touched afterwards, as Prezto does; without that its mtime stays old and every
+# later shell would take the slow path again. If the host exposes insecure
+# completion directories, ignore those directories (-i) instead of asking an
+# interactive question during shell startup.
 #
 # The dump lives in the same validated, private cache root as the init cache,
 # named per Zsh version so an upgrade never reads an older version's dump. If
-# that storage is unsafe it falls back to Zsh's usual ${ZDOTDIR:-$HOME}.
+# that storage is unsafe it falls back to Zsh's usual ${ZDOTDIR:-$HOME}. The
+# fpath the dump was built from is kept beside it in the cache root only.
 autoload -Uz compinit compaudit
 () {
   # Localize options so the freshness qualifier below (which needs EXTENDED_GLOB,
   # normally enabled in env.zsh) works regardless of the ambient option set.
   emulate -L zsh
   setopt extended_glob
-  local dump insecure stamp
+  local dump insecure stamp fpath_record= fresh=0
   local -a legacy
   if (( $+functions[__leos_cache_dir] )) && __leos_cache_dir; then
     dump=${REPLY:h}/zcompdump-$ZSH_VERSION
+    fpath_record=$dump.fpath
     # Never let compinit source a dump that is not this user's regular file.
     if [[ -e $dump || -L $dump ]] && [[ ! -f $dump || -L $dump || ! -O $dump ]]; then
       rm -f -- "$dump" "$dump.zwc" 2>/dev/null
@@ -94,14 +104,38 @@ autoload -Uz compinit compaudit
   else
     dump=${ZDOTDIR:-$HOME}/.zcompdump
   fi
-  insecure=$(compaudit 2>/dev/null) || true
-  if [[ -n $insecure ]]; then
-    puts-err "Ignoring insecure Zsh completion path(s): ${(j:, :)${(f)insecure}}"
-    compinit -i -d "$dump" || { puts-err "Zsh completion initialization failed; continuing without completion."; return 0; }
-  elif [[ -n $dump(#qN.mh-24) ]]; then
+  if [[ -n $dump(#qN.mh-24) ]]; then
+    fresh=1
+    # A tool that added an fpath directory since (rbenv, heroku, a new plugin)
+    # must not wait a day for its completions. `$(<file)` reads in-process.
+    if [[ -n $fpath_record ]]; then
+      [[ -f $fpath_record && ! -L $fpath_record && "$(<$fpath_record)" == "${(pj:\n:)fpath}" ]] || fresh=0
+    fi
+  fi
+  if (( fresh )); then
     compinit -C -d "$dump" || { puts-err "Cached Zsh completion initialization failed; retrying safely."; compinit -i -d "$dump" || return 0; }
   else
-    compinit -d "$dump" || { puts-err "Zsh completion initialization failed; continuing without completion."; return 0; }
+    insecure=$(compaudit 2>/dev/null) || true
+    if [[ -n $insecure ]]; then
+      puts-err "Ignoring insecure Zsh completion path(s): ${(j:, :)${(f)insecure}}"
+      compinit -i -d "$dump" || { puts-err "Zsh completion initialization failed; continuing without completion."; return 0; }
+    else
+      compinit -d "$dump" || { puts-err "Zsh completion initialization failed; continuing without completion."; return 0; }
+    fi
+    # Mark the dump as confirmed today, even when compinit found nothing to
+    # rewrite. Only this user's regular file is touched.
+    if [[ -f $dump && ! -L $dump && -O $dump ]]; then
+      command touch -- "$dump" 2>/dev/null || true
+    fi
+    if [[ -n $fpath_record ]]; then
+      # The directory is private; still, never write through anything but this
+      # user's own regular file.
+      if [[ -e $fpath_record || -L $fpath_record ]] &&
+          [[ ! -f $fpath_record || -L $fpath_record || ! -O $fpath_record ]]; then
+        rm -f -- "$fpath_record" 2>/dev/null
+      fi
+      print -r -- "${(pj:\n:)fpath}" > "$fpath_record" 2>/dev/null || true
+    fi
   fi
   # Compile the dump so later shells map it instead of re-parsing ~60KB of Zsh
   # source; compinit prefers a .zwc that is newer than its origin.
