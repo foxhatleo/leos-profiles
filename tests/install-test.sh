@@ -1822,6 +1822,334 @@ test_credential_pause_reports_queued_component_actions() {
   assert_contains "$out" $'manual-action\tgithub-login\t\thttps://github.com/login'
 }
 
+# --- Preflight (ONB-1, CI-11): stubs for sudo and the terminal. -------------
+# preflight_fixture <tty yes|no> <sudo -n result 0|1>: a plan that needs root,
+# a recording sudo, and nothing else selected.
+preflight_fixture() {
+  PREFLIGHT_TTY=$1
+  SUDO_N_STATUS=$2
+  SUDO_LOG=$(mktemp)
+  track_temp "$SUDO_LOG"
+  SUDO=sudo
+  DRY_RUN=0
+  OS_FAMILY=apt
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=shell
+  INVOCATION="bash /fixture/install.sh apply --yes"
+  stdin_is_terminal() { [[ $PREFLIGHT_TTY == yes ]]; }
+  privileged_plan() { printf 'package-manager\tsudo apt-get install of the selected packages\n'; }
+  sudo() {
+    printf '%s\n' "$*" >> "$SUDO_LOG"
+    [[ $1 == -n ]] && return "$SUDO_N_STATUS"
+    return 0
+  }
+}
+
+test_preflight_without_terminal_stops_before_any_change() {
+  local out status=0
+  preflight_fixture no 1
+  out=$( (preflight) 2>&1 ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" $'manual-action\trun-in-terminal\t\tbash /fixture/install.sh apply --yes'
+  assert_contains "$out" "sudo needs a password"
+  assert_equals "$(cat "$SUDO_LOG")" "-n true"
+}
+
+test_preflight_accepts_passwordless_sudo_without_terminal() {
+  preflight_fixture no 0
+  preflight >/dev/null 2>&1 || fail "NOPASSWD sudo without a terminal was refused"
+  assert_equals "$(cat "$SUDO_LOG")" "-n true"
+}
+
+test_preflight_asks_for_sudo_once_on_a_terminal() {
+  local out
+  preflight_fixture yes 1
+  out=$(preflight 2>&1) || fail "preflight on a terminal failed: $out"
+  assert_contains "$out" "sudo asks for your password once"
+  assert_equals "$(cat "$SUDO_LOG")" $'-n true\n-v'
+}
+
+test_preflight_needs_no_sudo_without_root_actions() {
+  preflight_fixture no 1
+  privileged_plan() { :; }
+  preflight >/dev/null 2>&1 || fail "a plan without root actions was refused"
+  [[ ! -s $SUDO_LOG ]] || fail "sudo was called without a root action: $(cat "$SUDO_LOG")"
+}
+
+test_preflight_refuses_prompts_without_terminal() {
+  local out status=0
+  preflight_fixture no 0
+  privileged_plan() { :; }
+  SSH_MODE=generate
+  SSH_PASSPHRASE_MODE=prompt
+  out=$( (preflight) 2>&1 ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" "passphrase"
+  SSH_MODE=skip
+  # Linux chsh asks for the user's password.
+  SELECTED_STEPS=default-shell
+  CHANGE_DEFAULT_SHELL=yes
+  verify_default_shell() { return 1; }
+  command() { if [[ ${1:-} == -v && ${2:-} == chsh ]]; then printf '/usr/bin/chsh\n'; return 0; fi; builtin command "$@"; }
+  status=0
+  out=$( (preflight) 2>&1 ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" "chsh asks for your password"
+  # Dry-run reports the stop instead of exiting, and never calls sudo.
+  DRY_RUN=1
+  : > "$SUDO_LOG"
+  out=$(preflight 2>&1) || fail "dry-run preflight failed: $out"
+  assert_contains "$out" "Would stop before any change"
+  [[ ! -s $SUDO_LOG ]] || fail "a dry run called sudo"
+}
+
+# --- Version-manager conflicts (ONB-5, CI-11) ------------------------------
+test_existing_pyenv_is_reported_and_can_be_kept() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  HOMEBREW_PREFIX="$temp/brew"
+  mkdir -p "$HOME/.pyenv/bin" "$HOMEBREW_PREFIX/bin" "$HOMEBREW_PREFIX/opt/rbenv"
+  OS_FAMILY=macos
+  SELECTED_STEPS=pyenv,rbenv
+  assert_equals "$(version_manager_conflicts pyenv)" "$HOME/.pyenv"$'\tnot-a-git-checkout'
+  assert_equals "$(version_manager_conflicts rbenv)" "$HOMEBREW_PREFIX/opt/rbenv"$'\thomebrew-install'
+  out=$(report_conflicts)
+  assert_contains "$out" $'conflict\tpyenv\t'"$HOME/.pyenv"$'\tnot-a-git-checkout'
+  assert_contains "$out" $'conflict\trbenv\t'"$HOMEBREW_PREFIX/opt/rbenv"$'\thomebrew-install'
+  # Without the option, preflight stops before any change and names it.
+  privileged_plan() { :; }
+  out=$( (preflight) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "--skip-existing-version-managers"
+  # With it, both components are skipped and reported as such.
+  SKIP_EXISTING_VERSION_MANAGERS=1
+  install_pyenv() { fail "the kept pyenv was replaced"; }
+  install_rbenv() { fail "the Homebrew rbenv was shadowed"; }
+  out=$(run_step pyenv; run_step rbenv)
+  assert_contains "$out" "Skipping pyenv: keeping the existing installation"
+  SELECTED_GROUPS=""
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=""
+  assert_contains "$(inspect_tsv)" $'postcondition\tpyenv\tskipped'
+  # A pinned checkout of another repository is a conflict too.
+  rm -rf "$HOME/.pyenv"
+  git init -q "$HOME/.pyenv"
+  git -C "$HOME/.pyenv" remote add origin https://github.com/example/not-pyenv.git
+  assert_equals "$(version_manager_conflicts pyenv)" "$HOME/.pyenv"$'\tunexpected-origin'
+  rm -rf "$temp"
+}
+
+# --- Disclosure records (ONB-6, ONB-11, MI-3, R5) --------------------------
+test_existing_setups_and_shadowed_artifacts_are_disclosed() {
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  HOMEBREW_PREFIX="$temp/brew"
+  mkdir -p "$HOME/.oh-my-zsh" "$HOME/.nvm" "$HOME/miniconda3" "$HOMEBREW_PREFIX/bin" "$HOMEBREW_PREFIX/opt/powerlevel10k"
+  printf '#!/bin/sh\n' > "$HOMEBREW_PREFIX/bin/starship"
+  chmod +x "$HOMEBREW_PREFIX/bin/starship"
+  unset ZSH NVM_DIR
+  OS_FAMILY=macos
+  SELECTED_STEPS=plugins
+  out=$(report_existing_setups)
+  assert_contains "$out" $'existing\toh-my-zsh\t'"$HOME/.oh-my-zsh"$'\t'
+  assert_contains "$out" $'existing\tpowerlevel10k\t'"$HOMEBREW_PREFIX/opt/powerlevel10k"$'\t'
+  assert_contains "$out" $'existing\tnvm\t'"$HOME/.nvm"$'\t'
+  assert_contains "$out" $'existing\tconda\t'"$HOME/miniconda3"$'\t'
+  out=$(report_shadowed_artifacts)
+  assert_equals "$out" $'shadow\tstarship\t'"$HOMEBREW_PREFIX/bin/starship"$'\t'"$HOME/.local/bin/starship"
+  SELECTED_STEPS=pyenv
+  [[ -z $(report_shadowed_artifacts) ]] || fail "an unselected artifact was reported as shadowing"
+  rm -rf "$temp"
+}
+
+test_privileged_and_behaviour_records() {
+  local out
+  OS_FAMILY=fedora
+  SUDO=sudo
+  FULL_UPGRADE=0
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=media
+  bootstrap_missing() { :; }
+  selected_packages_installed() { return 1; }
+  out=$(privileged_plan)
+  assert_contains "$out" $'package-manager\tsudo dnf install of the selected packages'
+  assert_contains "$out" $'dnf-swap\tsudo dnf swap -y ffmpeg-free ffmpeg --allowerasing'
+  OS_FAMILY=arch
+  assert_contains "$(privileged_plan)" $'pacman-sync\tsudo pacman -Syu --needed --noconfirm'
+  OS_FAMILY=apt
+  SELECTED_GROUPS=dev-tools
+  selected_packages_installed() { return 0; }
+  [[ -z $(privileged_plan) ]] || fail "installed packages still planned a root action: $(privileged_plan)"
+  assert_contains "$(report_behaviour)" $'behaviour\tcompat-symlinks\t'
+  OS_FAMILY=macos
+  SELECTED_GROUPS=core-utils
+  GPG_MODE=generate
+  out=$(report_behaviour)
+  assert_contains "$out" $'behaviour\tgnu-tools\t'
+  assert_contains "$out" $'behaviour\tgit-identity\t'
+  # The macOS login-shell change: /etc/shells (when missing) and sudo chsh.
+  SELECTED_STEPS=default-shell
+  CHANGE_DEFAULT_SHELL=yes
+  verify_default_shell() { return 1; }
+  preferred_zsh_path() { printf '/fixture/zsh\n'; }
+  out=$(privileged_plan)
+  assert_contains "$out" $'etc-shells\tsudo append /fixture/zsh to /etc/shells'
+  assert_contains "$out" $'login-shell\tsudo chsh -s /fixture/zsh '"$(id -un)"
+}
+
+test_unsupported_macs_are_warned_about() {
+  local out
+  OS_FAMILY=macos
+  sw_vers() { printf '%s\n' "$FAKE_MACOS"; }
+  sysctl() { printf '%s\n' "$FAKE_ARM64"; }
+  FAKE_MACOS=15.4 FAKE_ARM64=1
+  ! platform_support_problem >/dev/null || fail "Apple-silicon macOS 15 was reported as unsupported"
+  FAKE_MACOS=26.0
+  ! platform_support_problem >/dev/null || fail "macOS 26 was reported as unsupported"
+  FAKE_MACOS=14.7
+  assert_contains "$(platform_support_problem)" "macOS 14.7 is unsupported"
+  FAKE_MACOS=15.4 FAKE_ARM64=0
+  assert_contains "$(platform_support_problem)" "Intel Mac"
+  SELECTED_STEPS=""
+  SELECTED_GROUPS=""
+  REQUESTED_STEPS=""
+  REQUESTED_GROUPS=""
+  out=$(inspect_tsv)
+  assert_contains "$out" $'warning\tunsupported-platform\tIntel Mac'
+  OS_FAMILY=apt
+  ! platform_support_problem >/dev/null || fail "Linux was checked against macOS support"
+  # A platform the lock has no build for is a warning, not an inspect failure.
+  OS_FAMILY=macos
+  SELECTED_STEPS=uv
+  REQUESTED_STEPS=uv
+  uname() { if [[ ${1:-} == -m ]]; then printf 'x86_64\n'; else command uname "$@"; fi; }
+  verify_step() { return 1; }
+  out=$(inspect_tsv) || fail "inspect failed without a locked uv build"
+  assert_contains "$out" $'warning\tno-locked-artifact\tuv has no locked build for macos on x86_64'
+}
+
+# --- --node-version (SEC-5) ------------------------------------------------
+test_approved_node_version_is_enforced() {
+  local out status=0
+  SELECTED_STEPS=fnm
+  select_existing_node() { return 1; }
+  resolve_node_lts() { RESOLVED_NODE_VERSION=$LIVE_LTS; NODE_SELECTION=current-lts; [[ -n $LIVE_LTS ]]; }
+  NODE_VERSION_APPROVED=v24.11.1
+  LIVE_LTS=v24.11.1
+  check_approved_node_version || fail "the approved, current LTS was refused"
+  RESOLVED_NODE_VERSION=""
+  LIVE_LTS=v24.12.0
+  out=$( (check_approved_node_version) 2>&1 ) || status=$?
+  assert_equals "$status" 2
+  assert_contains "$out" "the current LTS is now v24.12.0"
+  # Offline: the approved version is used as the current-lts choice.
+  RESOLVED_NODE_VERSION=""
+  LIVE_LTS=""
+  check_approved_node_version
+  assert_equals "$RESOLVED_NODE_VERSION:$NODE_SELECTION" v24.11.1:current-lts
+  COMMAND=""
+  out=$( (parse_args apply --node-version 24; validate_options) 2>&1 ) && fail "a malformed --node-version was accepted"
+  assert_contains "$out" "--node-version must look like"
+}
+
+# --- inspect --saved (MI-14) and inventory, remove-blocks anywhere (ONB-13) --
+test_inspect_saved_uses_the_saved_selection() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  make_fixture_checkout "$temp/profile"
+  out=$(run_cli "$temp/profile" "$temp/home" inspect --saved 2>&1) && fail "inspect --saved worked without a saved profile"
+  assert_contains "$out" "No saved install profile"
+  mkdir -p "$temp/profile/local"
+  printf '%s\t%s\n' schema 2 groups zsh-config package-groups shell full-upgrade yes \
+    fonts no font '' default-shell no git-name '' git-email '' ssh skip ssh-key '' \
+    ssh-passphrase empty gpg skip gpg-key '' gpg-passphrase empty node-channel current-lts \
+    node-policy preserve-compatible ai-cli-update-channel native package-channel system > "$temp/profile/local/install-profile.tsv"
+  out=$(run_cli "$temp/profile" "$temp/home" inspect --saved 2>&1) || fail "inspect --saved failed: $out"
+  assert_contains "$out" $'policy\tselection\tsaved'
+  assert_contains "$out" $'policy\tfull-upgrade\tno'
+  assert_contains "$out" $'group\tcomponent\tzsh-config\tselected'
+  [[ $out != *$'group\tcomponent\tfnm'* ]] || fail "inspect --saved used the default selection"
+  out=$(run_cli "$temp/profile" "$temp/home" inspect --saved --groups fnm 2>&1) || status=$?
+  [[ $status -ne 0 ]] || fail "inspect --saved accepted a selection option"
+  assert_contains "$out" "takes only --full-upgrade"
+  rm -rf "$temp"
+}
+
+test_inventory_lists_managed_items() {
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  LOCAL_DIR="$TARGET/local"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  mkdir -p "$HOME/.local/bin" "$LOCAL_DIR/flags"
+  install_zsh_config
+  : > "$HOME/.local/bin/uv"
+  : > "$LOCAL_DIR/flags/no-gnu"
+  export GIT_CONFIG_GLOBAL="$temp/gitconfig"
+  git config --global user.name Fixture
+  out=$(inventory_records)
+  assert_contains "$out" $'item\tmanaged-block\tloader\t'"$HOME/.zshrc"$'\tpresent'
+  assert_contains "$out" $'item\tmanaged-block\tlogin-path\t'"$HOME/.zprofile"$'\tabsent'
+  assert_contains "$out" $'item\tlocal-bin\tuv\t'"$HOME/.local/bin/uv"$'\tpresent'
+  assert_contains "$out" $'item\tlocal-bin\tstarship\t'"$HOME/.local/bin/starship"$'\tabsent'
+  assert_contains "$out" $'item\tflag\tno-gnu\t'"$LOCAL_DIR/flags/no-gnu"$'\tpresent'
+  assert_contains "$out" $'item\tgit-global\tuser.name\t'"$temp/gitconfig"$'\tpresent'
+  assert_contains "$out" $'item\tgit-global\tcommit.gpgsign\t'"$temp/gitconfig"$'\tabsent'
+  assert_contains "$out" $'item\tfonts\tnerd-fonts\t'
+  INVENTORY_FORMAT=human
+  assert_contains "$(inventory)" "present  managed-block"
+  rm -rf "$temp"
+}
+
+# remove-blocks and inventory work on a host detect_os rejects.
+test_remove_blocks_and_inventory_need_no_supported_platform() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  make_fixture_checkout "$temp/profile"
+  mkdir -p "$temp/bin" "$temp/home"
+  printf '#!/bin/sh\n[ "$1" = -s ] && { echo FreeBSD; exit 0; }\nexec /usr/bin/uname "$@"\n' > "$temp/bin/uname"
+  chmod +x "$temp/bin/uname"
+  printf '%s\n' '# >>> leos-profiles loader >>>' 'x' '# <<< leos-profiles loader <<<' > "$temp/home/.zshrc"
+  PATH="$temp/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  out=$(run_cli "$temp/profile" "$temp/home" apply --yes --dry-run 2>&1) || status=$?
+  [[ $status -ne 0 ]] || fail "apply ran on an unsupported host"
+  assert_contains "$out" "Unsupported platform"
+  out=$(run_cli "$temp/profile" "$temp/home" inventory --tsv 2>&1) || fail "inventory failed on an unsupported host: $out"
+  assert_contains "$out" $'item\tmanaged-block\tloader\t'"$temp/home/.zshrc"$'\tpresent'
+  out=$(run_cli "$temp/profile" "$temp/home" remove-blocks 2>&1) || fail "remove-blocks failed on an unsupported host: $out"
+  ! grep -q leos-profiles "$temp/home/.zshrc" || fail "remove-blocks left the block"
+  rm -rf "$temp"
+}
+
+# --- Success hints (MI-10) -------------------------------------------------
+test_success_names_the_terminal_font_and_wsl_action() {
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  OS_FAMILY=apt
+  XDG_DATA_HOME="$temp/xdg"
+  mkdir -p "$XDG_DATA_HOME/fonts/NerdFonts"
+  : > "$XDG_DATA_HOME/fonts/NerdFonts/CaskaydiaCoveNerdFont-Regular.ttf"
+  SELECTED_STEPS=plugins,fonts
+  INSTALL_FONTS=yes
+  FONT_NAME=CascadiaCode
+  assert_contains "$(print_terminal_font_hint)" '"CaskaydiaCove Nerd Font"'
+  INSTALL_FONTS=no
+  assert_contains "$(print_terminal_font_hint)" "LEOS_PLAIN_PROMPT=1"
+  # WSL: installing the font queues the Windows-side installation.
+  INSTALL_FONTS=yes
+  DRY_RUN=0
+  install_nerd_font() { :; }
+  is_wsl() { return 0; }
+  install_fonts 2>/dev/null
+  assert_contains "$PENDING_MANUAL_ACTIONS" $'manual-action\tinstall-windows-font\t'"$XDG_DATA_HOME/fonts/NerdFonts"$'\t'"$NERD_FONTS_RELEASE_URL/CascadiaCode.zip"
+  rm -rf "$temp"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1918,6 +2246,20 @@ TESTS=(
   test_missing_chsh_queues_a_manual_action
   test_credentials_run_after_components
   test_credential_pause_reports_queued_component_actions
+  test_preflight_without_terminal_stops_before_any_change
+  test_preflight_accepts_passwordless_sudo_without_terminal
+  test_preflight_asks_for_sudo_once_on_a_terminal
+  test_preflight_needs_no_sudo_without_root_actions
+  test_preflight_refuses_prompts_without_terminal
+  test_existing_pyenv_is_reported_and_can_be_kept
+  test_existing_setups_and_shadowed_artifacts_are_disclosed
+  test_privileged_and_behaviour_records
+  test_unsupported_macs_are_warned_about
+  test_approved_node_version_is_enforced
+  test_inspect_saved_uses_the_saved_selection
+  test_inventory_lists_managed_items
+  test_remove_blocks_and_inventory_need_no_supported_platform
+  test_success_names_the_terminal_font_and_wsl_action
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

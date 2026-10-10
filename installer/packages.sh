@@ -175,25 +175,33 @@ ensure_brew() {
   command -v brew >/dev/null 2>&1 || die "Homebrew installation did not put brew on PATH"
 }
 
+# bootstrap_missing: the bootstrap packages this host lacks, space-separated.
+bootstrap_missing() {
+  local executable missing=""
+  # macOS /usr/bin/git can be a CLT stub, so test execution, not just PATH.
+  if ! command -v git >/dev/null 2>&1 || ! git --version >/dev/null 2>&1; then missing+=" git"; fi
+  command -v curl >/dev/null 2>&1 || missing+=" curl"
+  if [[ $OS_FAMILY != macos ]]; then
+    for executable in unzip tar gzip; do
+      command -v "$executable" >/dev/null 2>&1 || missing+=" $executable"
+    done
+    # GNU tar runs xz for the Nerd Fonts .tar.xz archives.
+    if ! command -v xz >/dev/null 2>&1; then
+      if [[ $OS_FAMILY == apt ]]; then missing+=" xz-utils"; else missing+=" xz"; fi
+    fi
+    package_installed ca-certificates || missing+=" ca-certificates"
+  fi
+  printf '%s' "${missing# }"
+}
+
 bootstrap_tools() {
   local -a missing=()
-  local executable
-  # macOS /usr/bin/git can be a CLT stub, so test execution, not just PATH.
-  if ! command -v git >/dev/null 2>&1 || ! git --version >/dev/null 2>&1; then missing+=(git); fi
-  command -v curl >/dev/null 2>&1 || missing+=(curl)
+  IFS=' ' read -r -a missing <<< "$(bootstrap_missing)"
   if [[ $OS_FAMILY == macos ]]; then
     ensure_brew
     pkg_install ${missing[@]+"${missing[@]}"}
     return 0
   fi
-  for executable in unzip tar gzip; do
-    command -v "$executable" >/dev/null 2>&1 || missing+=("$executable")
-  done
-  # GNU tar runs xz for the Nerd Fonts .tar.xz archives.
-  if ! command -v xz >/dev/null 2>&1; then
-    if [[ $OS_FAMILY == apt ]]; then missing+=(xz-utils); else missing+=(xz); fi
-  fi
-  package_installed ca-certificates || missing+=(ca-certificates)
   if (( ${#missing[@]} == 0 )); then
     say "Git, curl, TLS certificates and archive tools are already present; skipping bootstrap"
     return 0

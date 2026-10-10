@@ -2,6 +2,33 @@
 # Sourced by install.sh; shares the installer context.
 # shellcheck disable=SC2034
 
+# credential_prerequisites_missing: on Linux, the credential packages this
+# host lacks, space-separated (they install as root).
+credential_prerequisites_missing() {
+  [[ $SSH_MODE == skip && $GPG_MODE == skip ]] && return 0
+  local package missing=""
+  local -a candidates=()
+  case $OS_FAMILY in
+    apt)
+      candidates=(gh)
+      [[ $SSH_MODE == skip ]] || candidates+=(openssh-client)
+      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
+    fedora)
+      candidates=(gh)
+      [[ $SSH_MODE == skip ]] || candidates+=(openssh-clients)
+      [[ $GPG_MODE == skip ]] || candidates+=(gnupg2) ;;
+    arch)
+      candidates=(github-cli)
+      [[ $SSH_MODE == skip ]] || candidates+=(openssh)
+      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
+    *) return 0 ;;
+  esac
+  for package in "${candidates[@]}"; do
+    package_installed "$package" || missing+=" $package"
+  done
+  printf '%s' "${missing# }"
+}
+
 install_credential_prerequisites() {
   [[ $SSH_MODE == skip && $GPG_MODE == skip ]] && return 0
   local package tool

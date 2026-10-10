@@ -79,6 +79,7 @@ write_profile() {
     printf 'node-policy\t%s\n' "$NODE_POLICY"
     printf 'ai-cli-update-channel\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
     printf 'package-channel\t%s\n' "$PACKAGE_CHANNEL"
+    printf 'version-managers\t%s\n' "$([[ $SKIP_EXISTING_VERSION_MANAGERS -eq 1 ]] && printf skip-existing || printf install)"
   } > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$PROFILE_FILE"
@@ -112,6 +113,13 @@ read_profile() {
       node-policy) NODE_POLICY=$value ;;
       ai-cli-update-channel) AI_CLI_UPDATE_CHANNEL=$value ;;
       package-channel) PACKAGE_CHANNEL=$value ;;
+      # Optional (added after schema 2): keep an existing pyenv/rbenv.
+      version-managers)
+        case $value in
+          install) SKIP_EXISTING_VERSION_MANAGERS=0 ;;
+          skip-existing) SKIP_EXISTING_VERSION_MANAGERS=1 ;;
+          *) die "Invalid saved version-managers value: $value" ;;
+        esac ;;
       '') ;;
       *) die "Unknown install profile key: $key" ;;
     esac

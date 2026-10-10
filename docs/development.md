@@ -48,26 +48,35 @@ update it together with the emitter in `install.sh`.
 | --- | --- | --- | --- |
 | `meta` | 3 | `schema`, `1` | Inspection format version |
 | `platform` | 3 | `family`, value | Selected OS package family |
+| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-locked-artifact` (no locked build for this platform), `node-version` (the given `--node-version` is not what the plan resolves now) |
 | `profile` | 3 | `root`, path | Authoritative local checkout |
-| `policy` | 3 | `node` or `full-upgrade`, value | Node selection policy; `yes`/`no` host upgrade |
+| `policy` | 3 | `node`, `full-upgrade` or `selection`, value | Node selection policy; `yes`/`no` host upgrade; `saved` when `inspect --saved` read the selection from the saved profile |
 | `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
 | `migration` | 4 | `profile-schema`, `1`, `2`; or `legacy-loader` / `legacy-environment`, file path, managed marker | Pending profile migration; or a legacy unmarked loader (`.zshrc`) or zshenv snippet (`.zshenv`) that `zsh-config` and `remove-blocks` remove |
 | `group` | 4 | category, name, status | Selected, implied or internal group |
 | `package` | 3 | OS family, name | Exact OS package member |
 | `action` | 3 | step, description | Planned effect of a step or bootstrap |
-| `artifact` | 5 | source kind, name, URL/repository, digest/commit | Locked executable dependency |
+| `artifact` | 5 | source kind, name, URL/repository, digest/commit | Locked executable dependency; the digest of a Nerd Font archive is `SHA-256.txt`, read from the pinned checksum list at apply time |
 | `external` | 3 | service, description or URL | External service the plan contacts |
 | `file` | 3 | name, path | File the plan reads or writes; `zshrc`, `zshenv` and (macOS) `zprofile` give the resolved zsh startup files |
 | `global` | 3 | `git`, keys | Global Git settings the plan configures |
-| `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone |
+| `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone: `host-upgrade` (package upgrades), `login-shell` (chsh) |
+| `privileged` | 3 | action, command or description | An action run as root (through sudo, or directly when root): `homebrew-bootstrap`, `bootstrap`, `package-manager`, `repository`, `dnf-swap`, `pacman-sync`, `credential-packages`, `etc-shells`, `login-shell` |
+| `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`) |
+| `conflict` | 4 | component, path, reason | An existing installation in the way of `pyenv`/`rbenv`: `not-a-git-checkout`, `unexpected-origin`, `local-changes` (apply stops unless `--skip-existing-version-managers`), or `homebrew-install` (informational) |
+| `existing` | 4 | name, path, effect | A shell framework or version manager the profile coexists with: `oh-my-zsh`, `powerlevel10k`, `nvm`, `conda`, `asdf`, `mise` |
+| `shadow` | 4 | executable, other copy, pinned copy | A Homebrew copy of a locked artifact that the pinned `~/.local/bin` copy will shadow |
 | `runtime` | 4 | `node`, version, origin | `preserved-fnm`, `adopted-existing`, or `current-lts` |
-| `postcondition` | 3 | component, status | Current `verified` or `needed` result |
+| `postcondition` | 3 | component, status | Current `verified` or `needed` result; `skipped` when `--skip-existing-version-managers` keeps an existing pyenv/rbenv |
 | `manual-action` | 4 | action, public path, destination | Manual intervention required; process exits 3 |
+| `item` | 5 | kind, name, path, `present`/`absent` | `inventory --tsv` only: something the installer creates or manages |
 
 A runtime preview may report `unresolved` / `resolve-during-apply`.
 
 Manual-action names cover registration, login, email-read scope, key selection,
-and SSH identity configuration. An empty public-path field is valid for actions
+SSH identity configuration, `run-in-terminal` (the destination is the exact
+command to run in a terminal; see "Apply flow" below), `set-login-shell`
+(chsh is missing) and `install-windows-font` (WSL). An empty public-path field is valid for actions
 such as login. Only public artifacts are referenced: never emit private key
 contents, tokens or passphrases. On registration pauses, save the explicit
 reference first and retain the public artifact after EXIT cleanup. Reconciliation

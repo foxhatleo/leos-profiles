@@ -56,6 +56,9 @@ PROFILE_SCHEMA=2
 AI_CLI_UPDATE_CHANNEL="native"
 PACKAGE_CHANNEL="system"
 BREW_MIRROR=""
+SKIP_EXISTING_VERSION_MANAGERS=0
+SAVED_SELECTION=0
+INVENTORY_FORMAT=human
 SELECTED_PACKAGES=()
 TEMP_PATHS=()
 LOCK_HELD=0
@@ -68,9 +71,11 @@ usage() {
   cat <<EOF
 Usage:
   bash install.sh inspect [options]
+  bash install.sh inspect --saved [--full-upgrade]
   bash install.sh apply --yes [options]
   bash install.sh reconcile --yes [--full-upgrade]
   bash install.sh remove-blocks [--dry-run]
+  bash install.sh inventory [--tsv]
 
 Options:
   --groups <csv|none>             $CANONICAL_STEPS
@@ -90,15 +95,25 @@ Options:
   --no-full-upgrade               Install/reconcile packages without a host upgrade
   --brew-mirror <china|none>      macOS: use (china) or stop using (none) the USTC
                                   Homebrew mirror for this run and later shells
+  --skip-existing-version-managers
+                                  Keep an existing ~/.pyenv or ~/.rbenv that is
+                                  not the pinned checkout; skip that component
+  --node-version <vX.Y.Z>         The Node version inspect resolved; apply stops
+                                  (exit 2) if it would now choose another
+  --saved                         inspect: use the saved profile's selection
   --dry-run                       Print mutations without performing them
   --yes                           Confirm that the AI-presented plan was approved
   --help                          Show this help
 
 The AI runbook is the supported user interface. \`inspect\` emits typed TSV for
 agents and diagnostics; \`apply\` and \`reconcile\` never ask setup questions.
+Before changing anything they check what the run needs from you: without a
+terminal, a sudo password, passphrase prompt or chsh password ends the run
+with a run-in-terminal manual action (exit 3) and the command to run yourself.
 \`remove-blocks\` deletes only the managed blocks (and a legacy unmarked loader)
 from the zsh startup files (.zshrc, .zshenv, and .zprofile on macOS), leaving
-packages, plugins and credentials in place.
+packages, plugins and credentials in place. \`inventory\` lists everything the
+installer creates or manages and whether it is present.
 
 Node: preserve a compatible version by adopting it into fnm; otherwise use LTS.
 Credentials: local creation is supported; GitHub registration and SSH identity
@@ -124,20 +139,37 @@ parse_args() {
   [[ $# -gt 0 ]] || { usage >&2; exit 2; }
   reject_retired_flag "$1"
   case $1 in
-    inspect|apply|reconcile|remove-blocks) COMMAND=$1; shift ;;
+    inspect|apply|reconcile|remove-blocks|inventory) COMMAND=$1; shift ;;
     --help|-h) usage; exit 0 ;;
-    *) die "Expected inspect, apply, reconcile, or remove-blocks; the AI runbook is the setup interface" ;;
+    *) die "Expected inspect, apply, reconcile, remove-blocks, or inventory; the AI runbook is the setup interface" ;;
   esac
   if [[ $COMMAND == reconcile ]]; then FULL_UPGRADE=0; fi
+  if [[ $COMMAND == inspect && " $* " == *" --saved "* ]]; then
+    # Inspect what reconcile would do: the saved selection, no host upgrade
+    # unless asked for (MI-14).
+    SAVED_SELECTION=1
+    FULL_UPGRADE=0
+  fi
   while [[ $# -gt 0 ]]; do
     reject_retired_flag "$1"
-    if [[ $COMMAND == reconcile ]]; then
+    if [[ $COMMAND == reconcile || $SAVED_SELECTION -eq 1 ]]; then
       case $1 in
         --full-upgrade) FULL_UPGRADE=1; shift ;;
-        --dry-run) DRY_RUN=1; shift ;;
-        --yes) ASSUME_YES=1; shift ;;
+        --dry-run) [[ $COMMAND == reconcile ]] || die "inspect --saved takes only --full-upgrade"; DRY_RUN=1; shift ;;
+        --yes) [[ $COMMAND == reconcile ]] || die "inspect --saved takes only --full-upgrade"; ASSUME_YES=1; shift ;;
+        --saved) shift ;;
         --help|-h) usage; exit 0 ;;
-        *) die "reconcile reads the saved local profile and only accepts --yes, --full-upgrade, or --dry-run" ;;
+        *)
+          [[ $COMMAND == reconcile ]] || die "inspect --saved reads the selection from the saved profile and takes only --full-upgrade"
+          die "reconcile reads the saved local profile and only accepts --yes, --full-upgrade, or --dry-run" ;;
+      esac
+      continue
+    fi
+    if [[ $COMMAND == inventory ]]; then
+      case $1 in
+        --tsv) INVENTORY_FORMAT=tsv; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "inventory takes only --tsv" ;;
       esac
       continue
     fi
@@ -156,6 +188,8 @@ parse_args() {
     --git-name) require_value "$1" "${2:-}"; GIT_NAME=$2; shift 2 ;;
     --git-email) require_value "$1" "${2:-}"; GIT_EMAIL=$2; shift 2 ;;
     --brew-mirror) require_value "$1" "${2:-}"; BREW_MIRROR=$2; shift 2 ;;
+    --skip-existing-version-managers) SKIP_EXISTING_VERSION_MANAGERS=1; shift ;;
+    --node-version) require_value "$1" "${2:-}"; NODE_VERSION_APPROVED=$2; shift 2 ;;
     --full-upgrade) FULL_UPGRADE=1; shift ;;
     --no-full-upgrade) FULL_UPGRADE=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -220,6 +254,7 @@ validate_options() {
   [[ $INSTALL_FONTS == auto || $INSTALL_FONTS == yes || $INSTALL_FONTS == no ]] || die "Invalid --fonts value"
   [[ $CHANGE_DEFAULT_SHELL == auto || $CHANGE_DEFAULT_SHELL == yes || $CHANGE_DEFAULT_SHELL == no ]] || die "Invalid --default-shell value"
   [[ -z $BREW_MIRROR || $BREW_MIRROR == china || $BREW_MIRROR == none ]] || die "Invalid --brew-mirror value"
+  [[ -z $NODE_VERSION_APPROVED ]] || node_version_ok "$NODE_VERSION_APPROVED" || die "--node-version must look like v24.11.1"
   [[ $SSH_MODE != reuse || -n $SSH_KEY_PATH ]] || die "--ssh reuse requires --ssh-key <private-key-path>"
   [[ $GPG_MODE != reuse || -n $GPG_KEY_ID ]] || die "--gpg reuse requires --gpg-key <fingerprint>"
   [[ $INSTALL_FONTS != yes || -n $FONT_NAME ]] || die "--fonts yes requires --font <name>"
@@ -282,13 +317,10 @@ detect_os() {
 
 sha256() { hash_text < "$1"; }
 
-# Octal mode of a file, spelling around BSD vs GNU stat.
+# Octal mode of a file, with GNU stat or else BSD stat (not keyed on the OS:
+# remove-blocks also runs on hosts detect_os does not know).
 file_mode() {
-  if [[ $(uname -s) == Darwin ]]; then
-    /usr/bin/stat -f '%Lp' "$1"
-  else
-    stat -c '%a' "$1"
-  fi
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 hash_text() {
@@ -346,8 +378,15 @@ source "$SCRIPT_DIR/installer/verification.sh"
 # shellcheck source=installer/signatures.sh
 source "$SCRIPT_DIR/installer/signatures.sh"
 
+# shellcheck source=installer/plan.sh
+source "$SCRIPT_DIR/installer/plan.sh"
+
 run_step() {
   local step=$1 force_rerun=0
+  if component_skipped_for_existing "$step"; then
+    say "Skipping $step: keeping the existing installation (--skip-existing-version-managers)"
+    return 0
+  fi
   # A full host upgrade always re-runs the packages step; it deliberately skips
   # the state/verify short-circuit rather than failing verification.
   [[ $step == packages && $FULL_UPGRADE -eq 1 ]] && force_rerun=1
@@ -376,20 +415,29 @@ run_step() {
 
 # One `artifact direct` record per registry artifact a selected component owns.
 inspect_artifacts() {
-  local name url digest
+  local name url digest asset
   while IFS= read -r name; do
     artifact_row "$name"
     has_csv_item "$SELECTED_STEPS" "$ARTIFACT_COMPONENT" || continue
-    IFS=$'\t' read -r url digest <<< "$(platform_asset "$name")"
+    if ! asset=$(artifact_asset "$name"); then
+      printf 'warning\tno-locked-artifact\t%s has no locked build for %s on %s; the %s component cannot be installed here\n' \
+        "$name" "$OS_FAMILY" "$(uname -m)" "$ARTIFACT_COMPONENT"
+      continue
+    fi
+    IFS=$'\t' read -r url digest <<< "$asset"
     printf 'artifact\tdirect\t%s\t%s\t%s\n' "$name" "$url" "$digest"
   done < <(artifact_names)
 }
 
 inspect_tsv() {
-  local step group package status origin
+  local step group package status origin message
   printf 'meta\tschema\t1\n'
   printf 'platform\tfamily\t%s\n' "$OS_FAMILY"
+  if message=$(platform_support_problem); then
+    printf 'warning\tunsupported-platform\t%s\n' "$message"
+  fi
   printf 'profile\troot\t%s\n' "$TARGET"
+  if [[ $SAVED_SELECTION -eq 1 ]]; then printf 'policy\tselection\tsaved\n'; fi
   printf 'policy\tfull-upgrade\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf yes || printf no)"
   printf 'channel\tpackages\t%s\n' "$PACKAGE_CHANNEL"
   printf 'channel\tnode\t%s\n' "$NODE_CHANNEL"
@@ -485,22 +533,59 @@ inspect_tsv() {
   if has_csv_item "$SELECTED_STEPS" fnm; then
     if resolve_node_version; then
       printf 'runtime\tnode\t%s\t%s\n' "$RESOLVED_NODE_VERSION" "$NODE_SELECTION"
+      if [[ -n $NODE_VERSION_APPROVED && $NODE_VERSION_APPROVED != "$RESOLVED_NODE_VERSION" ]]; then
+        printf 'warning\tnode-version\tthe plan now resolves Node %s, not the given %s; apply --node-version %s would stop\n' \
+          "$RESOLVED_NODE_VERSION" "$NODE_VERSION_APPROVED" "$NODE_VERSION_APPROVED"
+      fi
     else printf 'runtime\tnode\tunresolved\tresolve-during-apply\n'; fi
   fi
+  while IFS=$'\t' read -r step message; do
+    printf 'privileged\t%s\t%s\n' "$step" "$message"
+  done < <(privileged_plan)
+  report_behaviour
+  report_conflicts
+  report_existing_setups
+  report_shadowed_artifacts
   csv_split items "$SELECTED_STEPS"
   for step in ${items[@]+"${items[@]}"}; do
-    if verify_step "$step"; then status=verified; else status=needed; fi
+    if component_skipped_for_existing "$step"; then status=skipped
+    elif verify_step "$step"; then status=verified
+    else status=needed; fi
     printf 'postcondition\t%s\t%s\n' "$step" "$status"
   done
 }
 
+# After a successful run: what the user still has to do in the terminal
+# itself (MI-10).
+print_terminal_font_hint() {
+  has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" fonts || return 0
+  if has_csv_item "$SELECTED_STEPS" fonts && font_should_install && font_is_installed; then
+    say "Set your terminal's font to \"$(nerd_font_family) Nerd Font\" (or its Mono variant) so the prompt's icons render, or set LEOS_PLAIN_PROMPT=1 in local/private.zsh for the plain prompt."
+  elif has_csv_item "$SELECTED_STEPS" plugins; then
+    say "The themed prompt needs a Nerd Font in the terminal you use; without one, set LEOS_PLAIN_PROMPT=1 in local/private.zsh for the plain prompt."
+  fi
+}
+
 main() {
   validate_component_registry
+  INVOCATION=$(printf '%q ' bash "$SCRIPT_DIR/install.sh" "$@")
+  INVOCATION=${INVOCATION% }
   parse_args "$@"
   trap cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
-  if [[ $COMMAND == reconcile ]]; then
+  # These two only read, or remove the profile's own blocks: they work on any
+  # host, supported or not (ONB-13).
+  if [[ $COMMAND == remove-blocks ]]; then
+    remove_managed_blocks
+    return 0
+  fi
+  if [[ $COMMAND == inventory ]]; then
+    if [[ $(uname -s) == Darwin ]]; then OS_FAMILY=macos; else OS_FAMILY=linux; fi
+    inventory
+    return 0
+  fi
+  if [[ $COMMAND == reconcile || $SAVED_SELECTION -eq 1 ]]; then
     read_profile
   fi
   REQUESTED_STEPS=$SELECTED_STEPS
@@ -519,14 +604,15 @@ main() {
     inspect_tsv
     return 0
   fi
-  # Touches only the managed blocks, so it needs neither --yes nor the lock.
-  if [[ $COMMAND == remove-blocks ]]; then
-    remove_managed_blocks
-    return 0
-  fi
   [[ $ASSUME_YES -eq 1 ]] || die "Apply/reconcile requires --yes after the AI-presented plan is approved"
+  local support_problem
+  if support_problem=$(platform_support_problem); then
+    warn "Unsupported platform. $support_problem Continuing as asked; expect long source builds or failures."
+  fi
   # Capture the existing runtime before any bootstrap/package changes.
   if has_csv_item "$SELECTED_STEPS" fnm; then select_existing_node || true; fi
+  # Everything the run needs from the user, checked before the first change.
+  preflight
   acquire_lock
   report_profile_migration
   migrate_local_state
@@ -557,6 +643,7 @@ main() {
   provision_ssh
   provision_gpg
   write_profile
+  print_terminal_font_hint
   finish_manual_actions
   if [[ $COMMAND == reconcile ]]; then
     say "Profile reconciliation complete. Restart the terminal; default-shell changes apply at next login."

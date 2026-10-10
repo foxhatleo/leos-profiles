@@ -164,6 +164,14 @@ install_fonts() {
     return 0
   fi
   install_nerd_font "$font" "${NERD_FONTS_CHECKSUMS_FILE:-}"
+  # On WSL the terminal is a Windows program and reads Windows fonts, so the
+  # copy in the Linux guest is not enough (MI-10). Asked once, when the font
+  # is installed; the guest copy still verifies, so a reconcile does not ask
+  # again.
+  if is_wsl; then
+    queue_manual_action install-windows-font "$(nerd_font_directory)" "$NERD_FONTS_RELEASE_URL/$font.zip" \
+      "WSL: install the $font Nerd Font on Windows as well (download $font.zip, select its .ttf files, Install), then choose \"$(nerd_font_family) Nerd Font\" in your Windows terminal's profile."
+  fi
 }
 
 ensure_user_npm_prefix() {

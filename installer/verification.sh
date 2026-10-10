@@ -11,18 +11,11 @@ git_checkout_at() {
   [[ $(git -C "$directory" rev-parse HEAD 2>/dev/null || true) == "$commit" ]]
 }
 
-font_is_installed() {
-  local font=${FONT_NAME:-JetBrainsMono} installed_family directory
-  if [[ $OS_FAMILY == macos ]]; then
-    directory="$HOME/Library/Fonts"
-  else
-    directory="${XDG_DATA_HOME:-$HOME/.local/share}/fonts"
-  fi
-  [[ -d $directory ]] || return 1
-  # Nerd Fonts renames families whose upstream names are reserved. These
-  # aliases match the filenames in the pinned Nerd Fonts release. Keep the
-  # check family-specific: another installed Nerd Font must not satisfy the
-  # requested family's postcondition.
+# The family name a Nerd Font installs under. Nerd Fonts renames families
+# whose upstream names are reserved; these aliases match the filenames in the
+# pinned Nerd Fonts release.
+nerd_font_family() {
+  local font=${FONT_NAME:-JetBrainsMono} installed_family
   case $font in
     AnonymousPro) installed_family=AnonymicePro ;;
     AurulentSansMono) installed_family=AurulentSansM ;;
@@ -45,6 +38,20 @@ font_is_installed() {
     iA-Writer) installed_family=iMWriting ;;
     *) installed_family=$font ;;
   esac
+  printf '%s\n' "$installed_family"
+}
+
+font_is_installed() {
+  local directory installed_family
+  if [[ $OS_FAMILY == macos ]]; then
+    directory="$HOME/Library/Fonts"
+  else
+    directory="${XDG_DATA_HOME:-$HOME/.local/share}/fonts"
+  fi
+  [[ -d $directory ]] || return 1
+  # Keep the check family-specific: another installed Nerd Font must not
+  # satisfy the requested family's postcondition.
+  installed_family=$(nerd_font_family)
   find "$directory" -type f -iname "*${installed_family}*NerdFont*" -print -quit | grep -q .
 }
 
