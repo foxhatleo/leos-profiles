@@ -9,7 +9,7 @@
 #          measure time to the first prompt and command lag (Enter on an empty
 #          line until the next prompt is ready for input).
 # Both modes measure cold (no cache, no completion dump), warm, and aged-dump
-# (warm caches but a ~/.zcompdump older than a day, which takes the full
+# (warm caches but a completion dump older than a day, which takes the full
 # compinit path instead of `compinit -C`). Where strace exists (Linux), the
 # non-pty mode also counts process creations in one warm startup.
 emulate -L zsh
@@ -58,6 +58,11 @@ def summary(label, values):
             f"min={min(values):.1f} ms max={max(values):.1f} ms")
 
 
+def dumps(home):
+    """Completion dumps: the profile's cache-root dump, or a HOME fallback."""
+    return [*home.glob(".cache/leos-profiles/zcompdump-[0-9]*"), *home.glob(".zcompdump*")]
+
+
 def reset(state, home):
     """Prepare the fixture HOME for one sample of the given scenario."""
     if state == "cold":
@@ -66,7 +71,7 @@ def reset(state, home):
             dump.unlink()
     elif state == "aged-dump":
         aged = time.time() - 2 * 24 * 3600
-        for dump in home.glob(".zcompdump*"):
+        for dump in dumps(home):
             os.utime(dump, (aged, aged))
 
 
@@ -164,7 +169,7 @@ with tempfile.TemporaryDirectory(prefix="leos-startup-") as fixture:
     # The public runtime references its utility path but never runs maintenance.
     shutil.copytree(source / "util", profile / "util")
     with (profile / "zsh/cache.zsh").open("a") as cache:
-        cache.write("\n__leos_rehash_daily() { :; }\n")
+        cache.write("\n__leos_rehash_daily() { :; }\n__leos_fnm_prune_daily() { :; }\n")
     home = base / "home"
     home.mkdir(mode=0o700)
     zdotdir = base / "zdotdir"
@@ -202,7 +207,7 @@ with tempfile.TemporaryDirectory(prefix="leos-startup-") as fixture:
                 warnings.update(result.stderr.splitlines())
     print(platform.platform(), platform.machine())
     print(subprocess.check_output([shell, "--version"], text=True).strip())
-    print("Isolated public profile; real PATH tools; no private overrides or rehash.")
+    print("Isolated public profile; real PATH tools; no private overrides, rehash or fnm prune.")
     revision = subprocess.run(["git", "-C", str(source), "describe", "--always", "--dirty"],
                               capture_output=True, text=True)
     print("Checkout:", revision.stdout.strip() or "unversioned")

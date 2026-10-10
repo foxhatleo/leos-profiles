@@ -6,6 +6,9 @@ IFS=$'\n\t'
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 export LEOS_PROFILES_INSTALL_LIB_ONLY=1
+# The zsh-config tests resolve startup files from ZDOTDIR; never let the
+# developer's own value point them outside the fixture HOME.
+unset ZDOTDIR
 # shellcheck source=../install.sh
 source "$ROOT/install.sh"
 
@@ -422,22 +425,19 @@ test_local_migration_and_conflict_detection() {
 }
 
 test_prepare_local_dir_hardens_private_zsh() {
-  local temp mode
+  local temp
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
   DRY_RUN=0
   mkdir -p "$LOCAL_DIR"
   printf '%s\n' 'export SECRET=1' > "$LOCAL_DIR/private.zsh"
-  chmod 644 "$LOCAL_DIR/private.zsh"
+  printf '%s\n' 'export SECRET=2' > "$LOCAL_DIR/private-interactive.zsh"
+  chmod 644 "$LOCAL_DIR/private.zsh" "$LOCAL_DIR/private-interactive.zsh"
   prepare_local_dir
-  if [[ $(uname -s) == Darwin ]]; then
-    mode=$(/usr/bin/stat -f '%Lp' "$LOCAL_DIR/private.zsh")
-  else
-    mode=$(stat -c '%a' "$LOCAL_DIR/private.zsh")
-  fi
-  assert_equals "$mode" "600"
-  # A missing private.zsh must not make the run fail.
-  rm -f "$LOCAL_DIR/private.zsh"
+  assert_equals "$(file_mode "$LOCAL_DIR/private.zsh")" "600"
+  assert_equals "$(file_mode "$LOCAL_DIR/private-interactive.zsh")" "600"
+  # A missing private file must not make the run fail.
+  rm -f "$LOCAL_DIR/private.zsh" "$LOCAL_DIR/private-interactive.zsh"
   prepare_local_dir || fail "prepare_local_dir failed without a private.zsh"
   rm -rf "$temp"
 }
@@ -1019,6 +1019,191 @@ test_known_hosts_matches_metadata_and_dedupes() {
   rm -rf "$temp"
 }
 
+# inspect_tsv for a zsh-config-only selection.
+inspect_zsh_config_only() {
+  SELECTED_STEPS=zsh-config
+  SELECTED_GROUPS=""
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=""
+  inspect_tsv
+}
+# The unmarked loader and zshenv snippet written by the pre-installer
+# QUICK-INSTALL, exactly as it appended them.
+write_legacy_startup_files() {
+  printf '%s\n' '# user rc' 'if [[ -o interactive ]]; then' \
+    '    source "$HOME/.leos-profiles/zsh/start.zsh"' 'fi' 'alias keep=me' > "$1/.zshrc"
+  printf '%s\n' 'export USER_ENV=1' '# leos-profiles zshenv' 'typeset -U path' \
+    'path=("$HOME/.local/bin" $path)' 'export PATH' 'export AFTER=1' > "$1/.zshenv"
+}
+
+test_legacy_loader_is_reported_migrated_and_verified() {
+  local temp output original_rc original_env
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  write_legacy_startup_files "$HOME"
+  original_rc=$(< "$HOME/.zshrc")
+  original_env=$(< "$HOME/.zshenv")
+  output=$(report_legacy_loaders)
+  assert_contains "$output" $'migration\tlegacy-loader\t'"$HOME/.zshrc"$'\tloader'
+  assert_contains "$output" $'migration\tlegacy-environment\t'"$HOME/.zshenv"$'\tenvironment'
+  # A legacy loader beside a correct managed block must still fail verification.
+  install_managed_block "$HOME/.zshrc" loader "$(zshrc_managed_content)"
+  install_managed_block "$HOME/.zshenv" environment "$(zshenv_managed_content)"
+  ! verify_zsh_config || fail "verification passed with legacy loaders still present"
+  strip_legacy_loader "$HOME/.zshenv" environment >/dev/null
+  ! verify_zsh_config || fail "verification passed with a legacy .zshrc loader still present"
+  # Dry-run reports and changes nothing.
+  local before
+  before=$(sha256 "$HOME/.zshrc")
+  DRY_RUN=1
+  output=$(install_zsh_config)
+  assert_contains "$output" "Would remove the legacy unmarked leos-profiles loader from $HOME/.zshrc"
+  assert_equals "$(sha256 "$HOME/.zshrc")" "$before"
+  DRY_RUN=0
+  install_zsh_config >/dev/null
+  verify_zsh_config || fail "migrated startup files did not verify"
+  [[ -z $(report_legacy_loaders) ]] || fail "a legacy loader is still reported after apply"
+  # Exactly one loader remains (the managed one), user lines survive, and the
+  # one-time backup holds the files as they were before the installer.
+  assert_equals "$(grep -c 'zsh/start.zsh' "$HOME/.zshrc")" "1"
+  assert_contains "$(< "$HOME/.zshrc")" "alias keep=me"
+  assert_contains "$(< "$HOME/.zshenv")" "export AFTER=1"
+  [[ $(< "$HOME/.zshenv") != *'# leos-profiles zshenv'* ]] || fail "legacy zshenv header remains"
+  assert_equals "$(< "$HOME/.zshrc.leos-profiles.bak")" "$original_rc"
+  assert_equals "$(< "$HOME/.zshenv.leos-profiles.bak")" "$original_env"
+  if command -v zsh >/dev/null 2>&1; then
+    zsh -n "$HOME/.zshrc" || fail "migrated .zshrc does not parse"
+  fi
+  rm -rf "$temp"
+}
+
+test_legacy_loader_inside_other_code_keeps_it_valid() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  # A hand-edited variant: the loader is the only command in its branch.
+  printf '%s\n' 'if [[ -n $SSH_TTY ]]; then' "  source '/opt/profiles/zsh/start.zsh'" 'else' \
+    '  [[ -o interactive ]] && . ~/.leos-profiles/zsh/start.zsh  # mine' 'fi' > "$HOME/.zshrc"
+  legacy_loader_present "$HOME/.zshrc" loader || fail "variant legacy loaders were not detected"
+  strip_legacy_loader "$HOME/.zshrc" loader >/dev/null
+  ! grep -q 'zsh/start.zsh' "$HOME/.zshrc" || fail "a legacy loader line survived"
+  if command -v zsh >/dev/null 2>&1; then
+    zsh -n "$HOME/.zshrc" || fail "stripping left an empty branch"
+  fi
+  # Unrelated lines that merely mention the path are not loaders.
+  printf '%s\n' 'echo see zsh/start.zsh' 'vim ~/.leos-profiles/zsh/start.zsh' > "$HOME/.zshrc"
+  ! legacy_loader_present "$HOME/.zshrc" loader || fail "a non-loader line was treated as a loader"
+  rm -rf "$temp"
+}
+
+test_remove_blocks_also_removes_legacy_loaders() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  write_legacy_startup_files "$HOME"
+  remove_managed_blocks >/dev/null
+  assert_equals "$(< "$HOME/.zshrc")" "$(printf '%s\n%s' '# user rc' 'alias keep=me')"
+  assert_equals "$(< "$HOME/.zshenv")" "$(printf '%s\n%s' 'export USER_ENV=1' 'export AFTER=1')"
+  rm -rf "$temp"
+}
+
+test_zshenv_block_skips_global_compinit() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  install_zsh_config
+  command -v zsh >/dev/null 2>&1 || { rm -rf "$temp"; return 0; }
+  # Debian's /etc/zsh/zshrc checks this after .zshenv has run.
+  assert_equals "$(HOME="$HOME" zsh -fc 'source ~/.zshenv; print -r -- ${skip_global_compinit-unset}')" "1"
+  rm -rf "$temp"
+}
+
+test_zsh_config_follows_zdotdir() {
+  local temp output
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  mkdir -p "$HOME/.config/zsh"
+  # ZDOTDIR exported into the installer's environment: everything lives there.
+  ZDOTDIR="$HOME/.config/zsh"
+  export ZDOTDIR
+  install_zsh_config
+  [[ -f $ZDOTDIR/.zshrc && -f $ZDOTDIR/.zshenv ]] || fail "managed blocks were not written to ZDOTDIR"
+  [[ ! -e $HOME/.zshrc && ! -e $HOME/.zshenv ]] || fail "managed blocks were written to HOME despite ZDOTDIR"
+  verify_zsh_config || fail "ZDOTDIR install did not verify"
+  output=$(inspect_zsh_config_only)
+  assert_contains "$output" $'file\tzshrc\t'"$ZDOTDIR/.zshrc"
+  assert_contains "$output" $'file\tzshenv\t'"$ZDOTDIR/.zshenv"
+  remove_managed_blocks >/dev/null
+  ! grep -q 'leos-profiles' "$ZDOTDIR/.zshrc" "$ZDOTDIR/.zshenv" || fail "remove-blocks missed ZDOTDIR"
+  unset ZDOTDIR
+  rm -rf "$temp"
+}
+
+test_zsh_config_follows_zdotdir_set_in_zshenv() {
+  local temp
+  command -v zsh >/dev/null 2>&1 || return 0
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  unset ZDOTDIR
+  mkdir -p "$HOME/.config/zsh"
+  # The common XDG layout: ~/.zshenv moves the rest of the startup files.
+  printf '%s\n' 'export ZDOTDIR="$HOME/.config/zsh"' > "$HOME/.zshenv"
+  # A block in ~/.zshrc is never read in this layout and must not verify.
+  install_managed_block "$HOME/.zshrc" loader "$(zshrc_managed_content)"
+  install_managed_block "$HOME/.zshenv" environment "$(zshenv_managed_content)"
+  ! verify_zsh_config || fail "a ~/.zshrc block verified although zsh reads \$ZDOTDIR/.zshrc"
+  install_zsh_config
+  grep -q '^# >>> leos-profiles loader >>>$' "$HOME/.config/zsh/.zshrc" || fail "loader not in the reported ZDOTDIR"
+  grep -q '^# >>> leos-profiles environment >>>$' "$HOME/.zshenv" || fail ".zshenv must stay in HOME when it sets ZDOTDIR"
+  [[ ! -e $HOME/.config/zsh/.zshenv ]] || fail "wrote a .zshenv zsh never reads"
+  verify_zsh_config || fail "ZDOTDIR-from-zshenv install did not verify"
+  rm -rf "$temp"
+}
+
+test_macos_login_path_block() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  OS_FAMILY=macos
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  install_zsh_config
+  grep -q '^# >>> leos-profiles login-path >>>$' "$HOME/.zprofile" || fail "no login-path block in .zprofile"
+  verify_zsh_config || fail "macOS zsh config did not verify"
+  assert_contains "$(inspect_zsh_config_only)" $'file\tzprofile\t'"$HOME/.zprofile"
+  if command -v zsh >/dev/null 2>&1; then
+    # What /etc/zprofile's path_helper leaves behind: local bins demoted.
+    assert_equals "$(HOME="$HOME" zsh -fc 'path=(/usr/bin /bin "$HOME/.local/bin"); source ~/.zprofile; print -r -- ${path[1]}:${path[2]}:$#path')" \
+      "$HOME/.local/bin:$HOME/.local/npm/bin:4"
+  fi
+  remove_managed_block "$HOME/.zprofile" login-path >/dev/null
+  ! verify_zsh_config || fail "verification passed without the login-path block"
+  install_zsh_config
+  remove_managed_blocks >/dev/null
+  ! grep -q 'leos-profiles' "$HOME/.zprofile" || fail "remove-blocks left the login-path block"
+  rm -rf "$temp"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1059,6 +1244,13 @@ TESTS=(
   test_install_then_remove_round_trip_is_byte_identical
   test_remove_blocks_preserves_a_symlinked_zshrc
   test_remove_blocks_cli_dispatch
+  test_legacy_loader_is_reported_migrated_and_verified
+  test_legacy_loader_inside_other_code_keeps_it_valid
+  test_remove_blocks_also_removes_legacy_loaders
+  test_zshenv_block_skips_global_compinit
+  test_zsh_config_follows_zdotdir
+  test_zsh_config_follows_zdotdir_set_in_zshenv
+  test_macos_login_path_block
   test_bootstrap_skips_present_tools_on_linux
   test_bootstrap_installs_unzip_when_missing
   test_concurrent_lock_rejection

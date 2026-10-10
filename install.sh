@@ -87,8 +87,9 @@ Options:
 
 The AI runbook is the supported user interface. \`inspect\` emits typed TSV for
 agents and diagnostics; \`apply\` and \`reconcile\` never ask setup questions.
-\`remove-blocks\` deletes only the two managed blocks from ~/.zshrc and ~/.zshenv,
-leaving packages, plugins and credentials in place.
+\`remove-blocks\` deletes only the managed blocks (and a legacy unmarked loader)
+from the zsh startup files (.zshrc, .zshenv, and .zprofile on macOS), leaving
+packages, plugins and credentials in place.
 
 Node: preserve a compatible version by adopting it into fnm; otherwise use LTS.
 Credentials: local creation is supported; GitHub registration and SSH identity
@@ -358,6 +359,7 @@ inspect_tsv() {
   printf 'channel\tnode\t%s\n' "$NODE_CHANNEL"
   printf 'policy\tnode\t%s\n' "$NODE_POLICY"
   report_profile_migration
+  report_legacy_loaders
   printf 'channel\tai-cli-updates\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
   printf 'group\tinternal\tbootstrap\tselected\n'
   local canonical="$CANONICAL_STEPS"
@@ -405,7 +407,13 @@ inspect_tsv() {
     printf 'action\tgpg\tverify GitHub email, manual public-key registration, and configure commit signing\n'
     printf 'external\tgithub\tverified-email query and manual GPG public-key registration\n'
   fi
-  if has_csv_item "$SELECTED_STEPS" zsh-config; then printf 'action\tzsh-config\tmanaged blocks in ~/.zshrc and ~/.zshenv\n'; fi
+  if has_csv_item "$SELECTED_STEPS" zsh-config; then
+    printf 'action\tzsh-config\tmanaged blocks in the zsh startup files listed as file records\n'
+    resolve_zsh_dotdirs
+    printf 'file\tzshrc\t%s\n' "$ZSH_RC_DIR/.zshrc"
+    printf 'file\tzshenv\t%s\n' "$ZSH_ENV_DIR/.zshenv"
+    if [[ $OS_FAMILY == macos ]]; then printf 'file\tzprofile\t%s\n' "$ZSH_RC_DIR/.zprofile"; fi
+  fi
   if has_csv_item "$SELECTED_STEPS" default-shell; then printf 'action\tdefault-shell\t%s\n' "$CHANGE_DEFAULT_SHELL"; fi
   printf 'file\tlocal-profile\t%s\n' "$PROFILE_FILE"
   printf 'file\tlocal-state\t%s\n' "$STATE_FILE"
@@ -473,7 +481,7 @@ main() {
     inspect_tsv
     return 0
   fi
-  # Touches only the two managed blocks, so it needs neither --yes nor the lock.
+  # Touches only the managed blocks, so it needs neither --yes nor the lock.
   if [[ $COMMAND == remove-blocks ]]; then
     remove_managed_blocks
     return 0

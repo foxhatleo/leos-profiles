@@ -6,9 +6,11 @@ prepare_local_dir() {
   [[ $DRY_RUN -eq 0 ]] || return 0
   mkdir -p "$LOCAL_DIR/flags"
   chmod 700 "$LOCAL_DIR" "$LOCAL_DIR/flags"
-  # private.zsh routinely holds API keys and is created by hand, so its mode is
-  # enforced on every run — migrate_one_local_file only chmods files it moves.
+  # The private override files routinely hold API keys and are created by hand,
+  # so their mode is enforced on every run — migrate_one_local_file only chmods
+  # files it moves.
   [[ ! -f $LOCAL_DIR/private.zsh ]] || chmod 600 "$LOCAL_DIR/private.zsh"
+  [[ ! -f $LOCAL_DIR/private-interactive.zsh ]] || chmod 600 "$LOCAL_DIR/private-interactive.zsh"
 }
 
 track_temp() { TEMP_PATHS+=("$1"); }

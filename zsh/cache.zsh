@@ -316,6 +316,21 @@ leos-refresh-init-cache() {
   return 0
 }
 
+# __leos_daily_due <name>
+# Succeeds at most once a day per name, recording the run in a private stamp
+# file inside the cache root. Fails (does nothing) when that root is unsafe.
+__leos_daily_due() {
+  emulate -L zsh
+  setopt extended_glob
+  __leos_cache_dir || return 1
+  local stamp=$REPLY/$1 staging
+  [[ ! -e $stamp && ! -L $stamp ]] || __leos_cache_safe_file "$stamp" || return 1
+  [[ -z $stamp(#qN.mh-24) ]] || return 1
+  staging=$(mktemp "${stamp:h}/.stamp.XXXXXXXX") || return 1
+  mv -f -- "$staging" "$stamp" || { rm -f -- "$staging"; return 1; }
+  return 0
+}
+
 # __leos_rehash_daily <tool>
 # Refresh a version manager's shims in the background, at most once a day.
 #
@@ -327,19 +342,40 @@ leos-refresh-init-cache() {
 # this detached, after the prompt is up, is enough.
 __leos_rehash_daily() {
   emulate -L zsh
-  setopt extended_glob
   local tool=$1
-  __leos_cache_dir || return 0
-  local stamp=$REPLY/$tool-rehash
-  [[ ! -e $stamp && ! -L $stamp ]] || __leos_cache_safe_file "$stamp" || return 0
-  [[ -z $stamp(#qN.mh-24) ]] || return 0
-  local staging
-  staging=$(mktemp "${stamp:h}/.rehash.XXXXXXXX") || return 0
-  mv -f -- "$staging" "$stamp" || { rm -f -- "$staging"; return 0; }
+  __leos_daily_due "$tool-rehash" || return 0
   # Detach in a subshell to keep job notifications out of interactive startup.
   # Test fixtures disable this side effect rather than racing their cleanup.
   setopt no_bgnice
   (command "$tool" rehash &) >/dev/null 2>&1
+  return 0
+}
+
+# __leos_fnm_prune <multishell-dir>
+# `fnm env` creates one <pid>_<millis> symlink per shell and never removes it
+# (Schniz/fnm#1085), so they accumulate by the thousand. Remove links older
+# than a day whose shell is gone. A live shell keeps its link however old it
+# is; a reused PID only delays removal. Only symlinks with that exact name
+# shape inside a directory this user owns are touched.
+__leos_fnm_prune() {
+  emulate -L zsh
+  setopt extended_glob
+  local dir=$1 link pid
+  [[ -n $dir && -d $dir && ! -L $dir && -O $dir ]] || return 0
+  for link in $dir/[0-9]##_[0-9]##(N@mh+24); do
+    pid=${${link:t}%%_*}
+    kill -0 $pid 2>/dev/null && continue
+    rm -f -- "$link"
+  done
+  return 0
+}
+
+# __leos_fnm_prune_daily <multishell-dir>: the above, detached, once a day.
+__leos_fnm_prune_daily() {
+  emulate -L zsh
+  __leos_daily_due fnm-prune || return 0
+  setopt no_bgnice
+  (__leos_fnm_prune "$1" &) >/dev/null 2>&1
   return 0
 }
 

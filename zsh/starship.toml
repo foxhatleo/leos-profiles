@@ -4,6 +4,8 @@ format = """
 [](color_orange)\
 $os\
 $username\
+$hostname\
+[ ](bg:color_orange)\
 [](bg:color_yellow fg:color_orange)\
 $directory\
 [](fg:color_yellow bg:color_aqua)\
@@ -75,7 +77,15 @@ Pop = ""
 show_always = true
 style_user = "bg:color_orange fg:color_fg0"
 style_root = "bg:color_orange fg:color_fg0"
-format = '[ $user ]($style)'
+format = '[ $user]($style)'
+
+# Shown only over SSH, so a remote shell never looks like a local one. The
+# segment's closing space is a literal in `format` above, so it follows the
+# user name locally and the host name remotely.
+[hostname]
+ssh_only = true
+style = "bg:color_orange fg:color_fg0"
+format = '[@$hostname]($style)'
 
 [directory]
 style = "fg:color_fg0 bg:color_yellow"

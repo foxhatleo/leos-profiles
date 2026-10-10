@@ -51,13 +51,13 @@ update it together with the emitter in `install.sh`.
 | `profile` | 3 | `root`, path | Authoritative local checkout |
 | `policy` | 3 | `node` or `full-upgrade`, value | Node selection policy; `yes`/`no` host upgrade |
 | `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
-| `migration` | 4 | `profile-schema`, `1`, `2` | Pending profile migration |
+| `migration` | 4 | `profile-schema`, `1`, `2`; or `legacy-loader` / `legacy-environment`, file path, managed marker | Pending profile migration; or a legacy unmarked loader (`.zshrc`) or zshenv snippet (`.zshenv`) that `zsh-config` and `remove-blocks` remove |
 | `group` | 4 | category, name, status | Selected, implied or internal group |
 | `package` | 3 | OS family, name | Exact OS package member |
 | `action` | 3 | step, description | Planned effect of a step or bootstrap |
 | `artifact` | 5 | source kind, name, URL/repository, digest/commit | Locked executable dependency |
 | `external` | 3 | service, description or URL | External service the plan contacts |
-| `file` | 3 | name, path | File the plan reads or writes |
+| `file` | 3 | name, path | File the plan reads or writes; `zshrc`, `zshenv` and (macOS) `zprofile` give the resolved zsh startup files |
 | `global` | 3 | `git`, keys | Global Git settings the plan configures |
 | `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone |
 | `runtime` | 4 | `node`, version, origin | `preserved-fnm`, `adopted-existing`, or `current-lts` |
@@ -75,6 +75,34 @@ must never generate a replacement. Pending initial generation resumes the
 originally approved apply; API/network failures must not be interpreted as
 missing registration. Enabling global GPG commit signing follows successful
 local signing and confirmed GitHub registration.
+
+## Zsh startup files
+
+The `zsh-config` step owns up to three managed blocks, each between
+`# >>> leos-profiles <marker> >>>` and `# <<< leos-profiles <marker> <<<`:
+
+| Marker | File | Content |
+| --- | --- | --- |
+| `loader` | `.zshrc` | `LEOS_PROFILES_HOME` default and the interactive-only `source …/zsh/start.zsh` |
+| `environment` | `.zshenv` | `skip_global_compinit=1` and `~/.local/bin`, `~/.local/npm/bin` in front of PATH |
+| `login-path` | `.zprofile` (macOS only) | the same PATH entries again, after `/etc/zprofile`'s `path_helper` |
+
+`resolve_zsh_dotdirs` in `installer/config.sh` decides where those files are:
+`.zshrc`/`.zprofile` in `ZDOTDIR` from the installer's environment, otherwise
+in whatever `zsh -c 'print -r -- ${ZDOTDIR:-$HOME}'` reports (with `ZDOTDIR`
+removed from its environment). `.zshenv` stays in HOME when `~/.zshenv` is what
+sets `ZDOTDIR`, because zsh reads it before the change takes effect. This probe
+runs the user's own `.zshenv`, including during `inspect`; it must stay
+read-only. `install_zsh_config`, `remove_managed_blocks`, `verify_zsh_config`
+and the inspect `file` records all use the same resolution.
+
+Legacy loaders from the pre-installer instructions (an unmarked `.zshrc` line
+sourcing `…/zsh/start.zsh`, usually wrapped in `if [[ -o interactive ]]`, and a
+`# leos-profiles zshenv` snippet) are detected only outside managed blocks.
+Inspect reports them as `migration` records; apply and `remove-blocks` remove
+them after the one-time `.leos-profiles.bak` backup, and verification fails
+while one remains. The three-line wrapper is removed whole; any other matching
+line becomes a `:` no-op so an enclosing block still parses.
 
 ## Node and package invariants
 
@@ -125,7 +153,11 @@ clients replaced by PATH fakes, and checks every inspect record against the
 table above. `profile-test.zsh` runs each Zsh block through `run_block`, which
 fails unless the block reaches an appended sentinel: a shell error inside a
 block (an unmatched glob, an unset parameter) otherwise ends `zsh -c` with
-status 0 and silently skips the remaining assertions.
+status 0 and silently skips the remaining assertions. Where a behaviour depends
+on a terminal (TERM=dumb output, the `cat` wrapper) the suite drives an
+interactive shell on a pseudo-terminal through `python3 -I`; it also checks
+that `zsh -ic` without one writes nothing to stderr. Command wrappers are tested
+with fake `eza`/`bat`/`ls`/`cat` executables that record their argv.
 
 CI also lints the workflows and Python. With the same pinned versions:
 
@@ -244,7 +276,7 @@ zsh tests/startup-benchmark.zsh --pty "$HOME/.leos-profiles"  # first prompt and
 ```
 
 Each mode measures three scenarios: cold (no init cache, no completion dump),
-warm, and aged-dump (warm caches with `~/.zcompdump` backdated two days, which
+warm, and aged-dump (warm caches with the completion dump backdated two days, which
 takes the full `compinit` path instead of `compinit -C`, as the first shell of
 each day does). The default mode times `zsh -dfi -c 'source start.zsh'` without
 a terminal. `--pty` starts an interactive shell on a pseudo-terminal, as
@@ -288,10 +320,17 @@ measured, without a terminal: cold **1984.2 ms**, warm **364.4 ms**, aged-dump
 Against zsh-bench's perceptibility thresholds (50 ms first prompt, 10 ms
 command lag) both warm startup and per-prompt cost are well above the target.
 
-The cache hashes binary path, arguments, HOME and version-manager roots. It
+The cache hashes binary path, arguments, HOME and version-manager roots, plus
+any generator-specific variables the caller folds into the key (zoxide's
+`_ZO_ECHO` and `_ZO_RESOLVE_SYMLINKS`). It
 checks ownership, write permissions and symlinks before executing persisted
 scripts or compiled files, and creates private directories/files. Launcher
 mtime controls freshness; use `leos-refresh-init-cache` after updates to other
 implementation files. Homebrew shellenv and fnm env run per shell rather than
 being cached. Test both a clean PATH and an already-configured PATH, and verify
-that different shells receive different fnm multishell directories.
+that different shells receive different fnm multishell directories. Daily
+background jobs (shim rehash, fnm multishell pruning) share the
+`__leos_daily_due` stamp helper in `zsh/cache.zsh`; test fixtures stub
+`__leos_rehash_daily` and `__leos_fnm_prune_daily` so no detached process
+outlives a test. The completion dump is `zcompdump-$ZSH_VERSION` in the same
+private cache root.

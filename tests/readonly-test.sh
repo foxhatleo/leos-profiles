@@ -34,8 +34,14 @@ rm -rf -- "$PROFILE/zsh/plugins" "$PROFILE/zsh/_private.zsh"
 # Existing user and installer state that a real run would rewrite or migrate:
 # shell startup files, a legacy marker, legacy XDG state and a schema-1 saved
 # profile (whose migration inspect reports but must not write).
-printf '%s\n' 'echo user rc' > "$FIXTURE_HOME/.zshrc"
-printf '%s\n' 'export USER_ENV=1' > "$FIXTURE_HOME/.zshenv"
+# The startup files carry the legacy unmarked loader and zshenv snippet the
+# pre-installer instructions appended, which inspect reports as migrations.
+# shellcheck disable=SC2016
+printf '%s\n' 'echo user rc' 'if [[ -o interactive ]]; then' \
+  '    source "$HOME/.leos-profiles/zsh/start.zsh"' 'fi' > "$FIXTURE_HOME/.zshrc"
+# shellcheck disable=SC2016
+printf '%s\n' 'export USER_ENV=1' '# leos-profiles zshenv' 'typeset -U path' \
+  'path=("$HOME/.local/bin" $path)' 'export PATH' > "$FIXTURE_HOME/.zshenv"
 printf '%s\n' 'legacy' > "$FIXTURE_HOME/.lp-no-gnu"
 mkdir -p "$FIXTURE_HOME/.local/state/leos-profiles"
 printf 'packages\t%064d\t2020-01-01T00:00:00Z\t\n' 0 > "$FIXTURE_HOME/.local/state/leos-profiles/install-state.tsv"
@@ -164,6 +170,14 @@ run_read_only 'inspect (recommended)' 0 inspect
 check_tsv 'inspect (recommended)' "$OUTPUT"
 grep -qxF $'migration\tprofile-schema\t1\t2' <<< "$OUTPUT" || fail 'inspect did not report the pending profile migration'
 grep -q $'^postcondition\tzsh-config\tneeded$' <<< "$OUTPUT" || fail 'inspect did not report zsh-config as needed'
+grep -qxF $'migration\tlegacy-loader\t'"$FIXTURE_HOME/.zshrc"$'\tloader' <<< "$OUTPUT" ||
+  fail 'inspect did not report the legacy .zshrc loader'
+grep -qxF $'migration\tlegacy-environment\t'"$FIXTURE_HOME/.zshenv"$'\tenvironment' <<< "$OUTPUT" ||
+  fail 'inspect did not report the legacy .zshenv snippet'
+grep -qxF $'file\tzshrc\t'"$FIXTURE_HOME/.zshrc" <<< "$OUTPUT" || fail 'inspect did not disclose the .zshrc path'
+if [[ $(uname -s) == Darwin ]]; then
+  grep -qxF $'file\tzprofile\t'"$FIXTURE_HOME/.zprofile" <<< "$OUTPUT" || fail 'inspect did not disclose the .zprofile path'
+fi
 
 run_read_only 'inspect (credentials and every component)' 0 inspect \
   --groups bins,pyenv,rbenv,bun,yarn,pnpm,plugins,fonts,zsh-config,default-shell \
@@ -177,6 +191,8 @@ done
 run_read_only 'apply --dry-run' 0 apply --yes --dry-run
 grep -q 'Profile apply complete' <<< "$OUTPUT" || fail 'dry-run apply did not complete'
 grep -q 'Would move .*\.lp-no-gnu' <<< "$OUTPUT" || fail 'dry-run apply did not detect the legacy marker'
+grep -q 'Would remove the legacy unmarked leos-profiles loader' <<< "$OUTPUT" ||
+  fail 'dry-run apply did not plan the legacy loader migration'
 
 run_read_only 'reconcile --dry-run' 0 reconcile --yes --dry-run
 grep -q 'Profile reconciliation complete' <<< "$OUTPUT" || fail 'dry-run reconcile did not complete'

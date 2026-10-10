@@ -1,8 +1,8 @@
 # rbenv
 export RBENV_ROOT=${RBENV_ROOT:-$HOME/.rbenv}
 add-path "$RBENV_ROOT/bin"
-# PATH-wide detection (mirrors fish `type -q rbenv`): finds an rbenv under
-# $RBENV_ROOT/bin OR one installed elsewhere on PATH (e.g. Homebrew).
+# PATH-wide detection: finds an rbenv under $RBENV_ROOT/bin OR one installed
+# elsewhere on PATH (e.g. Homebrew).
 # See path/pyenv.zsh for why $commands[] is used instead of $(command -v ...).
 if (( $+commands[rbenv] )); then
   # rbenv ships completions/_rbenv but never puts it on fpath, so rbenv had no
