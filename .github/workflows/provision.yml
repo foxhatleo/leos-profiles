@@ -85,16 +85,13 @@ jobs:
         # recommended scenario with the default full upgrade. The others pass
         # --no-full-upgrade (LEOS_CI_FULL_UPGRADE=0); every other scenario is
         # identical across runners.
+        # Only Homebrew Tier 1 hosts (Apple silicon, macOS 15 and later):
+        # macOS 14 and Intel Macs no longer get bottles for node, python or
+        # ruby, so a real install there fails or builds from source.
         include:
-          - runner: macos-14
-            full_upgrade: '0'
           - runner: macos-15
             full_upgrade: '1'
-          - runner: macos-15-intel
-            full_upgrade: '0'
           - runner: macos-26
-            full_upgrade: '0'
-          - runner: macos-26-intel
             full_upgrade: '0'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
