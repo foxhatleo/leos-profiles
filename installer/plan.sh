@@ -394,6 +394,15 @@ inventory_records() {
     fi
     item backup "${file##*/}" - "$file.leos-profiles.bak"
   done
+  # The opt-in credential block in ~/.ssh/config (--ssh-config yes).
+  file="$HOME/.ssh/config"
+  block_markers ssh-config
+  if [[ -f $file ]] && grep -qxF "$BLOCK_BEGIN" "$(resolve_config_path "$file")" 2>/dev/null; then
+    item managed-block ssh-config - "$file" present
+  else
+    item managed-block ssh-config - "$file" absent
+  fi
+  item local ssh-agent-key.pub - "$LOCAL_DIR/ssh-agent-key.pub"
   while IFS= read -r name; do
     artifact_row "$name"
     for file in $ARTIFACT_EXECUTABLES; do

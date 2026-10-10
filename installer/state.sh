@@ -72,6 +72,7 @@ write_profile() {
     printf 'ssh\t%s\n' "$SSH_MODE"
     printf 'ssh-key\t%s\n' "$SSH_KEY_PATH"
     printf 'ssh-passphrase\t%s\n' "$SSH_PASSPHRASE_MODE"
+    printf 'ssh-config\t%s\n' "$SSH_CONFIG"
     printf 'gpg\t%s\n' "$GPG_MODE"
     printf 'gpg-key\t%s\n' "$GPG_KEY_ID"
     printf 'gpg-passphrase\t%s\n' "$GPG_PASSPHRASE_MODE"
@@ -107,6 +108,8 @@ read_profile() {
       ssh) SSH_MODE=$value ;;
       ssh-key) SSH_KEY_PATH=$value ;;
       ssh-passphrase) SSH_PASSPHRASE_MODE=$value ;;
+      # Optional (added 2026-10): an older profile never wrote ~/.ssh/config.
+      ssh-config) SSH_CONFIG=$value ;;
       gpg) GPG_MODE=$value ;;
       gpg-key) GPG_KEY_ID=$value ;;
       gpg-passphrase) GPG_PASSPHRASE_MODE=$value ;;

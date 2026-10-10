@@ -74,10 +74,18 @@ gh() {
   esac
 }
 api_signing_keys=''
+# ssh_key_encrypted=yes: the key file has a passphrase, so an empty one
+# (-y -P '') does not open it. A fingerprint is "SHA256:" and the key's
+# base64 field without its AAAA prefix.
+ssh_key_encrypted=no
 ssh-keygen() {
   printf '%s\n' "$*" >> "$ssh_keygen_calls"
+  if [[ $1 == -y && ${2:-} == -P ]]; then [[ $ssh_key_encrypted == no ]] || return 1; fi
   if [[ $1 == -y ]]; then echo 'ssh-ed25519 AAAATEST'; return; fi
-  if [[ $1 == -lf ]]; then echo '256 SHA256:TEST public fixture (ED25519)'; return; fi
+  if [[ $1 == -lf ]]; then
+    awk '{ fingerprint = $2; sub(/^AAAA/, "", fingerprint); print "256 SHA256:" fingerprint " public fixture (ED25519)"; exit }' "$2"
+    return
+  fi
   if [[ $1 == -F ]]; then awk -v host="$2" '$1 == host { print }' "$4"; return; fi
   if [[ $1 == -R ]]; then
     cp "$4" "$4.old"
@@ -93,6 +101,17 @@ ssh-keygen() {
   printf 'ssh-ed25519 AAAATEST\n' > "$output.pub"
 }
 ensure_github_known_hosts() { :; }
+# No terminal unless a test says so (plan.sh's stdin_is_terminal).
+fixture_terminal=no
+stdin_is_terminal() { [[ $fixture_terminal == yes ]]; }
+# The running agent's identities (ssh-add -L) and its exit status.
+agent_keys='' agent_status=0
+ssh-add() {
+  printf '%s\n' "$*" >> "$fixture/ssh-add-calls"
+  [[ $1 == -L ]] || fail "unexpected ssh-add call: $*"
+  [[ $agent_status == 0 ]] || return "$agent_status"
+  printf '%s\n' "$agent_keys"
+}
 ssh() {
   printf '%s\n' "$*" >> "$fixture/ssh-calls"
   if [[ $1 == -G ]]; then
@@ -175,7 +194,19 @@ grep -q 'identityfile ~/.ssh/wrong-key' "$fixture/error" || fail 'effective iden
 ! grep -q PRIVATE_SETTING_MUST_NOT_PRINT "$fixture/error" || fail 'unrelated SSH settings leaked'
 ordinary_login=tester
 expect_exit 0 provision_ssh
-grep -q '^-o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com$' "$fixture/ssh-calls" || fail 'ordinary SSH was not tested'
+grep -q '^-o ConnectTimeout=15 -o StrictHostKeyChecking=yes -o BatchMode=yes -T git@github.com$' "$fixture/ssh-calls" || fail 'ordinary SSH was not tested in batch mode'
+grep -qxF -- "-i $SSH_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -o BatchMode=yes -T git@github.com" "$fixture/ssh-calls" ||
+  fail "selected-key SSH was not tested in batch mode: $(cat "$fixture/ssh-calls")"
+# A passphrase-protected key file on a terminal may ask; elsewhere BatchMode stays.
+ssh_key_encrypted=yes fixture_terminal=yes
+: > "$fixture/ssh-calls"
+expect_exit 0 provision_ssh
+! grep -q BatchMode "$fixture/ssh-calls" || fail 'BatchMode kept ssh from asking for the passphrase on a terminal'
+fixture_terminal=no
+: > "$fixture/ssh-calls"
+expect_exit 0 provision_ssh
+[[ $(grep -c 'BatchMode=yes' "$fixture/ssh-calls") == 2 ]] || fail 'verification without a terminal could wait for input'
+ssh_key_encrypted=no
 SSH_MODE=generate
 expect_exit 1 provision_ssh
 SSH_KEY_PATH="$fixture/new-custom-key"
@@ -297,6 +328,91 @@ expect_exit 1 credential_manual_action register-gpg-key "$fixture/bad-export.asc
 grep -q 'Invalid public GPG export' "$fixture/error" || fail 'manual action accepted private material'
 expect_no_action
 gpg_export_private=no api_gpg=89ABCDEF01234567
+
+# --- --ssh agent (MI-7): a key only the agent holds ---
+SSH_MODE=agent SSH_KEY_PATH='laptop key' GPG_MODE=skip api_keys=''
+agent_keys=$'ssh-ed25519 AAAAAGENTONE laptop key\nssh-ed25519 AAAAAGENTTWO work\nssh-rsa AAAAAGENTTHREE work'
+(
+  unset SSH_AUTH_SOCK
+  expect_exit 1 provision_ssh
+  grep -q 'SSH_AUTH_SOCK is not set' "$fixture/error" || fail "no agent error: $(cat "$fixture/error")"
+)
+SSH_AUTH_SOCK="$fixture/not-a-socket"
+: > "$SSH_AUTH_SOCK"
+expect_exit 1 provision_ssh
+grep -q 'not a socket' "$fixture/error" || fail 'a regular file was accepted as the agent socket'
+SSH_AUTH_SOCK="$fixture/agent.sock"
+if /usr/bin/env python3 -I -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$SSH_AUTH_SOCK" 2>/dev/null; then
+  agent_status=1
+  expect_exit 1 provision_ssh
+  grep -q 'holds no keys' "$fixture/error" || fail 'an empty agent was not reported'
+  agent_status=2
+  expect_exit 1 provision_ssh
+  grep -q 'Could not reach the SSH agent' "$fixture/error" || fail 'an unreachable agent was not reported'
+  agent_status=0
+  SSH_KEY_PATH='no such key'
+  expect_exit 1 provision_ssh
+  grep -q "No key in the SSH agent matches --ssh-key 'no such key'.*SHA256:AGENTONE (laptop key)" "$fixture/error" ||
+    fail "unmatched selector: $(cat "$fixture/error")"
+  SSH_KEY_PATH=work
+  expect_exit 1 provision_ssh
+  grep -q 'matches 2 agent keys' "$fixture/error" || fail 'an ambiguous selector picked a key'
+  # Selected by comment: the public key is saved under local/ and registration
+  # is a manual action naming it; the profile keeps the fingerprint.
+  SSH_KEY_PATH='laptop key'
+  : > "$ssh_keygen_calls"
+  expect_exit 3 provision_ssh
+  expect_action register-ssh-key https://github.com/settings/ssh/new
+  grep -q $'^manual-action\tregister-ssh-key\t'"$LOCAL_DIR/ssh-agent-key.pub"$'\t' "$fixture/output" || fail 'agent public key path missing'
+  [[ $(cat "$LOCAL_DIR/ssh-agent-key.pub") == 'ssh-ed25519 AAAAAGENTONE laptop key' ]] || fail 'agent public key not saved'
+  grep -qxF $'agent\tSHA256:AGENTONE' "$PROFILE_FILE" || fail "agent selection not saved: $(cat "$PROFILE_FILE")"
+  ! grep -q -- '^-y' "$ssh_keygen_calls" || fail 'agent mode read a private-key file'
+  # Registered: verified through the agent with the public key, in batch mode.
+  for SSH_KEY_PATH in SHA256:AGENTONE 'ssh-ed25519 AAAAAGENTONE' 'ssh-ed25519 AAAAAGENTONE laptop key'; do
+    api_keys='ssh-ed25519 AAAAAGENTONE'
+    : > "$fixture/ssh-calls"
+    expect_exit 0 provision_ssh
+    grep -qxF -- "-i $LOCAL_DIR/ssh-agent-key.pub -o IdentityAgent=$SSH_AUTH_SOCK -F /dev/null -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -o BatchMode=yes -T git@github.com" "$fixture/ssh-calls" ||
+      fail "agent key not verified through the agent: $(cat "$fixture/ssh-calls")"
+  done
+  # Ordinary SSH that does not use the agent: guidance names the agent.
+  ordinary_login=other_account
+  expect_exit 3 provision_ssh
+  expect_action configure-ssh-key
+  grep -q 'use the agent' "$fixture/error" || fail 'agent configuration guidance missing'
+  ordinary_login=tester
+else
+  echo 'SKIP: agent-socket fixtures need python3 to create a Unix socket.'
+fi
+
+# --- --ssh-config yes (SEC-1/MI-7): an opt-in managed github.com block ---
+SSH_MODE=reuse SSH_KEY_PATH="$fixture/custom-key" api_keys='ssh-ed25519 AAAATEST' OS_FAMILY=macos SSH_CONFIG=no
+rm -rf "$HOME/.ssh"
+expect_exit 0 provision_ssh
+[[ ! -e $HOME/.ssh/config ]] || fail 'SSH configuration was written without --ssh-config yes'
+SSH_CONFIG=yes
+expect_exit 0 provision_ssh
+expected_block=$'# >>> leos-profiles ssh-config >>>\nHost github.com\n  AddKeysToAgent yes\n  UseKeychain yes\n  IdentityFile "'"$SSH_KEY_PATH"$'"\n# <<< leos-profiles ssh-config <<<'
+[[ $(cat "$HOME/.ssh/config") == "$expected_block" ]] || fail "unexpected SSH config block: $(cat "$HOME/.ssh/config")"
+[[ $(file_mode "$HOME/.ssh/config") == 600 ]] || fail 'a new ~/.ssh/config is not private'
+# Idempotent, after the user's own content, which it leaves alone.
+printf '%s\n' 'Host *' '  ServerAliveInterval 60' > "$HOME/.ssh/config"
+expect_exit 0 provision_ssh
+expect_exit 0 provision_ssh
+[[ $(grep -c '^# >>> leos-profiles ssh-config >>>$' "$HOME/.ssh/config") == 1 ]] || fail 'SSH config block duplicated'
+[[ $(head -n 2 "$HOME/.ssh/config") == $'Host *\n  ServerAliveInterval 60' ]] || fail 'user SSH config changed'
+# Linux has no UseKeychain; an agent key has no IdentityFile.
+OS_FAMILY=apt
+expect_exit 0 provision_ssh
+! grep -q UseKeychain "$HOME/.ssh/config" || fail 'UseKeychain written on Linux'
+if [[ -S $fixture/agent.sock ]]; then
+  SSH_MODE=agent SSH_KEY_PATH=SHA256:AGENTONE SSH_AUTH_SOCK="$fixture/agent.sock" api_keys='ssh-ed25519 AAAAAGENTONE'
+  expect_exit 0 provision_ssh
+  ! grep -q IdentityFile "$HOME/.ssh/config" || fail 'IdentityFile written for an agent key'
+fi
+SSH_MODE=reuse SSH_KEY_PATH="$fixture/custom-key" api_keys='ssh-ed25519 AAAATEST' SSH_CONFIG=no
+unset OS_FAMILY
+rm -rf "$HOME/.ssh"
 
 # New GPG keys get the approved expiry (SEC-1).
 GPG_MODE=generate GPG_EXPIRY=2y

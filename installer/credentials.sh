@@ -36,7 +36,7 @@ install_credential_prerequisites() {
   case $OS_FAMILY in
     macos)
       if [[ $SSH_MODE != skip ]]; then
-        for tool in ssh ssh-keygen ssh-keyscan; do
+        for tool in ssh ssh-keygen ssh-keyscan ssh-add; do
           [[ -x /usr/bin/$tool ]] || die "macOS system SSH tool is missing: /usr/bin/$tool"
         done
       fi
@@ -283,10 +283,98 @@ ensure_github_known_hosts() {
   mv -f "$known_tmp" "$known_hosts"
 }
 
+# The public half of the selected SSH identity: <key>.pub for a key file, or
+# the agent identity's public key saved under local/ (agent mode has no file).
+SSH_PUBLIC_KEY=""
+SSH_KEY_ENCRYPTED=0
+
+ssh_agent_public_key_path() { printf '%s\n' "$LOCAL_DIR/ssh-agent-key.pub"; }
+
+# ssh_agent_select <selector> (MI-7): choose the one key the running agent
+# (ssh-agent, 1Password, Secretive, ...) lists whose SHA256 fingerprint,
+# comment, "type base64" material or whole public-key line equals the
+# selector. Never picks a key on its own: no match or several matches stop.
+# Saves the public key to local/ and leaves its fingerprint in SSH_KEY_PATH.
+ssh_agent_select() {
+  local selector=$1 listing line candidate material comment fingerprint status=0
+  local chosen_fingerprint="" chosen_line="" count=0 available="" public_tmp
+  [[ -n ${SSH_AUTH_SOCK:-} ]] || die "--ssh agent needs a running SSH agent, but SSH_AUTH_SOCK is not set"
+  [[ -S $SSH_AUTH_SOCK ]] || die "--ssh agent: SSH_AUTH_SOCK is not a socket: $SSH_AUTH_SOCK"
+  listing=$(ssh-add -L 2>/dev/null) || status=$?
+  case $status in
+    0) ;;
+    1) die "The SSH agent at $SSH_AUTH_SOCK holds no keys (ssh-add -L). Add or unlock the key in your agent, then rerun." ;;
+    *) die "Could not reach the SSH agent at $SSH_AUTH_SOCK (ssh-add -L exited $status)" ;;
+  esac
+  candidate=$(mktemp "${TMPDIR:-/tmp}/leos-agent-key.XXXXXX")
+  track_temp "$candidate"
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    printf '%s\n' "$line" > "$candidate"
+    fingerprint=$(ssh-keygen -lf "$candidate" 2>/dev/null | awk '{ print $2; exit }' || true)
+    [[ -n $fingerprint ]] || continue
+    material=$(ssh_public_material "$candidate")
+    comment=$(awk '{ $1 = ""; $2 = ""; sub(/^ +/, ""); print; exit }' "$candidate")
+    available+=" $fingerprint${comment:+ ($comment)};"
+    if [[ $selector == "$fingerprint" || $selector == "$material" || $selector == "$line" ||
+          ( -n $comment && $selector == "$comment" ) ]]; then
+      count=$((count + 1))
+      chosen_fingerprint=$fingerprint
+      chosen_line=$line
+    fi
+  done <<< "$listing"
+  (( count > 0 )) || die "No key in the SSH agent matches --ssh-key '$selector'. The agent holds:${available%;}"
+  (( count == 1 )) || die "--ssh-key '$selector' matches $count agent keys; select one by its SHA256 fingerprint. The agent holds:${available%;}"
+  prepare_local_dir
+  SSH_PUBLIC_KEY=$(ssh_agent_public_key_path)
+  public_tmp=$(mktemp "$LOCAL_DIR/.ssh-agent-key.XXXXXX")
+  track_temp "$public_tmp"
+  printf '%s\n' "$chosen_line" > "$public_tmp"
+  chmod 600 "$public_tmp"
+  mv -f "$public_tmp" "$SSH_PUBLIC_KEY"
+  SSH_KEY_PATH=$chosen_fingerprint
+}
+
+# ssh_verification_options: the options of the two GitHub SSH checks, in
+# SSH_VERIFY_OPTIONS. BatchMode keeps them from ever waiting for input
+# (SEC-1); the one exception is a passphrase-protected key file on a
+# terminal, which ssh unlocks by asking, as it always did.
+SSH_VERIFY_OPTIONS=()
+ssh_verification_options() {
+  SSH_VERIFY_OPTIONS=(-o ConnectTimeout=15 -o StrictHostKeyChecking=yes)
+  if [[ $SSH_KEY_ENCRYPTED -eq 1 ]] && stdin_is_terminal; then return 0; fi
+  SSH_VERIFY_OPTIONS+=(-o BatchMode=yes)
+}
+
+# The opt-in (--ssh-config yes) managed block in ~/.ssh/config. It is
+# appended, so the user's own earlier settings for github.com still win.
+ssh_config_block_content() {
+  printf '%s\n' 'Host github.com' '  AddKeysToAgent yes'
+  [[ ${OS_FAMILY:-} != macos ]] || printf '%s\n' '  UseKeychain yes'
+  if [[ $SSH_MODE != agent && -n $SSH_KEY_PATH ]]; then
+    printf '  IdentityFile "%s"\n' "$SSH_KEY_PATH"
+  fi
+}
+
+install_ssh_config_block() {
+  [[ ${SSH_CONFIG:-no} == yes ]] || return 0
+  local content created=0
+  [[ $SSH_KEY_PATH != *'"'* ]] || die "Cannot write an IdentityFile for a path containing a double quote: $SSH_KEY_PATH"
+  content=$(ssh_config_block_content)
+  mkdir -p "$HOME/.ssh"
+  chmod 700 "$HOME/.ssh"
+  [[ -e $(resolve_config_path "$HOME/.ssh/config") ]] || created=1
+  install_managed_block "$HOME/.ssh/config" ssh-config "$content"
+  # A config this run created is private; an existing one keeps its mode.
+  if [[ $created -eq 1 ]]; then chmod 600 "$(resolve_config_path "$HOME/.ssh/config")"; fi
+  say "Managed github.com block in $HOME/.ssh/config: AddKeysToAgent$([[ ${OS_FAMILY:-} != macos ]] || printf ', UseKeychain')$([[ $SSH_MODE == agent ]] || printf ', IdentityFile %s' "$SSH_KEY_PATH") (--ssh-config yes)"
+}
+
 provision_ssh() {
   [[ $SSH_MODE == skip ]] && return 0
   if [[ $DRY_RUN -eq 1 ]]; then
     say "Would prepare the selected SSH key, check registration, and verify selected-key and ordinary GitHub SSH authentication; missing registration requires manual action"
+    if [[ ${SSH_CONFIG:-no} == yes ]]; then say "Would install the managed github.com block in $HOME/.ssh/config (--ssh-config yes)"; fi
     return 0
   fi
   if [[ $COMMAND == reconcile && $SSH_MODE == generate ]]; then
@@ -296,51 +384,77 @@ provision_ssh() {
   command -v gh >/dev/null 2>&1 || die "SSH provisioning requires gh; install/authenticate it first"
   ensure_github_auth
   verify_github_api
-  local key=${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}
-  if [[ $SSH_MODE == reuse ]]; then
-    [[ -n $SSH_KEY_PATH && -f $key ]] || die "Chosen SSH private key does not exist: $key"
+  SSH_KEY_ENCRYPTED=0
+  local key=${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519} identity
+  local -a selected_identity=()
+  if [[ $SSH_MODE == agent ]]; then
+    ssh_agent_select "$SSH_KEY_PATH"
+    write_profile
+    identity="the agent key $SSH_KEY_PATH"
+    # -i with the public key makes ssh use exactly that agent identity.
+    selected_identity=(-i "$SSH_PUBLIC_KEY" -o "IdentityAgent=$SSH_AUTH_SOCK")
   else
-    [[ ! -e $key && ! -L $key && ! -e $key.pub && ! -L $key.pub ]] ||
-      die "Refusing to replace or silently reuse an existing SSH key; select it explicitly with --ssh reuse --ssh-key $key"
-    run mkdir -p "$(dirname -- "$key")"
-    if [[ $(dirname -- "$key") == "$HOME/.ssh" ]]; then chmod 700 "$HOME/.ssh"; fi
-    if [[ $SSH_PASSPHRASE_MODE == prompt ]]; then
-      run ssh-keygen -t ed25519 -f "$key"
+    if [[ $SSH_MODE == reuse ]]; then
+      [[ -n $SSH_KEY_PATH && -f $key ]] || die "Chosen SSH private key does not exist: $key"
     else
-      warn "Generating $key WITHOUT a passphrase (--ssh-passphrase empty). Anyone who can read the file can use the key."
-      run ssh-keygen -t ed25519 -f "$key" -N "" -q
+      [[ ! -e $key && ! -L $key && ! -e $key.pub && ! -L $key.pub ]] ||
+        die "Refusing to replace or silently reuse an existing SSH key; select it explicitly with --ssh reuse --ssh-key $key"
+      run mkdir -p "$(dirname -- "$key")"
+      if [[ $(dirname -- "$key") == "$HOME/.ssh" ]]; then chmod 700 "$HOME/.ssh"; fi
+      if [[ $SSH_PASSPHRASE_MODE == prompt ]]; then
+        run ssh-keygen -t ed25519 -f "$key"
+      else
+        warn "Generating $key WITHOUT a passphrase (--ssh-passphrase empty). Anyone who can read the file can use the key; prefer --ssh-passphrase prompt (macOS: --ssh-config yes keeps it in the Keychain)."
+        run ssh-keygen -t ed25519 -f "$key" -N "" -q
+      fi
     fi
+    # An empty passphrase that does not open the key means it has one.
+    ssh-keygen -y -P '' -f "$key" >/dev/null 2>&1 || SSH_KEY_ENCRYPTED=1
+    local derived_public
+    derived_public=$(mktemp)
+    track_temp "$derived_public"
+    ssh-keygen -y -f "$key" > "$derived_public" ||
+      die "Could not read the public half of $key (a passphrase-protected key needs a terminal)"
+    if [[ ! -e $key.pub && ! -L $key.pub ]]; then
+      mv -f "$derived_public" "$key.pub"
+      chmod 644 "$key.pub"
+    elif [[ ! -f $key.pub || $(ssh_public_material "$derived_public") != "$(ssh_public_material "$key.pub")" ]]; then
+      die "Existing public key does not match the selected private key: $key.pub"
+    fi
+    SSH_KEY_PATH=$key
+    SSH_PUBLIC_KEY=$key.pub
+    SSH_MODE=reuse
+    write_profile
+    identity=$key
+    selected_identity=(-i "$key")
   fi
-  local derived_public
-  derived_public=$(mktemp)
-  track_temp "$derived_public"
-  ssh-keygen -y -f "$key" > "$derived_public"
-  if [[ ! -e $key.pub && ! -L $key.pub ]]; then
-    mv -f "$derived_public" "$key.pub"
-    chmod 644 "$key.pub"
-  elif [[ ! -f $key.pub || $(ssh_public_material "$derived_public") != "$(ssh_public_material "$key.pub")" ]]; then
-    die "Existing public key does not match the selected private key: $key.pub"
-  fi
-  SSH_KEY_PATH=$key
-  SSH_MODE=reuse
-  write_profile
-  if ! github_ssh_key_present "$key.pub"; then
-    credential_manual_action register-ssh-key "$key.pub" https://github.com/settings/ssh/new \
-      "Register this public SSH key yourself on GitHub account $GITHUB_LOGIN: $key.pub. Resume with reconcile when no key generation remains pending."
+  if ! github_ssh_key_present "$SSH_PUBLIC_KEY"; then
+    credential_manual_action register-ssh-key "$SSH_PUBLIC_KEY" https://github.com/settings/ssh/new \
+      "Register this public SSH key yourself on GitHub account $GITHUB_LOGIN: $SSH_PUBLIC_KEY (or: gh ssh-key add $SSH_PUBLIC_KEY --type authentication, which needs the admin:public_key scope). Resume with reconcile when no key generation remains pending."
   fi
   ensure_github_known_hosts
-  local ssh_output expected="Hi $GITHUB_LOGIN! You've successfully authenticated"
-  ssh_output=$(ssh -i "$key" -F /dev/null -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
+  ssh_verification_options
+  local ssh_output expected="Hi $GITHUB_LOGIN! You've successfully authenticated" hint=""
+  ssh_output=$(ssh "${selected_identity[@]}" -F /dev/null -o IdentitiesOnly=yes "${SSH_VERIFY_OPTIONS[@]}" -T git@github.com 2>&1 || true)
   if [[ $ssh_output != *"$expected"* ]]; then
-    credential_manual_action verify-ssh-key "$key.pub" https://github.com/settings/keys \
-      "The selected SSH key did not authenticate as $GITHUB_LOGIN. Check the selected key and GitHub account, then rerun."
+    if [[ $SSH_KEY_ENCRYPTED -eq 1 ]]; then hint=" The key has a passphrase: add it to your agent (ssh-add) or run the installer in a terminal."; fi
+    credential_manual_action verify-ssh-key "$SSH_PUBLIC_KEY" https://github.com/settings/keys \
+      "The selected SSH key ($identity) did not authenticate as $GITHUB_LOGIN.$hint Check the selected key and GitHub account, then rerun."
   fi
-  ssh_output=$(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
+  install_ssh_config_block
+  ssh_output=$(ssh "${SSH_VERIFY_OPTIONS[@]}" -T git@github.com 2>&1 || true)
   if [[ $ssh_output != *"$expected"* ]]; then
     warn "Effective ordinary SSH settings for github.com:"
-    ssh -G github.com 2>/dev/null | awk '$1 == "identityfile" || $1 == "identitiesonly" || $1 == "hostname" || $1 == "user"' >&2 || true
-    credential_manual_action configure-ssh-key "$key.pub" "$HOME/.ssh/config" \
-      "Ordinary SSH did not authenticate as $GITHUB_LOGIN. Configure github.com IdentityFile for $key and IdentitiesOnly yes yourself (or your agent), then rerun. No SSH or Git protocol configuration was changed."
+    ssh -G github.com 2>/dev/null | awk '$1 == "identityfile" || $1 == "identitiesonly" || $1 == "identityagent" || $1 == "hostname" || $1 == "user"' >&2 || true
+    if [[ $SSH_MODE == agent ]]; then
+      hint="Make ordinary SSH use the agent for github.com (SSH_AUTH_SOCK, or IdentityAgent in ~/.ssh/config)"
+    else
+      hint="Configure github.com IdentityFile for $key and IdentitiesOnly yes yourself (or load it into your agent)"
+    fi
+    local changed="No SSH or Git protocol configuration was changed."
+    [[ ${SSH_CONFIG:-no} != yes ]] || changed="Only the managed github.com block in ~/.ssh/config was written; your earlier settings for github.com take precedence over it."
+    credential_manual_action configure-ssh-key "$SSH_PUBLIC_KEY" "$HOME/.ssh/config" \
+      "Ordinary SSH did not authenticate as $GITHUB_LOGIN. $hint, then rerun. $changed"
   fi
 }
 

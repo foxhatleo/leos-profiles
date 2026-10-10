@@ -46,6 +46,7 @@ FULL_UPGRADE=1
 SAVED_FULL_UPGRADE=yes
 OS_FAMILY=""
 SSH_KEY_PATH=""
+SSH_CONFIG="no"
 GIT_NAME=""
 GIT_EMAIL=""
 FONT_NAME=""
@@ -81,9 +82,19 @@ Usage:
 Options:
   --groups <csv|none>             $CANONICAL_STEPS
   --package-groups <csv|none>     $CANONICAL_GROUPS
-  --ssh <skip|reuse|generate>     GitHub SSH-key provisioning choice
-  --ssh-key <path>                Absolute key path (reuse requires it; generate defaults to ~/.ssh/id_ed25519)
-  --ssh-passphrase <empty|prompt> New SSH-key passphrase policy
+  --ssh <skip|reuse|generate|agent>
+                                  GitHub SSH-key provisioning choice; agent uses
+                                  a key held by the running SSH agent
+                                  (SSH_AUTH_SOCK: ssh-agent, 1Password, Secretive)
+  --ssh-key <path|selector>       reuse/generate: absolute key path (reuse requires
+                                  it; generate defaults to ~/.ssh/id_ed25519).
+                                  agent: the key's SHA256 fingerprint, comment or
+                                  public key, as ssh-add -L lists it (required)
+  --ssh-passphrase <empty|prompt> New SSH-key passphrase policy; prompt is
+                                  recommended (empty leaves the key unencrypted)
+  --ssh-config <yes|no>           Write a managed Host github.com block in
+                                  ~/.ssh/config (AddKeysToAgent; macOS UseKeychain;
+                                  IdentityFile for a key file). Default no
   --gpg <skip|reuse|generate>     Git commit-signing choice
   --gpg-key <fingerprint>         Required explicit secret key when --gpg reuse
   --gpg-passphrase <empty|prompt> New-key passphrase policy
@@ -182,6 +193,7 @@ parse_args() {
     --ssh) require_value "$1" "${2:-}"; SSH_MODE=$2; shift 2 ;;
     --ssh-key) require_value "$1" "${2:-}"; SSH_KEY_PATH=$2; shift 2 ;;
     --ssh-passphrase) require_value "$1" "${2:-}"; SSH_PASSPHRASE_MODE=$2; shift 2 ;;
+    --ssh-config) require_value "$1" "${2:-}"; SSH_CONFIG=$2; shift 2 ;;
     --gpg) require_value "$1" "${2:-}"; GPG_MODE=$2; shift 2 ;;
     --gpg-key) require_value "$1" "${2:-}"; GPG_KEY_ID=$2; shift 2 ;;
     --gpg-passphrase) require_value "$1" "${2:-}"; GPG_PASSPHRASE_MODE=$2; shift 2 ;;
@@ -251,7 +263,9 @@ order_selected_steps() {
 validate_options() {
   [[ -z $SELECTED_STEPS ]] || valid_csv "$SELECTED_STEPS" "$CANONICAL_STEPS" || die "Invalid --groups value"
   [[ -z $SELECTED_GROUPS ]] || valid_csv "$SELECTED_GROUPS" "$CANONICAL_GROUPS" || die "Invalid --package-groups value"
-  [[ $SSH_MODE == skip || $SSH_MODE == reuse || $SSH_MODE == generate ]] || die "Invalid --ssh value"
+  [[ $SSH_MODE == skip || $SSH_MODE == reuse || $SSH_MODE == generate || $SSH_MODE == agent ]] || die "Invalid --ssh value"
+  [[ $SSH_CONFIG == yes || $SSH_CONFIG == no ]] || die "Invalid --ssh-config value"
+  [[ $SSH_CONFIG == no || $SSH_MODE != skip ]] || die "--ssh-config yes needs an SSH key: --ssh reuse, generate or agent"
   [[ $SSH_PASSPHRASE_MODE == empty || $SSH_PASSPHRASE_MODE == prompt ]] || die "Invalid --ssh-passphrase value"
   [[ $GPG_MODE == skip || $GPG_MODE == reuse || $GPG_MODE == generate ]] || die "Invalid --gpg value"
   [[ $GPG_PASSPHRASE_MODE == empty || $GPG_PASSPHRASE_MODE == prompt ]] || die "Invalid --gpg-passphrase value"
@@ -261,9 +275,10 @@ validate_options() {
   [[ -z $BREW_MIRROR || $BREW_MIRROR == china || $BREW_MIRROR == none ]] || die "Invalid --brew-mirror value"
   [[ -z $NODE_VERSION_APPROVED ]] || node_version_ok "$NODE_VERSION_APPROVED" || die "--node-version must look like v24.11.1"
   [[ $SSH_MODE != reuse || -n $SSH_KEY_PATH ]] || die "--ssh reuse requires --ssh-key <private-key-path>"
+  [[ $SSH_MODE != agent || -n $SSH_KEY_PATH ]] || die "--ssh agent requires --ssh-key <fingerprint|comment|public key> naming one key from ssh-add -L"
   [[ $GPG_MODE != reuse || -n $GPG_KEY_ID ]] || die "--gpg reuse requires --gpg-key <fingerprint>"
   [[ $INSTALL_FONTS != yes || -n $FONT_NAME ]] || die "--fonts yes requires --font <name>"
-  [[ -z $SSH_KEY_PATH || $SSH_KEY_PATH == /* ]] || die "--ssh-key must be an absolute path"
+  [[ -z $SSH_KEY_PATH || $SSH_MODE == agent || $SSH_KEY_PATH == /* ]] || die "--ssh-key must be an absolute path"
   [[ -z $FONT_NAME || $FONT_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "--font must be a Nerd Fonts directory name"
   [[ $NODE_POLICY == preserve-compatible ]] || die "Unsupported Node policy: $NODE_POLICY"
   [[ $NODE_CHANNEL == current-lts ]] || die "Unsupported Node channel in saved profile: $NODE_CHANNEL"
@@ -502,6 +517,16 @@ inspect_tsv() {
     printf 'action\tssh\tprepare explicit local key and verify manual GitHub registration\n'
     printf 'external\tgithub\tmanual SSH public-key registration and guided SSH/Git protocol configuration\n'
     printf 'file\tssh-known-hosts\t~/.ssh/known_hosts\n'
+    if [[ $SSH_MODE == agent ]]; then
+      printf 'behaviour\tssh-agent\tlists the running agent'"'"'s keys (ssh-add -L through SSH_AUTH_SOCK) and uses the one --ssh-key names; no private-key file is read\n'
+      printf 'file\tssh-agent-public-key\t%s\n' "$LOCAL_DIR/ssh-agent-key.pub"
+    fi
+    if [[ $SSH_CONFIG == yes ]]; then
+      printf 'action\tssh-config\tmanaged Host github.com block: AddKeysToAgent yes%s%s\n' \
+        "$([[ $OS_FAMILY != macos ]] || printf ', UseKeychain yes')" \
+        "$([[ $SSH_MODE == agent ]] || printf ', IdentityFile %s' "${SSH_KEY_PATH:-~/.ssh/id_ed25519}")"
+      printf 'file\tssh-config\t%s\n' "$HOME/.ssh/config"
+    fi
   fi
   if [[ $GPG_MODE != skip ]]; then
     printf 'action\tgpg\tverify GitHub email, manual public-key registration, and configure commit signing\n'
@@ -517,7 +542,7 @@ inspect_tsv() {
   if has_csv_item "$SELECTED_STEPS" default-shell; then printf 'action\tdefault-shell\t%s\n' "$CHANGE_DEFAULT_SHELL"; fi
   printf 'file\tlocal-profile\t%s\n' "$PROFILE_FILE"
   printf 'file\tlocal-state\t%s\n' "$STATE_FILE"
-  if [[ $SSH_MODE != skip ]]; then printf 'file\tssh-reference\t%s\n' "${SSH_KEY_PATH:-generated path under ~/.ssh}"; fi
+  if [[ $SSH_MODE == reuse || $SSH_MODE == generate ]]; then printf 'file\tssh-reference\t%s\n' "${SSH_KEY_PATH:-generated path under ~/.ssh}"; fi
   if [[ $GPG_MODE != skip ]]; then printf 'global\tgit\tuser.signingkey,gpg.format,commit.gpgsign\n'; fi
   if has_csv_item "$SELECTED_STEPS" default-shell && [[ $CHANGE_DEFAULT_SHELL != no ]]; then printf 'irreversible\tlogin-shell\tchsh may require a new login\n'; fi
   inspect_artifacts

@@ -316,6 +316,10 @@ remove_managed_blocks() {
   fi
   strip_legacy_loader "$ZSH_RC_DIR/.zshrc" loader
   strip_legacy_loader "$ZSH_ENV_DIR/.zshenv" environment
+  # The opt-in credential blocks (--ssh-config yes, GPG pinentry).
+  if [[ -e $HOME/.ssh/config ]]; then
+    remove_managed_block "$HOME/.ssh/config" ssh-config
+  fi
   say "Packages, plugins and credentials are left untouched; remove those manually if wanted."
 }
 
