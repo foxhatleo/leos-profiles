@@ -359,8 +359,11 @@ Homebrew remote and environment.
 
 ## Support and validation matrix
 
-- macOS 14, 15, and 26 on currently supported Intel/Apple Silicon
-  combinations, following [Homebrew's current support tiers](https://docs.brew.sh/Support-Tiers).
+- macOS 15 and later on Apple silicon, matching Homebrew's
+  [Tier 1 support](https://docs.brew.sh/Support-Tiers). macOS 14 and Intel
+  Macs are unsupported: Homebrew no longer publishes bottles there for
+  packages this setup installs (node, python, ruby), so installs fail or build
+  from source for hours.
 - Ubuntu 22.04, 24.04, and 26.04 LTS on x86_64 and arm64, aligned with
   [Canonical's standard-support lifecycle](https://ubuntu.com/about/release-cycle).
 - Debian 12 and 13 on x86_64 and arm64, following Debian's
@@ -373,7 +376,7 @@ Homebrew remote and environment.
 
 CI is configured to run actual provisioning in native x86_64 and arm64 Linux
 containers for each listed Ubuntu, Debian, and Fedora release, plus Arch
-x86_64. macOS jobs cover the available hosted ARM/Intel combinations with a
+x86_64. macOS jobs cover the hosted Apple-silicon macOS 15 and 26 runners with a
 fresh HOME on the runner's existing OS and Homebrew installation. This is not
 a factory-fresh macOS VM or proof of a clean Command Line Tools/Homebrew
 bootstrap. The workflow tests minimal and recommended selections, pnpm-only

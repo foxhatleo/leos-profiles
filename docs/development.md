@@ -231,8 +231,8 @@ Linux CI invokes `tests/provisioning-container.sh` inside native-architecture
 containers with the source checkout mounted read-only. Ubuntu 22.04/24.04/26.04,
 Debian 12/13, and Fedora 43/44 run on x86_64 and arm64; Arch runs on x86_64.
 The containers create a non-root test user and exercise actual package managers.
-macOS CI uses fresh HOME directories on hosted macOS 14/15/26 ARM/Intel runners
-where available. Those images already have developer tools and Homebrew: the
+macOS CI uses fresh HOME directories on hosted Apple-silicon macOS 15 and 26
+runners (Homebrew Tier 1; macOS 14 and Intel Macs are unsupported). Those images already have developer tools and Homebrew: the
 matrix does not establish factory-fresh macOS bootstrap coverage.
 
 Scenarios exercise minimal Zsh setup, pnpm-only dependency resolution,
