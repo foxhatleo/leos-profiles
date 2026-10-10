@@ -2,11 +2,52 @@
 # Sourced by install.sh; shares the installer context.
 # shellcheck disable=SC2034
 
+# SUDO: the prefix for every command that needs root, empty when the
+# installer already runs as root (containers), so nothing there depends on a
+# sudo binary (CQ-7). run_root and the /etc/shells edit in config.sh use it.
+SUDO=sudo
+[[ $EUID -ne 0 ]] || SUDO=""
+
+# run_root <command...>: `run` with the root prefix.
+run_root() {
+  if [[ -n $SUDO ]]; then
+    run "$SUDO" "$@"
+  else
+    run "$@"
+  fi
+}
+
 ensure_sudo() {
   [[ $OS_FAMILY == macos ]] && return 0
-  [[ $DRY_RUN -eq 1 || $EUID -eq 0 ]] && return 0
+  [[ $DRY_RUN -eq 1 || -z $SUDO ]] && return 0
   command -v sudo >/dev/null 2>&1 || die "Install sudo or run with package-manager privileges before setup"
   sudo -v
+}
+
+# apt indexes are refreshed once per run, before the first apt-get operation.
+APT_INDEX_UPDATED=0
+apt_update_once() {
+  [[ $APT_INDEX_UPDATED -eq 0 ]] || return 0
+  run_root apt-get update
+  APT_INDEX_UPDATED=1
+}
+
+# pkg_install <packages...>: install packages with the host package manager.
+# The bootstrap, the packages step and the credential prerequisites all use
+# this one definition (CQ-3).
+pkg_install() {
+  (( $# )) || return 0
+  case $OS_FAMILY in
+    macos)
+      ensure_brew
+      run brew install "$@" ;;
+    apt)
+      apt_update_once
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+    fedora) run_root dnf install -y "$@" ;;
+    arch) run_root pacman -S --needed --noconfirm "$@" ;;
+    *) die "Unsupported package family: $OS_FAMILY" ;;
+  esac
 }
 
 ensure_brew() {
@@ -44,7 +85,7 @@ bootstrap_tools() {
   command -v curl >/dev/null 2>&1 || missing+=(curl)
   if [[ $OS_FAMILY == macos ]]; then
     ensure_brew
-    if (( ${#missing[@]} )); then run brew install "${missing[@]}"; fi
+    pkg_install ${missing[@]+"${missing[@]}"}
     return 0
   fi
   for executable in unzip tar gzip; do
@@ -56,13 +97,7 @@ bootstrap_tools() {
     return 0
   fi
   ensure_sudo
-  case $OS_FAMILY in
-    apt)
-      run sudo apt-get update
-      run sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" ;;
-    fedora) run sudo dnf install -y "${missing[@]}" ;;
-    arch) run sudo pacman -S --needed --noconfirm "${missing[@]}" ;;
-  esac
+  pkg_install "${missing[@]}"
 }
 
 # macOS names are canonical Homebrew formula names, not aliases: `brew list
@@ -230,25 +265,25 @@ install_os_packages() {
         run brew upgrade
         run brew upgrade --cask
       fi
-      run brew install "${requested[@]}"
+      pkg_install "${requested[@]}"
       BREW_FORMULAE="" ;;
     apt)
-      run sudo apt-get update
-      [[ $FULL_UPGRADE -eq 0 ]] || run sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-      run sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${requested[@]}"
+      apt_update_once
+      [[ $FULL_UPGRADE -eq 0 ]] || run_root env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+      pkg_install "${requested[@]}"
       apt_compat_links ;;
     fedora)
-      [[ $FULL_UPGRADE -eq 0 ]] || run sudo dnf upgrade -y
+      [[ $FULL_UPGRADE -eq 0 ]] || run_root dnf upgrade -y
       if has_csv_item "$SELECTED_GROUPS" media; then
         if ! package_installed rpmfusion-free-release; then
-          run sudo dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+          run_root dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
         fi
-        run sudo dnf install -y --allowerasing "${requested[@]}"
+        run_root dnf install -y --allowerasing "${requested[@]}"
       else
-        run sudo dnf install -y "${requested[@]}"
+        pkg_install "${requested[@]}"
       fi ;;
     arch)
-      [[ $FULL_UPGRADE -eq 0 ]] || run sudo pacman -Syu --noconfirm
-      run sudo pacman -S --needed --noconfirm "${requested[@]}" ;;
+      [[ $FULL_UPGRADE -eq 0 ]] || run_root pacman -Syu --noconfirm
+      pkg_install "${requested[@]}" ;;
   esac
 }

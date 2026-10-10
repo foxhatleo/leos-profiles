@@ -15,9 +15,7 @@ install_credential_prerequisites() {
       fi
       command -v gh >/dev/null 2>&1 || missing+=(gh)
       if [[ $GPG_MODE != skip ]] && ! command -v gpg >/dev/null 2>&1; then missing+=(gnupg); fi
-      (( ${#missing[@]} > 0 )) || return 0
-      ensure_brew
-      run brew install "${missing[@]}"
+      pkg_install ${missing[@]+"${missing[@]}"}
       return ;;
     apt)
       candidates=(gh)
@@ -38,13 +36,7 @@ install_credential_prerequisites() {
   done
   (( ${#missing[@]} > 0 )) || return 0
   ensure_sudo
-  case $OS_FAMILY in
-    apt)
-      run sudo apt-get update
-      run sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" ;;
-    fedora) run sudo dnf install -y "${missing[@]}" ;;
-    arch) run sudo pacman -S --needed --noconfirm "${missing[@]}" ;;
-  esac
+  pkg_install "${missing[@]}"
 }
 
 ensure_git_identity() {

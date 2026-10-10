@@ -239,7 +239,6 @@ run() {
   printf '%q ' "$@"
   printf '\n'
   [[ $DRY_RUN -eq 0 ]] || return 0
-  if [[ $EUID -eq 0 && ${1:-} == sudo ]]; then shift; fi
   "$@"
 }
 

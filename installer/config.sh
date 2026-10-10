@@ -18,10 +18,49 @@ resolve_config_path() {
   printf '%s\n' "$path"
 }
 
+# block_markers <marker>: set BLOCK_BEGIN and BLOCK_END to the marker lines of
+# that managed block. The one place the marker text is spelled (CQ-3).
+BLOCK_BEGIN=""
+BLOCK_END=""
+block_markers() {
+  BLOCK_BEGIN="# >>> leos-profiles $1 >>>"
+  BLOCK_END="# <<< leos-profiles $1 <<<"
+}
+
+# strip_block <marker> <file> [separator]: print the file without that managed
+# block. With `separator`, also drop the one blank line install_managed_block
+# puts between non-empty user content and the block: a single blank line
+# directly after a non-empty line and directly before the begin marker. Any
+# other blank line is printed unchanged. (A user's own trailing blank line
+# before the block looks identical and is also dropped; that loses one empty
+# line, never content, and does not accumulate.)
+strip_block() {
+  local marker=$1 file=$2 separator=${3:-}
+  block_markers "$marker"
+  if [[ $separator == separator ]]; then
+    awk -v begin="$BLOCK_BEGIN" -v end="$BLOCK_END" '
+      $0 == begin { skip=1; held=0; next }
+      $0 == end { skip=0; next }
+      skip { next }
+      held { print ""; held=0 }
+      $0 == "" && last != "" { held=1; last=$0; next }
+      { print; last=$0 }
+      END { if (held) print "" }
+    ' "$file"
+  else
+    awk -v begin="$BLOCK_BEGIN" -v end="$BLOCK_END" '
+      $0 == begin { skip=1; next }
+      $0 == end { skip=0; next }
+      !skip { print }
+    ' "$file"
+  fi
+}
+
 managed_block_well_formed() {
   local file=$1 marker=$2
   [[ ! -e $file ]] && return 0
-  awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
+  block_markers "$marker"
+  awk -v begin="$BLOCK_BEGIN" -v end="$BLOCK_END" '
     $0 == begin {
       begins++
       if (open || begins > 1) invalid=1
@@ -43,7 +82,8 @@ managed_block_equals() {
   file=$(resolve_config_path "$file")
   managed_block_well_formed "$file" "$marker" || return 1
   [[ -e $file ]] || return 1
-  actual=$(awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
+  block_markers "$marker"
+  actual=$(awk -v begin="$BLOCK_BEGIN" -v end="$BLOCK_END" '
     $0 == begin { capture=1; found=1; next }
     $0 == end { capture=0; next }
     capture { print }
@@ -73,13 +113,10 @@ install_managed_block() {
   mode=$(file_mode "$file")
   tmp=$(mktemp "$(dirname -- "$file")/.$(basename -- "$file").leos-profiles.tmp.XXXXXX")
   track_temp "$tmp"
-  awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
-    $0 == begin { skip=1; next }
-    $0 == end { skip=0; next }
-    !skip { print }
-  ' "$file" > "$tmp"
+  strip_block "$marker" "$file" > "$tmp"
   if [[ -s $tmp ]] && [[ -n $(tail -n 1 "$tmp") ]]; then separator=$'\n'; fi
-  printf '%s# >>> leos-profiles %s >>>\n%s\n# <<< leos-profiles %s <<<\n' "$separator" "$marker" "$content" "$marker" >> "$tmp"
+  block_markers "$marker"
+  printf '%s%s\n%s\n%s\n' "$separator" "$BLOCK_BEGIN" "$content" "$BLOCK_END" >> "$tmp"
   chmod "$mode" "$tmp"
   mv -f "$tmp" "$file"
 }
@@ -251,7 +288,8 @@ remove_managed_block() {
     return 0
   fi
   managed_block_well_formed "$file" "$marker" || die "Refusing to rewrite malformed managed block in $file"
-  if ! grep -qF "# >>> leos-profiles ${marker} >>>" "$file"; then
+  block_markers "$marker"
+  if ! grep -qxF "$BLOCK_BEGIN" "$file"; then
     say "No leos-profiles $marker block in $file"
     return 0
   fi
@@ -262,21 +300,7 @@ remove_managed_block() {
   mode=$(file_mode "$file")
   tmp=$(mktemp "$(dirname -- "$file")/.$(basename -- "$file").leos-profiles.tmp.XXXXXX")
   track_temp "$tmp"
-  # install_managed_block puts one blank separator line between non-empty user
-  # content and the block, so drop exactly that shape too: a single blank line
-  # directly after a non-empty line and directly before the begin marker. Any
-  # other blank line is printed unchanged. (A user's own trailing blank line
-  # before the block looks identical and is also dropped; that loses one empty
-  # line, never content, and does not accumulate.)
-  awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
-    $0 == begin { skip=1; held=0; next }
-    $0 == end { skip=0; next }
-    skip { next }
-    held { print ""; held=0 }
-    $0 == "" && last != "" { held=1; last=$0; next }
-    { print; last=$0 }
-    END { if (held) print "" }
-  ' "$file" > "$tmp"
+  strip_block "$marker" "$file" separator > "$tmp"
   chmod "$mode" "$tmp"
   mv -f "$tmp" "$file"
   say "Removed the leos-profiles $marker block from $file"
@@ -363,13 +387,14 @@ set_default_shell() {
   # the one place that would otherwise regress from the argv-safe `run` used
   # everywhere else, and string-built commands are invisible to shellcheck.
   if ! grep -qxF "$zsh_path" /etc/shells; then
-    # "$1" is expanded by the inner bash, not here — that is the whole point.
+    # "$1" and "$2" are expanded by the inner bash, not here — that is the
+    # whole point. $1 is the root prefix (empty when already root).
     # shellcheck disable=SC2016
     run_shell "Add $zsh_path to /etc/shells" \
-      'printf "%s\n" "$1" | sudo tee -a /etc/shells >/dev/null' "$zsh_path"
+      'printf "%s\n" "$2" | ${1:+"$1"} tee -a /etc/shells >/dev/null' "$SUDO" "$zsh_path"
   fi
   if [[ $OS_FAMILY == macos ]]; then
-    run sudo chsh -s "$zsh_path" "$USER"
+    run_root chsh -s "$zsh_path" "$USER"
   else
     run chsh -s "$zsh_path"
   fi

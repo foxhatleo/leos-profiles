@@ -1317,6 +1317,50 @@ test_empty_package_selection_signs_and_runs() {
   rm -rf "$temp"
 }
 
+test_pkg_install_uses_one_command_per_family() {
+  local out
+  DRY_RUN=1
+  SUDO=sudo
+  ensure_brew() { :; }
+  OS_FAMILY=macos
+  assert_equals "$(pkg_install curl jq)" "+ brew install curl jq "
+  OS_FAMILY=apt
+  out=$(pkg_install jq)
+  assert_contains "$out" "+ sudo apt-get update"
+  assert_contains "$out" "+ sudo env DEBIAN_FRONTEND=noninteractive apt-get"
+  assert_contains "$out" "install -y jq"
+  OS_FAMILY=fedora
+  assert_equals "$(pkg_install jq)" "+ sudo dnf install -y jq "
+  assert_equals "$(pkg_install)" ""
+}
+
+# CQ-7: a root installer (a container) runs privileged commands directly,
+# including the /etc/shells edit, and never needs a sudo binary.
+test_root_runs_privileged_commands_without_sudo() {
+  local temp name
+  temp=$(mktemp -d)
+  mkdir -p "$temp/bin"
+  for name in sudo tee chsh; do
+    printf '#!/bin/sh\nprintf "%%s %%s\\n" "%s" "$*" >> "%s/calls"\ncat >/dev/null\n' "$name" "$temp" > "$temp/bin/$name"
+    chmod +x "$temp/bin/$name"
+  done
+  printf '#!/bin/sh\nexit 0\n' > "$temp/bin/zsh"
+  chmod +x "$temp/bin/zsh"
+  PATH="$temp/bin:$PATH"
+  SUDO=""
+  DRY_RUN=0
+  OS_FAMILY=apt
+  CHANGE_DEFAULT_SHELL=yes
+  current_login_shell() { printf '%s\n' /bin/bash; }
+  set_default_shell </dev/null >/dev/null
+  assert_contains "$(cat "$temp/calls")" "tee -a /etc/shells"
+  assert_contains "$(cat "$temp/calls")" "chsh -s $temp/bin/zsh"
+  [[ $(cat "$temp/calls") != *"sudo "* ]] || fail "a root run used sudo: $(cat "$temp/calls")"
+  DRY_RUN=1
+  assert_equals "$(run_root apt-get update)" "+ apt-get update "
+  rm -rf "$temp"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1391,6 +1435,8 @@ TESTS=(
   test_known_hosts_matches_metadata_and_dedupes
   test_package_signature_is_ifs_independent
   test_empty_package_selection_signs_and_runs
+  test_pkg_install_uses_one_command_per_family
+  test_root_runs_privileged_commands_without_sudo
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do
