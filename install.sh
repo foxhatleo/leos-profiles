@@ -55,6 +55,7 @@ NODE_SELECTION=""
 PROFILE_SCHEMA=2
 AI_CLI_UPDATE_CHANNEL="native"
 PACKAGE_CHANNEL="system"
+BREW_MIRROR=""
 SELECTED_PACKAGES=()
 TEMP_PATHS=()
 LOCK_HELD=0
@@ -87,6 +88,8 @@ Options:
   --git-email <email>             Global Git email when identity is missing
   --full-upgrade                  Run the host package-manager upgrade phase
   --no-full-upgrade               Install/reconcile packages without a host upgrade
+  --brew-mirror <china|none>      macOS: use (china) or stop using (none) the USTC
+                                  Homebrew mirror for this run and later shells
   --dry-run                       Print mutations without performing them
   --yes                           Confirm that the AI-presented plan was approved
   --help                          Show this help
@@ -152,6 +155,7 @@ parse_args() {
     --default-shell) require_value "$1" "${2:-}"; CHANGE_DEFAULT_SHELL=$2; shift 2 ;;
     --git-name) require_value "$1" "${2:-}"; GIT_NAME=$2; shift 2 ;;
     --git-email) require_value "$1" "${2:-}"; GIT_EMAIL=$2; shift 2 ;;
+    --brew-mirror) require_value "$1" "${2:-}"; BREW_MIRROR=$2; shift 2 ;;
     --full-upgrade) FULL_UPGRADE=1; shift ;;
     --no-full-upgrade) FULL_UPGRADE=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -215,6 +219,7 @@ validate_options() {
   [[ $GPG_PASSPHRASE_MODE == empty || $GPG_PASSPHRASE_MODE == prompt ]] || die "Invalid --gpg-passphrase value"
   [[ $INSTALL_FONTS == auto || $INSTALL_FONTS == yes || $INSTALL_FONTS == no ]] || die "Invalid --fonts value"
   [[ $CHANGE_DEFAULT_SHELL == auto || $CHANGE_DEFAULT_SHELL == yes || $CHANGE_DEFAULT_SHELL == no ]] || die "Invalid --default-shell value"
+  [[ -z $BREW_MIRROR || $BREW_MIRROR == china || $BREW_MIRROR == none ]] || die "Invalid --brew-mirror value"
   [[ $SSH_MODE != reuse || -n $SSH_KEY_PATH ]] || die "--ssh reuse requires --ssh-key <private-key-path>"
   [[ $GPG_MODE != reuse || -n $GPG_KEY_ID ]] || die "--gpg reuse requires --gpg-key <fingerprint>"
   [[ $INSTALL_FONTS != yes || -n $FONT_NAME ]] || die "--fonts yes requires --font <name>"
@@ -407,6 +412,12 @@ inspect_tsv() {
     for package in "${SELECTED_PACKAGES[@]}"; do printf 'package\t%s\t%s\n' "$OS_FAMILY" "$package"; done
   fi
   printf 'action\tbootstrap\tensure git,curl,ca-certificates,archive tools\n'
+  if [[ $OS_FAMILY == macos && $(brew_mirror_effective) == china ]]; then
+    printf 'external\thomebrew-mirror\t%s\n' "$BREW_CHINA_GIT_REMOTE"
+  fi
+  if [[ $OS_FAMILY == macos && -n $BREW_MIRROR ]]; then
+    printf 'file\tbrew-mirror-flag\t%s\n' "$LOCAL_DIR/flags/brew-china"
+  fi
   if [[ $OS_FAMILY == macos ]] && ! command -v brew >/dev/null 2>&1; then
     printf 'artifact\tdirect\thomebrew-bootstrap\t%s\t%s\n' "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256"
   fi
@@ -451,7 +462,7 @@ inspect_tsv() {
   if has_csv_item "$SELECTED_STEPS" yarn; then printf 'artifact\tdirect\tyarn\t%s\t%s\n' "$YARN_URL" "$YARN_SHA256"; fi
   if has_csv_item "$SELECTED_STEPS" pnpm; then printf 'artifact\tdirect\tpnpm\t%s\t%s\n' "$PNPM_URL" "$PNPM_SHA256"; fi
   if has_csv_item "$SELECTED_STEPS" fnm; then
-    printf 'external\tnode-lts-index\thttps://nodejs.org/dist/index.tab\n'
+    printf 'external\tnode-lts-index\t%s\n' "$(node_dist_index_url)"
   fi
   if has_csv_item "$SELECTED_STEPS" plugins; then
     printf 'artifact\tgit\tzsh-autosuggestions\t%s\t%s\n' "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT"
@@ -495,6 +506,9 @@ main() {
   if [[ $OS_FAMILY != macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
     die "The heroku package group is macOS-only (Heroku's Homebrew tap); remove it from --package-groups"
   fi
+  if [[ $OS_FAMILY != macos && $BREW_MIRROR == china ]]; then
+    die "--brew-mirror china applies to Homebrew on macOS only"
+  fi
   if [[ $COMMAND == inspect ]]; then
     inspect_tsv
     return 0
@@ -514,6 +528,7 @@ main() {
     if [[ $FULL_UPGRADE -eq 1 ]]; then SAVED_FULL_UPGRADE=yes; else SAVED_FULL_UPGRADE=no; fi
     write_profile
   fi
+  apply_brew_mirror
   bootstrap_tools
   if has_csv_item "$SELECTED_STEPS" fnm && [[ $DRY_RUN -eq 0 ]]; then
     resolve_node_version || die "Could not select a compatible Node version or resolve current LTS"

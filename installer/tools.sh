@@ -316,6 +316,14 @@ install_fnm() {
 
 node_version_ok() { [[ ${1:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 
+# The Node release index, from FNM_NODE_DIST_MIRROR when set (fnm honours the
+# same variable for its downloads), so a mirror serves both (ONB-10). It must
+# be an https URL.
+node_dist_index_url() {
+  local base=${FNM_NODE_DIST_MIRROR:-https://nodejs.org/dist}
+  printf '%s/index.tab\n' "${base%/}"
+}
+
 resolve_node_lts() {
   [[ -z $RESOLVED_NODE_VERSION ]] || return 0
   local fnm_bin latest
@@ -326,7 +334,7 @@ resolve_node_lts() {
     # index.tab columns: $1 = version, $10 = the LTS codename ("-" when current).
     latest=$(curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
       --connect-timeout 15 --max-time 30 \
-      https://nodejs.org/dist/index.tab 2>/dev/null | awk -F '\t' 'NR > 1 && $10 != "-" { print $1; exit }') || true
+      "$(node_dist_index_url)" 2>/dev/null | awk -F '\t' 'NR > 1 && $10 != "-" { print $1; exit }') || true
   fi
   if ! node_version_ok "${latest:-}"; then
     if [[ -x $HOME/.local/bin/fnm ]]; then

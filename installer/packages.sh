@@ -8,12 +8,72 @@
 SUDO=sudo
 [[ $EUID -ne 0 ]] || SUDO=""
 
+# sudo resets the environment, which drops a proxy the package managers need
+# behind a corporate or regional proxy (ONB-10). When any of these is set,
+# run_root asks sudo to keep them all.
+sudo_preserve_proxy_flag() {
+  local name list=""
+  for name in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY all_proxy; do
+    list="${list:+$list,}$name"
+  done
+  for name in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY all_proxy; do
+    if [[ -n ${!name-} ]]; then
+      printf -- '--preserve-env=%s\n' "$list"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # run_root <command...>: `run` with the root prefix.
 run_root() {
-  if [[ -n $SUDO ]]; then
-    run "$SUDO" "$@"
-  else
+  local preserve
+  if [[ -z $SUDO ]]; then
     run "$@"
+  elif preserve=$(sudo_preserve_proxy_flag); then
+    run "$SUDO" "$preserve" "$@"
+  else
+    run "$SUDO" "$@"
+  fi
+}
+
+# Homebrew through the USTC mirror: the same three variables as
+# __leos_brew_china_export in zsh/path/brew.zsh, which a test keeps equal.
+# `--brew-mirror china` applies them to this run (including a Homebrew
+# bootstrap) and sets the runtime flag that brew.zsh reads; `none` clears it.
+# Without the option, the existing flag decides, so reconcile follows it.
+BREW_CHINA_GIT_REMOTE="https://mirrors.ustc.edu.cn/brew.git"
+BREW_CHINA_BOTTLE_DOMAIN="https://mirrors.ustc.edu.cn/homebrew-bottles"
+BREW_CHINA_API_DOMAIN="https://mirrors.ustc.edu.cn/homebrew-bottles/api"
+brew_mirror_effective() {
+  case $BREW_MIRROR in
+    china|none) printf '%s\n' "$BREW_MIRROR" ;;
+    *) if [[ -f $LOCAL_DIR/flags/brew-china ]]; then printf 'china\n'; else printf 'none\n'; fi ;;
+  esac
+}
+
+apply_brew_mirror() {
+  [[ $OS_FAMILY == macos ]] || return 0
+  if [[ $BREW_MIRROR == china ]]; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+      say "Would set the Homebrew mirror flag $LOCAL_DIR/flags/brew-china"
+    else
+      prepare_local_dir
+      : > "$LOCAL_DIR/flags/brew-china"
+      chmod 600 "$LOCAL_DIR/flags/brew-china"
+    fi
+  elif [[ $BREW_MIRROR == none && -e $LOCAL_DIR/flags/brew-china ]]; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+      say "Would remove the Homebrew mirror flag $LOCAL_DIR/flags/brew-china"
+    else
+      rm -f -- "$LOCAL_DIR/flags/brew-china"
+    fi
+  fi
+  if [[ $(brew_mirror_effective) == china ]]; then
+    say "Using the USTC Homebrew mirror for brew.git, metadata and bottles"
+    export HOMEBREW_BREW_GIT_REMOTE=$BREW_CHINA_GIT_REMOTE
+    export HOMEBREW_BOTTLE_DOMAIN=$BREW_CHINA_BOTTLE_DOMAIN
+    export HOMEBREW_API_DOMAIN=$BREW_CHINA_API_DOMAIN
   fi
 }
 

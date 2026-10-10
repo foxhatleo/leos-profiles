@@ -1697,6 +1697,77 @@ test_nerd_font_archive_digest_mismatch_fails() {
   rm -rf "$temp"
 }
 
+# ONB-10: a Node mirror serves the LTS lookup too, and inspect names it.
+test_node_lts_lookup_honours_the_dist_mirror() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME"
+  record_curl_argv "$temp/curl-argv"
+  SELECTED_STEPS=fnm
+  RESOLVED_NODE_VERSION=""
+  FNM_NODE_DIST_MIRROR=https://mirror.example.invalid/node/
+  resolve_node_lts
+  assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
+  assert_contains "$(cat "$temp/curl-argv")" '<https://mirror.example.invalid/node/index.tab>'
+  OS_FAMILY=apt
+  REQUESTED_STEPS=fnm
+  SELECTED_GROUPS=""
+  REQUESTED_GROUPS=""
+  verify_step() { return 1; }
+  assert_contains "$(inspect_tsv)" $'external\tnode-lts-index\thttps://mirror.example.invalid/node/index.tab'
+  rm -rf "$temp"
+}
+
+test_sudo_keeps_proxy_variables() {
+  DRY_RUN=1
+  SUDO=sudo
+  unset http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY all_proxy
+  assert_equals "$(run_root apt-get update)" "+ sudo apt-get update "
+  export HTTPS_PROXY=http://proxy.example.invalid:3128
+  local out
+  out=$(run_root apt-get update)
+  out=${out//\\/}                       # printf %q may escape the commas
+  assert_equals "$out" \
+    "+ sudo --preserve-env=http_proxy,https_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,NO_PROXY,ALL_PROXY,all_proxy apt-get update "
+  SUDO=""
+  assert_equals "$(run_root apt-get update)" "+ apt-get update "
+}
+
+# --brew-mirror applies exactly brew.zsh's mirror variables to the run and
+# records (or clears) the runtime flag; reconcile follows the flag.
+test_brew_mirror_option_matches_the_runtime_mirror() {
+  local temp name value
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  OS_FAMILY=macos
+  DRY_RUN=0
+  for name in HOMEBREW_BREW_GIT_REMOTE HOMEBREW_BOTTLE_DOMAIN HOMEBREW_API_DOMAIN; do
+    value=$(sed -n "s/^ *export $name=\"\(.*\)\"$/\1/p" "$ROOT/zsh/path/brew.zsh")
+    [[ -n $value ]] || fail "brew.zsh no longer exports $name"
+    case $name in
+      HOMEBREW_BREW_GIT_REMOTE) assert_equals "$BREW_CHINA_GIT_REMOTE" "$value" ;;
+      HOMEBREW_BOTTLE_DOMAIN) assert_equals "$BREW_CHINA_BOTTLE_DOMAIN" "$value" ;;
+      HOMEBREW_API_DOMAIN) assert_equals "$BREW_CHINA_API_DOMAIN" "$value" ;;
+    esac
+  done
+  unset HOMEBREW_BREW_GIT_REMOTE HOMEBREW_BOTTLE_DOMAIN HOMEBREW_API_DOMAIN
+  BREW_MIRROR=china
+  apply_brew_mirror >/dev/null
+  [[ -f $LOCAL_DIR/flags/brew-china ]] || fail "--brew-mirror china did not set the runtime flag"
+  assert_equals "$(file_mode "$LOCAL_DIR/flags/brew-china")" 600
+  assert_equals "${HOMEBREW_BOTTLE_DOMAIN:-}" "$BREW_CHINA_BOTTLE_DOMAIN"
+  # Reconcile: no option, the flag decides.
+  BREW_MIRROR=""
+  assert_equals "$(brew_mirror_effective)" china
+  BREW_MIRROR=none
+  (apply_brew_mirror >/dev/null)
+  [[ ! -e $LOCAL_DIR/flags/brew-china ]] || fail "--brew-mirror none kept the runtime flag"
+  BREW_MIRROR=""
+  assert_equals "$(brew_mirror_effective)" none
+  rm -rf "$temp"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1787,6 +1858,9 @@ TESTS=(
   test_nerd_font_rejects_unknown_names_before_downloading
   test_nerd_font_archive_is_verified_and_installed
   test_nerd_font_archive_digest_mismatch_fails
+  test_node_lts_lookup_honours_the_dist_mirror
+  test_sudo_keeps_proxy_variables
+  test_brew_mirror_option_matches_the_runtime_mirror
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do
