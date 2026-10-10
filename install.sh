@@ -363,7 +363,13 @@ run_step() {
   say "Running $step"
   local handler
   handler=$(component_handler "$step" install)
+  STEP_AWAITS_MANUAL_ACTION=0
   "$handler"
+  if [[ $STEP_AWAITS_MANUAL_ACTION -eq 1 ]]; then
+    say "$step waits for the manual action above; it is not recorded as complete"
+    STEP_AWAITS_MANUAL_ACTION=0
+    return 0
+  fi
   [[ $DRY_RUN -eq 1 ]] || verify_step "$step" || die "$step did not pass post-install verification"
   mark_done "$step"
 }
@@ -547,6 +553,7 @@ main() {
   if has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" zsh-config; then
     compile_zsh_sources
   fi
+  finish_manual_actions
   if [[ $COMMAND == reconcile ]]; then
     say "Profile reconciliation complete. Restart the terminal; default-shell changes apply at next login."
   else

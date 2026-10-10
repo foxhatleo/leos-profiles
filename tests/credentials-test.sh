@@ -16,6 +16,7 @@ export TMPDIR="$fixture"
 mkdir -p "$HOME" "$fixture/local"
 LOCAL_DIR="$fixture/local"
 PROFILE_FILE="$LOCAL_DIR/profile"
+TARGET="$fixture/profile"
 DRY_RUN=0 COMMAND=apply SSH_MODE=reuse SSH_PASSPHRASE_MODE=empty
 GPG_MODE=reuse GPG_PASSPHRASE_MODE=empty
 SSH_KEY_PATH="$fixture/custom-key"

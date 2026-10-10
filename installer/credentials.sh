@@ -70,6 +70,36 @@ github_ssh_key_present() {
   awk 'NF >= 2 { print $1 " " $2 }' <<< "$remote_keys" | grep -qxF "$material"
 }
 
+# Manual actions end the run with status 3. A component that needs one (a
+# missing chsh, a font to install on the Windows side of WSL) queues it and
+# the run goes on; finish_manual_actions then prints every queued
+# `manual-action` record on stdout, repeats the explanations and exits 3. A
+# credential pause queues its own action and finishes at once (ONB-4).
+PENDING_MANUAL_ACTIONS=""
+PENDING_MANUAL_EXPLANATIONS=""
+STEP_AWAITS_MANUAL_ACTION=0
+
+# queue_manual_action <action> <public path> <destination> <explanation>
+queue_manual_action() {
+  local action=$1 public_path=$2 destination=$3 explanation=$4 field
+  for field in "$action" "$public_path" "$destination"; do
+    [[ $field != *$'\t'* && $field != *$'\n'* && $field != *$'\r'* ]] ||
+      die "Manual-action fields may not contain tabs or newlines"
+  done
+  [[ $action =~ ^[a-z][a-z-]+$ ]] || die "Invalid manual action name"
+  PENDING_MANUAL_ACTIONS+=$(printf 'manual-action\t%s\t%s\t%s' "$action" "$public_path" "$destination")$'\n'
+  PENDING_MANUAL_EXPLANATIONS+="${explanation//$'\n'/ }"$'\n'
+  warn "$explanation"
+}
+
+finish_manual_actions() {
+  [[ -n $PENDING_MANUAL_ACTIONS ]] || return 0
+  printf '%s' "$PENDING_MANUAL_ACTIONS"
+  warn "Manual action required (exit 3). Complete each manual-action record above, then resume with: bash $TARGET/install.sh reconcile --yes"
+  printf '%s' "$PENDING_MANUAL_EXPLANATIONS" | sed 's/^/  - /' >&2
+  exit 3
+}
+
 credential_manual_action() {
   local action=$1 public_path=$2 destination=$3 explanation=$4 field material
   for field in "$action" "$public_path" "$destination"; do
@@ -91,12 +121,11 @@ credential_manual_action() {
       printf 'GPG public key (fingerprint %s):\n' "$GPG_KEY_ID" >&2
       cat "$public_path" >&2 ;;
   esac
-  printf 'manual-action\t%s\t%s\t%s\n' "$action" "$public_path" "$destination"
-  warn "$explanation"
+  queue_manual_action "$action" "$public_path" "$destination" "$explanation"
   if [[ ${SSH_MODE:-skip} == generate || ${GPG_MODE:-skip} == generate ]]; then
     warn "Key generation is still pending. After completing the manual action, resume apply with the original approved choices; select reuse for every key already created (SSH: --ssh reuse --ssh-key '$SSH_KEY_PATH' when present). Reconcile will not generate the pending key. Obtain new approval only if the choices change."
   fi
-  exit 3
+  finish_manual_actions
 }
 
 ensure_github_auth() {

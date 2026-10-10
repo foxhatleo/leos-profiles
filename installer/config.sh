@@ -373,10 +373,21 @@ current_login_shell() {
   printf '%s\n' "$current_shell"
 }
 
+# The zsh to make the login shell. On macOS that is the system /bin/zsh: it is
+# root-owned and survives a broken or removed Homebrew, whose prefix the admin
+# group can write (SEC-8). Elsewhere, the zsh the package step put on PATH.
+preferred_zsh_path() {
+  if [[ $OS_FAMILY == macos && -x /bin/zsh ]]; then
+    printf '%s\n' /bin/zsh
+    return 0
+  fi
+  command -v zsh
+}
+
 set_default_shell() {
   [[ $CHANGE_DEFAULT_SHELL == no ]] && { say "Skipping default shell (--default-shell no)"; return 0; }
   local zsh_path
-  zsh_path=$(command -v zsh || true)
+  zsh_path=$(preferred_zsh_path || true)
   if [[ -z $zsh_path && $DRY_RUN -eq 1 ]]; then
     say "Would configure the zsh path installed by the package step as the login shell"
     return 0
@@ -386,6 +397,18 @@ set_default_shell() {
     local current_shell
     current_shell=$(current_login_shell)
     [[ ${current_shell##*/} == zsh ]] && { say "Default shell is already zsh"; return 0; }
+  fi
+  # Minimal Linux images can lack chsh (util-linux/passwd). Ask the user to
+  # change the shell rather than abort the whole run (BP-9).
+  if [[ $OS_FAMILY != macos ]] && ! command -v chsh >/dev/null 2>&1; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+      say "Would ask for a manual login-shell change: chsh is not installed"
+      return 0
+    fi
+    queue_manual_action set-login-shell "$zsh_path" "$(login_user)" \
+      "chsh is not installed, so the login shell was not changed. Install it (Debian/Ubuntu: passwd; Fedora: util-linux-user; Arch: util-linux), make sure $zsh_path is listed in /etc/shells, and run: chsh -s $zsh_path"
+    STEP_AWAITS_MANUAL_ACTION=1
+    return 0
   fi
   # Identical on both families, so it is hoisted above the branch. The path is
   # passed as an argument rather than interpolated into the program text: this is

@@ -124,6 +124,6 @@ verify_default_shell() {
     current_shell=$(current_login_shell)
     [[ ${current_shell##*/} == zsh ]]
   else
-    [[ $(current_login_shell) == "$(command -v zsh)" ]]
+    [[ $(current_login_shell) == "$(preferred_zsh_path)" ]]
   fi
 }

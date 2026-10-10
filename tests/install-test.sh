@@ -1137,11 +1137,40 @@ test_set_default_shell_uses_sudo_chsh_on_macos() {
   CHANGE_DEFAULT_SHELL=yes
   DRY_RUN=1
   OS_FAMILY=macos
-  USER=tester
+  SUDO=sudo
   current_login_shell() { printf '%s\n' /bin/bash; }
   local out
   out=$(set_default_shell 2>&1)
-  assert_contains "$out" "sudo chsh -s"
+  # SEC-8: the root-owned system zsh, not a PATH-resolved Homebrew one.
+  [[ -x /bin/zsh ]] || return 0
+  assert_contains "$out" "sudo chsh -s /bin/zsh $(id -un)"
+  current_login_shell() { printf '%s\n' /bin/zsh; }
+  verify_step default-shell || fail "/bin/zsh did not verify as the macOS login shell"
+}
+
+# BP-9: without chsh the run continues, the step waits for a manual action,
+# and the run ends with exit 3 and the record.
+test_missing_chsh_queues_a_manual_action() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  mkdir -p "$temp/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$temp/bin/zsh"
+  chmod +x "$temp/bin/zsh"
+  OS_FAMILY=apt
+  CHANGE_DEFAULT_SHELL=yes
+  DRY_RUN=0
+  LOCAL_DIR="$temp/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
+  current_login_shell() { printf '%s\n' /bin/bash; }
+  command() { if [[ ${1:-} == -v && ${2:-} == chsh ]]; then return 1; fi; builtin command "$@"; }
+  PATH="$temp/bin:$PATH"
+  out=$( (run_step default-shell; printf 'continued\n'; finish_manual_actions) 2>"$temp/err" ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" "continued"
+  assert_contains "$out" $'manual-action\tset-login-shell\t'"$temp/bin/zsh"$'\t'"$(id -un)"
+  assert_contains "$(cat "$temp/err")" "chsh -s $temp/bin/zsh"
+  ! state_done default-shell || fail "a step awaiting a manual action was recorded complete"
+  rm -rf "$temp"
 }
 
 test_known_hosts_matches_metadata_and_dedupes() {
@@ -1861,6 +1890,7 @@ TESTS=(
   test_node_lts_lookup_honours_the_dist_mirror
   test_sudo_keeps_proxy_variables
   test_brew_mirror_option_matches_the_runtime_mirror
+  test_missing_chsh_queues_a_manual_action
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do
