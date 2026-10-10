@@ -43,8 +43,10 @@ export EDITOR="${EDITOR:-nano}"
 # place (BusyBox, another BSD, an unusual install) is probed.
 typeset -ga __leos_ls_color=()
 () {
-  local real=${commands[ls]-}
-  [[ -z $real ]] || real=${real:A}
+  local real=
+  # `whence -p` first, so reading $commands does not fill the whole command
+  # table (see entries.zsh).
+  ! whence -p ls >/dev/null || real=${commands[ls]:A}
   if [[ ${real:t} == busybox ]]; then
     :
   elif [[ ${real:t} == gls || $real == */coreutils/* || $real == */gnubin/* ]]; then
@@ -157,8 +159,10 @@ if [[ ${LEOS_DISABLE_ALIASES:-0} != 1 ]]; then
   fi
   # GNU and BSD grep both take --color; BusyBox builds may not, so only a grep
   # that resolves to busybox is still probed.
-  if [[ ${${commands[grep]-}:A:t} != busybox ]] ||
-      command grep --color=auto '' /dev/null >/dev/null 2>&1 || [[ $? == 1 ]]; then
+  if whence -p grep >/dev/null && {
+       [[ ${commands[grep]:A:t} != busybox ]] ||
+       command grep --color=auto '' /dev/null >/dev/null 2>&1 || [[ $? == 1 ]]
+     }; then
     alias grep='grep --color=auto'
     # egrep/fgrep are obsolescent: GNU grep 3.8+ warns on every call.
     alias fgrep='grep -F --color=auto'

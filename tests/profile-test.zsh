@@ -780,6 +780,11 @@ run_block 'ls/cat wrappers route each flag to the program that understands it' \
   [[ "$(<$WRAP_LOG)" == "cat f" ]]
 '
 
+# Startup files test for tools with `whence -p`: a $+commands miss fills zsh's
+# whole command table, and each PATH edit empties it again (PERF-9).
+startup_lookups=($(command grep -l '^[^#]*\$+commands\[' "$source_root"/zsh/*.zsh "$source_root"/zsh/path/*.zsh /dev/null || true))
+(( ! $#startup_lookups )) || fail "startup files still test tools with \$+commands: $startup_lookups"
+
 # env.zsh settles the locale, the ls colour flag and grep colours from paths,
 # without running locale, ls or grep (each a fork on every shell).
 mkdir -p "$tmp/probe/gnubin"

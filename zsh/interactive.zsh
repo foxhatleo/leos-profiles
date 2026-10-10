@@ -211,9 +211,9 @@ _leos_plugin zsh-syntax-highlighting/zsh-syntax-highlighting.zsh   # MUST be las
 # the prompt, whether because it is absent or because its init produced nothing.
 typeset -g _leos_fallback_prompt='%F{cyan}%n@%m%f %F{blue}%~%f %# '
 
-# $+commands, not `command -v`: the cached init below needs the binary's path,
-# and only $commands is guaranteed to hold one.
-if (( $+commands[starship] )); then
+# `whence -p`, not `command -v`: a function named starship must not count. The
+# cached init below then takes the binary's path from $commands.
+if whence -p starship >/dev/null; then
   # Keep Leo's established themed prompt as the default.  The plain prompt is
   # an explicit fallback for terminals without Nerd Font support.
   if [[ ${LEOS_PLAIN_PROMPT:-0} == 1 ]]; then

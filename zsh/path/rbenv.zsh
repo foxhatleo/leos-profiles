@@ -1,12 +1,11 @@
 # rbenv
 export RBENV_ROOT=${RBENV_ROOT:-$HOME/.rbenv}
 add-path "$RBENV_ROOT/bin"
-# The installer's checkout is found by path; only otherwise is an rbenv
-# elsewhere on PATH (e.g. Homebrew) looked up, which rebuilds zsh's command
-# table after the PATH edit above. See path/pyenv.zsh.
+# The installer's checkout is found by path; otherwise an rbenv elsewhere on
+# PATH (e.g. Homebrew). See entries.zsh for why `whence -p`, not $+commands.
 if [[ -x $RBENV_ROOT/bin/rbenv && ! -d $RBENV_ROOT/bin/rbenv ]]; then
   typeset -g __leos_rbenv_bin=$RBENV_ROOT/bin/rbenv
-elif (( $+commands[rbenv] )); then
+elif whence -p rbenv >/dev/null; then
   typeset -g __leos_rbenv_bin=$commands[rbenv]
 else
   typeset -g __leos_rbenv_bin=

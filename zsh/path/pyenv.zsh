@@ -1,13 +1,11 @@
 # pyenv
 export PYENV_ROOT=${PYENV_ROOT:-$HOME/.pyenv}
 add-path "$PYENV_ROOT/bin"
-# The installer's checkout is found by path, which costs no lookup; otherwise
-# a pyenv installed elsewhere on PATH (e.g. Homebrew) is found through
-# $commands. That lookup rebuilds zsh's command table after the PATH edits
-# above, so it is only made when the cheap test fails (PERF-9).
+# The installer's checkout is found by path; otherwise a pyenv elsewhere on
+# PATH (e.g. Homebrew). See entries.zsh for why `whence -p`, not $+commands.
 if [[ -x $PYENV_ROOT/bin/pyenv && ! -d $PYENV_ROOT/bin/pyenv ]]; then
   typeset -g __leos_pyenv_bin=$PYENV_ROOT/bin/pyenv
-elif (( $+commands[pyenv] )); then
+elif whence -p pyenv >/dev/null; then
   typeset -g __leos_pyenv_bin=$commands[pyenv]
 else
   typeset -g __leos_pyenv_bin=

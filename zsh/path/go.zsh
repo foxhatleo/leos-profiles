@@ -1,5 +1,5 @@
 # Go (GOPATH may contain multiple colon-separated workspaces).
-if (( $+commands[go] )); then
+if whence -p go >/dev/null; then
   # `go env GOPATH` boots the whole Go toolchain (~20ms per shell) just to
   # report a value that is almost always the documented default. Resolve it the
   # cheap way instead, following go's own precedence: $GOPATH, then go's env

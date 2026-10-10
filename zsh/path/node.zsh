@@ -32,7 +32,7 @@ leos-node-completions() {
   # does not — so yarn keeps the `_yarn` bundled with zsh-completions.
   local status_
   for tool in npm pnpm bun; do
-    (( $+commands[$tool] )) || continue
+    whence -p $tool >/dev/null || continue
     status_=0
     case $tool in
       npm)  leos-source-cached npm-completion  $commands[npm]  completion     || status_=$? ;;

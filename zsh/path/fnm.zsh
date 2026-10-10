@@ -3,7 +3,7 @@
 # ~/.local/bin (where the installer puts fnm) is added by path/bin.zsh, which
 # loads earlier on purpose; re-adding it here would move it back in front of
 # fnm's own shim directory and defeat per-directory switching.
-if (( $+commands[fnm] )); then
+if whence -p fnm >/dev/null; then
   # NOT cached: `fnm env` mints a unique FNM_MULTISHELL_PATH per invocation, so
   # a cached copy would make every shell share one version-switching sandbox.
   # `--shell zsh` because fnm otherwise guesses from the parent process tree and

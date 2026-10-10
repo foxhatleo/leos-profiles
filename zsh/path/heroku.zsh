@@ -10,7 +10,7 @@
 # during the PATH phase. That file is only built once `heroku autocomplete` has
 # been run interactively; until then the snippet's own `test -f` makes it a
 # no-op.
-if (( $+commands[heroku] )); then
+if whence -p heroku >/dev/null; then
   # `|| true`, not the -warn form: heroku completions are optional enough that a
   # missing generator is not worth a startup message. The status must still be
   # consumed, or a non-zero return aborts this file under ERR_RETURN.
