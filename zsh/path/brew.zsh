@@ -49,8 +49,7 @@ if __leos_brew_bin_path=$(__leos_brew_bin); then
     local had_api=$+HOMEBREW_API_DOMAIN        prev_api=${HOMEBREW_API_DOMAIN:-}
     __leos_brew_china_export
     if brew update; then
-      mkdir -p "$LEOS_PROFILES/local/flags" && chmod 700 "$LEOS_PROFILES/local" "$LEOS_PROFILES/local/flags"
-      touch "$LEOS_PROFILES/local/flags/brew-china" && chmod 600 "$LEOS_PROFILES/local/flags/brew-china"
+      __leos_set_flag brew-china
     else
       (( had_remote )) && export HOMEBREW_BREW_GIT_REMOTE=$prev_remote || unset HOMEBREW_BREW_GIT_REMOTE
       (( had_bottle )) && export HOMEBREW_BOTTLE_DOMAIN=$prev_bottle   || unset HOMEBREW_BOTTLE_DOMAIN
@@ -60,7 +59,7 @@ if __leos_brew_bin_path=$(__leos_brew_bin); then
   }
 
   brew-china-disable() {
-    rm -f "$LEOS_PROFILES/local/flags/brew-china"
+    __leos_clear_flag brew-china
     unset HOMEBREW_BREW_GIT_REMOTE HOMEBREW_BOTTLE_DOMAIN HOMEBREW_API_DOMAIN
     command git -C "$(brew --repo)" remote set-url origin https://github.com/Homebrew/brew.git || return 1
     # The pre-env-var implementation of brew-china-enable rewrote tap

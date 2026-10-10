@@ -542,6 +542,35 @@ run_block 'brew-china-enable records the flag and exports the mirrors on success
   brew-china-enable --yes
   [[ -f $LEOS_PROFILES/local/flags/brew-china ]]          # flag recorded
   [[ $HOMEBREW_BOTTLE_DOMAIN == *mirrors.ustc.edu.cn* ]]  # mirror env exported
+  zmodload zsh/stat
+  zstat -H st -- "$LEOS_PROFILES/local/flags/brew-china"
+  (( (st[mode] & 8#777) == 8#600 ))
+'
+
+# CQ-11: one pair of flag helpers. local/ and flags/ end up 700, the flag 600,
+# whatever the umask; a name is a word, never a path; clearing removes it.
+run_block 'flag helpers and disable-gnu/enable-gnu' \
+  HOME="$tmp/flaghome" LEOS_TEST_ROOT="$root" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  add-path() { return 0; }
+  __leos_brew_prefix() { return 1; }
+  LEOS_PROFILES="$HOME/profile"
+  umask 022
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  source "$LEOS_TEST_ROOT/zsh/path/gnu.zsh"
+  disable-gnu
+  zmodload zsh/stat
+  for dir in "$LEOS_PROFILES/local" "$LEOS_PROFILES/local/flags"; do
+    zstat -H st -- "$dir"; (( (st[mode] & 8#777) == 8#700 ))
+  done
+  zstat -H st -- "$LEOS_PROFILES/local/flags/no-gnu"; (( (st[mode] & 8#777) == 8#600 ))
+  enable-gnu
+  [[ ! -e $LEOS_PROFILES/local/flags/no-gnu ]]
+  st=0; __leos_set_flag ../escape || st=$?
+  (( st == 2 )) && [[ ! -e $LEOS_PROFILES/local/escape ]]
+  st=0; __leos_clear_flag "" || st=$?
+  (( st == 2 ))
 '
 
 # add-path's dedup escapes pattern metacharacters. zsh only reinterprets an

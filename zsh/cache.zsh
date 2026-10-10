@@ -1,5 +1,23 @@
-# Leo's Profiles — cached tool initialisation and shim upkeep.
+# Leo's Profiles — cached tool initialisation, shim upkeep and profile flags.
 # Sourced by start.zsh before any path/ entry runs, so every entry can use it.
+
+# __leos_set_flag <name> / __leos_clear_flag <name>
+# A flag is an empty file in $LEOS_PROFILES/local/flags that switches a profile
+# behaviour (no-gnu, brew-china, ...). local/ and flags/ are kept private (700)
+# and each flag file 600, as the installer's prepare_local_dir does. Names are
+# plain words, never paths.
+__leos_set_flag() {
+  emulate -L zsh
+  local dir=${LEOS_PROFILES-}/local/flags
+  [[ -n ${LEOS_PROFILES-} && -n $1 && -z ${1//[A-Za-z0-9_-]/} ]] || return 2
+  command mkdir -p -- "$dir" && chmod 700 "${dir:h}" "$dir" &&
+    touch -- "$dir/$1" && chmod 600 "$dir/$1"
+}
+__leos_clear_flag() {
+  emulate -L zsh
+  [[ -n ${LEOS_PROFILES-} && -n $1 && -z ${1//[A-Za-z0-9_-]/} ]] || return 2
+  rm -f -- "$LEOS_PROFILES/local/flags/$1"
+}
 
 # Deterministic tool scripts are cached privately. Homebrew shellenv and fnm
 # env are deliberately not cached: their output depends on the invoking shell.

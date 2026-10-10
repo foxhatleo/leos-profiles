@@ -14,8 +14,8 @@ fi
 
 # Defined unconditionally (not gated on the block above) so disable-gnu's
 # effect can always be undone with enable-gnu, even after a restart.
-enable-gnu()  { rm -f "$LEOS_PROFILES/local/flags/no-gnu"; puts "Enabled GNU tools. Restart shell to take effect."; }
-disable-gnu() { mkdir -p "$LEOS_PROFILES/local/flags" && chmod 700 "$LEOS_PROFILES/local" "$LEOS_PROFILES/local/flags"; touch "$LEOS_PROFILES/local/flags/no-gnu" && chmod 600 "$LEOS_PROFILES/local/flags/no-gnu"; puts "Disabled GNU tools. Restart shell to take effect."; }
+enable-gnu()  { __leos_clear_flag no-gnu && puts "Enabled GNU tools. Restart shell to take effect."; }
+disable-gnu() { __leos_set_flag no-gnu && puts "Disabled GNU tools. Restart shell to take effect."; }
 
 unset __leos_gnu_prefix
 
