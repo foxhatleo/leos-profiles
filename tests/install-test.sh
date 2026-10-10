@@ -2152,6 +2152,68 @@ test_success_names_the_terminal_font_and_wsl_action() {
   rm -rf "$temp"
 }
 
+# --- Credentials and signing (ONB-2, MI-1, MI-2, MI-7, SEC-1, SEC-7) -------
+test_gpg_expiry_validation() {
+  local value
+  for value in 2y 1y 6m 3w 10d 0 never 1000d; do
+    valid_gpg_expiry "$value" || fail "valid expiry rejected: $value"
+  done
+  for value in '' 2 2x 0y 02y -1y 2yy 'never ' 99999y 2Y; do
+    if valid_gpg_expiry "$value"; then fail "invalid expiry accepted: '$value'"; fi
+  done
+  GPG_EXPIRY=1y2m
+  if (validate_options) >/dev/null 2>&1; then fail "validate_options accepted --gpg-expiry 1y2m"; fi
+  local temp out status=0
+  temp=$(mktemp -d)
+  make_fixture_checkout "$temp/profile"
+  out=$(run_cli "$temp/profile" "$temp/home" inspect --gpg generate --gpg-expiry forever 2>&1) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "Invalid --gpg-expiry value"
+  rm -rf "$temp"
+}
+
+test_preflight_refuses_a_second_gpg_generation() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  preflight_fixture yes 0
+  privileged_plan() { :; }
+  LOCAL_DIR="$temp/local"
+  PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
+  mkdir -p "$LOCAL_DIR"
+  printf 'gpg\treuse\ngpg-key\t%s\n' 0123456789ABCDEF0123456789ABCDEF01234567 > "$PROFILE_FILE"
+  cp "$PROFILE_FILE" "$temp/before"
+  gpg() { printf 'fpr:::::::::%s:\n' 0123456789ABCDEF0123456789ABCDEF01234567; }
+  GPG_MODE=generate
+  out=$( (preflight) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "--gpg reuse --gpg-key 0123456789ABCDEF0123456789ABCDEF01234567"
+  cmp -s "$PROFILE_FILE" "$temp/before" || fail "the refused run rewrote the saved profile"
+  GPG_MODE=reuse
+  GPG_KEY_ID=0123456789ABCDEF0123456789ABCDEF01234567
+  preflight >/dev/null 2>&1 || fail "reusing the saved key was refused"
+  rm -rf "$temp"
+}
+
+test_profile_reads_optional_credential_keys() {
+  local temp
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
+  DRY_RUN=0
+  GPG_EXPIRY=6m
+  write_profile
+  GPG_EXPIRY=2y
+  read_profile
+  assert_equals "$GPG_EXPIRY" 6m
+  # A profile written before these keys existed still reads, with defaults.
+  grep -v '^gpg-expiry' "$PROFILE_FILE" > "$temp/old"
+  mv "$temp/old" "$PROFILE_FILE"
+  GPG_EXPIRY=2y
+  read_profile
+  assert_equals "$GPG_EXPIRY" 2y
+  rm -rf "$temp"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -2262,6 +2324,9 @@ TESTS=(
   test_inventory_lists_managed_items
   test_remove_blocks_and_inventory_need_no_supported_platform
   test_success_names_the_terminal_font_and_wsl_action
+  test_gpg_expiry_validation
+  test_preflight_refuses_a_second_gpg_generation
+  test_profile_reads_optional_credential_keys
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

@@ -75,6 +75,7 @@ write_profile() {
     printf 'gpg\t%s\n' "$GPG_MODE"
     printf 'gpg-key\t%s\n' "$GPG_KEY_ID"
     printf 'gpg-passphrase\t%s\n' "$GPG_PASSPHRASE_MODE"
+    printf 'gpg-expiry\t%s\n' "$GPG_EXPIRY"
     printf 'node-channel\t%s\n' "$NODE_CHANNEL"
     printf 'node-policy\t%s\n' "$NODE_POLICY"
     printf 'ai-cli-update-channel\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
@@ -109,6 +110,8 @@ read_profile() {
       gpg) GPG_MODE=$value ;;
       gpg-key) GPG_KEY_ID=$value ;;
       gpg-passphrase) GPG_PASSPHRASE_MODE=$value ;;
+      # Optional (added 2026-10): an older profile keeps the 2y default.
+      gpg-expiry) GPG_EXPIRY=$value ;;
       node-channel) NODE_CHANNEL=$value ;;
       node-policy) NODE_POLICY=$value ;;
       ai-cli-update-channel) AI_CLI_UPDATE_CHANNEL=$value ;;

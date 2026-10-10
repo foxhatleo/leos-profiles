@@ -294,6 +294,7 @@ preflight() {
     done < <(version_manager_conflicts "$tool")
   done
   check_approved_node_version
+  gpg_generation_guard
   if ! stdin_is_terminal; then
     if [[ $SSH_MODE == generate && $SSH_PASSPHRASE_MODE == prompt ]]; then
       reasons+="ssh-keygen must ask for the new SSH key's passphrase (--ssh-passphrase prompt). "

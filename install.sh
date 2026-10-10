@@ -37,6 +37,7 @@ SSH_PASSPHRASE_MODE="empty"
 GPG_MODE="skip"
 GPG_PASSPHRASE_MODE="empty"
 GPG_KEY_ID=""
+GPG_EXPIRY="2y"
 INSTALL_FONTS="auto"
 CHANGE_DEFAULT_SHELL="auto"
 DRY_RUN=0
@@ -86,6 +87,8 @@ Options:
   --gpg <skip|reuse|generate>     Git commit-signing choice
   --gpg-key <fingerprint>         Required explicit secret key when --gpg reuse
   --gpg-passphrase <empty|prompt> New-key passphrase policy
+  --gpg-expiry <duration>         New GPG key lifetime: Ny, Nm, Nw or Nd, or
+                                  0/never for none (default 2y)
   --fonts <auto|yes|no>           Nerd Fonts policy
   --font <name>                   Nerd Font name (auto defaults to JetBrainsMono)
   --default-shell <auto|yes|no>   Default zsh shell policy
@@ -182,6 +185,7 @@ parse_args() {
     --gpg) require_value "$1" "${2:-}"; GPG_MODE=$2; shift 2 ;;
     --gpg-key) require_value "$1" "${2:-}"; GPG_KEY_ID=$2; shift 2 ;;
     --gpg-passphrase) require_value "$1" "${2:-}"; GPG_PASSPHRASE_MODE=$2; shift 2 ;;
+    --gpg-expiry) require_value "$1" "${2:-}"; GPG_EXPIRY=$2; shift 2 ;;
     --fonts) require_value "$1" "${2:-}"; INSTALL_FONTS=$2; shift 2 ;;
     --font) require_value "$1" "${2:-}"; FONT_NAME=$2; shift 2 ;;
     --default-shell) require_value "$1" "${2:-}"; CHANGE_DEFAULT_SHELL=$2; shift 2 ;;
@@ -251,6 +255,7 @@ validate_options() {
   [[ $SSH_PASSPHRASE_MODE == empty || $SSH_PASSPHRASE_MODE == prompt ]] || die "Invalid --ssh-passphrase value"
   [[ $GPG_MODE == skip || $GPG_MODE == reuse || $GPG_MODE == generate ]] || die "Invalid --gpg value"
   [[ $GPG_PASSPHRASE_MODE == empty || $GPG_PASSPHRASE_MODE == prompt ]] || die "Invalid --gpg-passphrase value"
+  valid_gpg_expiry "$GPG_EXPIRY" || die "Invalid --gpg-expiry value: use Ny, Nm, Nw or Nd (for example 2y), or 0/never for no expiry"
   [[ $INSTALL_FONTS == auto || $INSTALL_FONTS == yes || $INSTALL_FONTS == no ]] || die "Invalid --fonts value"
   [[ $CHANGE_DEFAULT_SHELL == auto || $CHANGE_DEFAULT_SHELL == yes || $CHANGE_DEFAULT_SHELL == no ]] || die "Invalid --default-shell value"
   [[ -z $BREW_MIRROR || $BREW_MIRROR == china || $BREW_MIRROR == none ]] || die "Invalid --brew-mirror value"
@@ -272,6 +277,12 @@ validate_options() {
   validate_tsv_value git-name "$GIT_NAME"
   validate_tsv_value git-email "$GIT_EMAIL"
   validate_tsv_value profile-root "$TARGET"
+}
+
+# A new GPG key's lifetime as gpg --quick-generate-key takes it: years,
+# months, weeks or days, or 0/never (no expiry), spelled out (SEC-1).
+valid_gpg_expiry() {
+  [[ $1 =~ ^(0|never|[1-9][0-9]{0,3}[ymwd])$ ]]
 }
 
 validate_tsv_value() {

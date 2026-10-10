@@ -18,7 +18,7 @@ LOCAL_DIR="$fixture/local"
 PROFILE_FILE="$LOCAL_DIR/profile"
 TARGET="$fixture/profile"
 DRY_RUN=0 COMMAND=apply SSH_MODE=reuse SSH_PASSPHRASE_MODE=empty
-GPG_MODE=reuse GPG_PASSPHRASE_MODE=empty
+GPG_MODE=reuse GPG_PASSPHRASE_MODE=empty GPG_EXPIRY=2y SIGNING_MODE=skip
 SSH_KEY_PATH="$fixture/custom-key"
 GPG_KEY_ID=0123456789ABCDEF0123456789ABCDEF01234567
 GIT_NAME='Test User' GIT_EMAIL=test@example.com
@@ -288,6 +288,34 @@ grep -q 'Invalid public GPG export' "$fixture/error" || fail 'manual action acce
 expect_no_action
 gpg_export_private=no api_gpg=89ABCDEF01234567
 
+# New GPG keys get the approved expiry (SEC-1).
+GPG_MODE=generate GPG_EXPIRY=2y
+: > "$fixture/gpg-calls"
+expect_exit 0 provision_gpg
+grep -q -- '--quick-generate-key Test User <test@example.com> ed25519 sign 2y$' "$fixture/gpg-calls" ||
+  fail "expiry not passed: $(cat "$fixture/gpg-calls")"
+GPG_MODE=generate GPG_EXPIRY=never
+expect_exit 0 provision_gpg
+grep -q -- 'ed25519 sign never$' "$fixture/gpg-calls" || fail 'explicit no-expiry not passed'
+GPG_EXPIRY=2y
+# A second `--gpg generate` stops while the key an earlier run saved is still
+# in the keyring, and names it for reuse (the SSH guard's GPG twin).
+(
+  printf 'gpg\treuse\ngpg-key\t%s\n' "$GPG_KEY_ID" > "$PROFILE_FILE"
+  GPG_MODE=generate
+  expect_exit 1 gpg_generation_guard
+  grep -q -- "Refusing to generate a second GPG key.*--gpg reuse --gpg-key $GPG_KEY_ID" "$fixture/error" ||
+    fail "no GPG reuse guidance: $(cat "$fixture/error")"
+  gpg_listed_fingerprint=''
+  expect_exit 0 gpg_generation_guard
+  gpg_listed_fingerprint=same GPG_MODE=reuse
+  expect_exit 0 gpg_generation_guard
+  printf 'gpg\tgenerate\ngpg-key\t\n' > "$PROFILE_FILE"
+  GPG_MODE=generate
+  expect_exit 0 gpg_generation_guard
+)
+GPG_MODE=reuse
+
 # Credential prerequisite installation requests only missing packages.
 # The overrides below are invoked indirectly by the code under test.
 # shellcheck disable=SC2317
@@ -387,6 +415,9 @@ if command -v gpg >/dev/null && command -v gpgconf >/dev/null && command -v ssh-
     expect_exit 3 provision_gpg
     GPG_KEY_ID=$(command gpg --batch --with-colons --list-secret-keys 2>/dev/null | awk -F: '/^fpr:/{print $10; exit}')
     [[ -n $GPG_KEY_ID && -s $LOCAL_DIR/gpg-public-$GPG_KEY_ID.asc ]] || fail 'real public GPG artifact missing'
+    # The default 2y expiry reached the real key (field 7 of the pub record).
+    [[ -n $(command gpg --batch --with-colons --list-keys "$GPG_KEY_ID" 2>/dev/null | awk -F: '$1 == "pub" { print $7; exit }') ]] ||
+      fail 'real GPG key has no expiry'
     if command git config --global --get commit.gpgsign >/dev/null; then fail 'real signing enabled before registration'; fi
     GPG_MODE=reuse
     api_gpg=${GPG_KEY_ID: -16}

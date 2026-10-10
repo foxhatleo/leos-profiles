@@ -205,7 +205,10 @@ credential_manual_action() {
   esac
   queue_manual_action "$action" "$public_path" "$destination" "$explanation"
   if [[ ${SSH_MODE:-skip} == generate || ${GPG_MODE:-skip} == generate ]]; then
-    warn "Key generation is still pending. After completing the manual action, resume apply with the original approved choices; select reuse for every key already created (SSH: --ssh reuse --ssh-key '$SSH_KEY_PATH' when present). Reconcile will not generate the pending key. Obtain new approval only if the choices change."
+    local created=""
+    [[ ${SSH_MODE:-skip} != reuse || -z ${SSH_KEY_PATH:-} ]] || created+=" SSH: --ssh reuse --ssh-key '$SSH_KEY_PATH'."
+    [[ ${GPG_MODE:-skip} != reuse || -z ${GPG_KEY_ID:-} ]] || created+=" GPG: --gpg reuse --gpg-key $GPG_KEY_ID."
+    warn "Key generation is still pending. After completing the manual action, resume apply with the original approved choices; select reuse for every key already created.${created} Reconcile will not generate the pending key. Obtain new approval only if the choices change."
   fi
   finish_manual_actions
 }
@@ -353,6 +356,32 @@ github_gpg_key_present() {
   ' <<< "$remote_ids"
 }
 
+# saved_profile_value <key>: one value from the saved profile as it is on
+# disk now (before this run rewrites it), or nothing.
+saved_profile_value() {
+  [[ -f $PROFILE_FILE ]] || return 0
+  awk -F '\t' -v key="$1" '$1 == key { print $2; exit }' "$PROFILE_FILE"
+}
+
+# A generated GPG key is saved as gpg=reuse with its fingerprint before
+# anything else can fail. Like an existing SSH key file, it is never replaced
+# or silently reused: a later `--gpg generate` stops, before the run changes
+# anything (preflight calls this before the profile is rewritten), and names
+# the saved key to select instead. Once that key has left the keyring,
+# generating again creates no second key and is allowed.
+gpg_generation_guard() {
+  [[ $GPG_MODE == generate ]] || return 0
+  local saved_mode saved_key
+  saved_mode=$(saved_profile_value gpg)
+  saved_key=$(saved_profile_value gpg-key)
+  [[ $saved_mode == reuse ]] || return 0
+  [[ $saved_key =~ ^[A-Fa-f0-9]{40}$ || $saved_key =~ ^[A-Fa-f0-9]{64}$ ]] || return 0
+  if command -v gpg >/dev/null 2>&1 && [[ -z $(gpg_secret_fingerprint "$saved_key" || true) ]]; then
+    return 0
+  fi
+  die "Refusing to generate a second GPG key: this profile already holds $saved_key. Select it explicitly with --gpg reuse --gpg-key $saved_key"
+}
+
 provision_gpg() {
   [[ $GPG_MODE == skip ]] && return 0
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -382,10 +411,10 @@ provision_gpg() {
     [[ $(printf '%s' "$keyid" | tr '[:lower:]' '[:upper:]') == "$(printf '%s' "$GPG_KEY_ID" | tr '[:lower:]' '[:upper:]')" ]] || die "GPG returned a different key ($keyid) from the selected fingerprint $GPG_KEY_ID"
   else
     if [[ $GPG_PASSPHRASE_MODE == prompt ]]; then
-      creation_output=$(gpg --status-fd 1 --quick-generate-key "$name <$email>" ed25519 sign never)
+      creation_output=$(gpg --status-fd 1 --quick-generate-key "$name <$email>" ed25519 sign "$GPG_EXPIRY")
     else
       warn "Creating a GPG signing key WITHOUT a passphrase (--gpg-passphrase empty). Anyone who can read your keyring can sign as you."
-      creation_output=$(gpg --batch --status-fd 1 --pinentry-mode loopback --passphrase '' --quick-generate-key "$name <$email>" ed25519 sign never)
+      creation_output=$(gpg --batch --status-fd 1 --pinentry-mode loopback --passphrase '' --quick-generate-key "$name <$email>" ed25519 sign "$GPG_EXPIRY")
     fi
     keyid=$(awk '$2 == "KEY_CREATED" {print $4; exit}' <<< "$creation_output")
   fi
