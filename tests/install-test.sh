@@ -1461,6 +1461,21 @@ test_inspect_lists_every_selected_registry_artifact() {
   [[ $output != *$'artifact\tdirect\tfnm\t'* ]] || fail "an unselected artifact was listed"
 }
 
+test_retired_flags_are_rejected_everywhere() {
+  local out flag
+  for flag in --ref --target --plan; do
+    COMMAND=""
+    out=$( (parse_args "$flag" x) 2>&1 ) && fail "$flag was accepted as the command"
+    assert_contains "$out" "retired ref/target CLI"
+    COMMAND=""
+    out=$( (parse_args apply "$flag" x) 2>&1 ) && fail "apply accepted $flag"
+    assert_contains "$out" "retired ref/target CLI"
+    COMMAND=""
+    out=$( (parse_args reconcile --yes "$flag") 2>&1 ) && fail "reconcile accepted $flag"
+    assert_contains "$out" "retired ref/target CLI"
+  done
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1541,6 +1556,7 @@ TESTS=(
   test_artifact_registry_matches_legacy_lookup
   test_artifact_verification_checks_version_and_digest
   test_inspect_lists_every_selected_registry_artifact
+  test_retired_flags_are_rejected_everywhere
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

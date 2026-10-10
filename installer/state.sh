@@ -123,6 +123,9 @@ read_profile() {
     [[ $seen == *",$required,"* ]] || die "Incomplete install profile: missing $required"
   done
   PROFILE_SCHEMA=$schema
+  # Schema 1 (no node-policy; before 2026-09) migrates on the next approved
+  # apply/reconcile. Keep reading it until 2027-09, then reject it with a
+  # message to run apply again.
   if [[ $schema == 1 ]]; then NODE_POLICY=preserve-compatible; fi
   if [[ $schema == 2 && $seen != *,node-policy,* ]]; then die "Profile schema 2 requires node-policy"; fi
 }
@@ -146,6 +149,12 @@ migrate_one_local_file() {
   chmod 600 "$destination"
 }
 
+# Legacy-location migrations. Each is kept for one year after the release that
+# moved the data, then removed with its test:
+#   - XDG installer state ($LEGACY_STATE_FILE) and zsh/_private.zsh moved into
+#     local/ in 2026-09: remove after 2027-09.
+#   - ~/.brew-china and ~/.lp-* markers moved to local/flags/ in 2026-09:
+#     remove after 2027-09.
 # Dry-run performs the *detection* half of the migration but none of the
 # mutations, so `apply --dry-run` surfaces the same conflicts a real apply would
 # die on. Previously it returned early and reported success, then the real apply

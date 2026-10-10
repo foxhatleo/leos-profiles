@@ -104,24 +104,31 @@ require_value() {
   [[ $# -ge 2 && -n $2 ]] || die "$1 requires a value"
 }
 
+# The ref/target CLI was retired with the move to an in-place checkout; its
+# flags are still recognised so an old instruction fails with directions.
+reject_retired_flag() {
+  case $1 in
+    --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
+      die "$1 belongs to the retired ref/target CLI; run apply (or reconcile with the saved profile) from this local checkout" ;;
+  esac
+}
+
 parse_args() {
   [[ $# -gt 0 ]] || { usage >&2; exit 2; }
+  reject_retired_flag "$1"
   case $1 in
     inspect|apply|reconcile|remove-blocks) COMMAND=$1; shift ;;
-    --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
-      die "$1 belongs to the retired ref/target CLI; use the AI runbook with this local checkout" ;;
     --help|-h) usage; exit 0 ;;
     *) die "Expected inspect, apply, reconcile, or remove-blocks; the AI runbook is the setup interface" ;;
   esac
   if [[ $COMMAND == reconcile ]]; then FULL_UPGRADE=0; fi
   while [[ $# -gt 0 ]]; do
+    reject_retired_flag "$1"
     if [[ $COMMAND == reconcile ]]; then
       case $1 in
         --full-upgrade) FULL_UPGRADE=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --yes) ASSUME_YES=1; shift ;;
-        --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
-          die "$1 belongs to the retired ref/target CLI; use reconcile with the saved local profile" ;;
         --help|-h) usage; exit 0 ;;
         *) die "reconcile reads the saved local profile and only accepts --yes, --full-upgrade, or --dry-run" ;;
       esac
@@ -145,8 +152,6 @@ parse_args() {
     --no-full-upgrade) FULL_UPGRADE=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
-    --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
-      die "$1 belongs to the retired ref/target CLI; use the AI runbook with this local checkout" ;;
     --help|-h) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
     esac
