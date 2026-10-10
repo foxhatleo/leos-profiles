@@ -209,6 +209,19 @@ test_uv_artifact_installs_uv_and_uvx() {
   rm -rf "$temp"
 }
 
+# BP-11: Starship and uv use the static musl builds on every Linux CPU.
+test_linux_artifacts_use_static_musl_builds() {
+  local tool machine
+  OS_FAMILY=apt
+  uname() { if [[ ${1:-} == -m ]]; then printf '%s\n' "$FAKE_MACHINE"; else command uname "$@"; fi; }
+  for tool in starship uv; do
+    for machine in aarch64 x86_64; do
+      FAKE_MACHINE=$machine
+      assert_contains "$(platform_asset "$tool")" "$tool-$machine-unknown-linux-musl.tar.gz"$'\t'
+    done
+  done
+}
+
 test_platform_assets_are_locked() {
   OS_FAMILY=macos
   local asset expected
@@ -1648,6 +1661,7 @@ TESTS=(
   test_heroku_is_an_opt_in_macos_group
   test_dev_tools_cover_ruby_build_dependencies
   test_uv_artifact_installs_uv_and_uvx
+  test_linux_artifacts_use_static_musl_builds
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

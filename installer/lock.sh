@@ -75,6 +75,8 @@ readonly UV_LINUX_AARCH64_SHA256="281ca6cf43f4e26e35474839ad4861be86de42af2682f7
 readonly UV_LINUX_X64_URL="https://github.com/astral-sh/uv/releases/download/0.13.0/uv-x86_64-unknown-linux-musl.tar.gz"
 readonly UV_LINUX_X64_SHA256="b0828fc4cdc47d65951e94b5f0a15a5364420e8dcd88723f3b21e7a2eb30bbc3"
 
+# Linux uses Starship's statically linked musl builds on both CPUs, as its
+# own installer does (BP-11); digests are GitHub's release-asset values.
 readonly STARSHIP_VERSION="1.26.0"
 readonly STARSHIP_DARWIN_AARCH64_URL="https://github.com/starship/starship/releases/download/v1.26.0/starship-aarch64-apple-darwin.tar.gz"
 readonly STARSHIP_DARWIN_AARCH64_SHA256="c40b27b11f580411e068f2fa6c1be7830a387c0bc47a94d1d37f32b054c5361d"
@@ -82,5 +84,5 @@ readonly STARSHIP_DARWIN_X64_URL="https://github.com/starship/starship/releases/
 readonly STARSHIP_DARWIN_X64_SHA256="5548f406a4b6f5695903bdea83f77ce47ec12c8c0e62dabd33122d8f133e4207"
 readonly STARSHIP_LINUX_AARCH64_URL="https://github.com/starship/starship/releases/download/v1.26.0/starship-aarch64-unknown-linux-musl.tar.gz"
 readonly STARSHIP_LINUX_AARCH64_SHA256="dc30189378d2f2e287384e8a692d3f95ad1df64cf0e8c36aa9201516028aed6b"
-readonly STARSHIP_LINUX_X64_URL="https://github.com/starship/starship/releases/download/v1.26.0/starship-x86_64-unknown-linux-gnu.tar.gz"
-readonly STARSHIP_LINUX_X64_SHA256="321f0dd7af8340a5f2e6a8fec6538a04f617486f9ec70d878f91c09cd8deef22"
+readonly STARSHIP_LINUX_X64_URL="https://github.com/starship/starship/releases/download/v1.26.0/starship-x86_64-unknown-linux-musl.tar.gz"
+readonly STARSHIP_LINUX_X64_SHA256="b7c232b0e8249d8e55a40beb79c5c43a7d370f3f9408bd215deb0170daeaadf3"

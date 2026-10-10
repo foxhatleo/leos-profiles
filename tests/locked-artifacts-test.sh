@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download and verify every non-Git locked artifact for this runner platform.
-# shellcheck disable=SC1091,SC2034
+# shellcheck disable=SC1091,SC2034,SC2329
 
 set -Eeuo pipefail
 
@@ -30,6 +30,25 @@ while IFS= read -r artifact; do
   artifact_install "$artifact" "$TEST_HOME/bin"
   printf 'verified %s\n' "$artifact"
 done < <(artifact_names)
+
+# LEOS_ARTIFACT_ALL_PLATFORMS=1 also downloads every other platform's asset
+# (macOS and Linux, both CPUs) and checks its digest without running it, for
+# reviewing a lock update on a single machine.
+if [[ ${LEOS_ARTIFACT_ALL_PLATFORMS:-0} == 1 ]]; then
+  while IFS= read -r artifact; do
+    for OS_FAMILY in macos apt; do
+      for FAKE_MACHINE in arm64 x86_64; do
+        uname() { if [[ ${1:-} == -m ]]; then printf '%s\n' "$FAKE_MACHINE"; else command uname "$@"; fi; }
+        asset=$(artifact_asset "$artifact") || { unset -f uname; continue; }
+        unset -f uname
+        IFS=$'\t' read -r url digest <<< "$asset"
+        download_verified "$url" "$digest" "$TEST_HOME/all-platforms/${url##*/}"
+        printf 'digest ok %s\n' "${url##*/}"
+      done
+    done
+  done < <(artifact_names)
+  detect_os
+fi
 
 "$TEST_HOME/bin/rpatool" --help >/dev/null
 [[ $("$TEST_HOME/bin/bun" --version) == "$BUN_VERSION" ]]
