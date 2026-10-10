@@ -1797,6 +1797,31 @@ test_brew_mirror_option_matches_the_runtime_mirror() {
   rm -rf "$temp"
 }
 
+# ONB-4: components install first, credentials last, so a registration pause
+# (exit 3) no longer holds back the rest of the setup.
+test_credentials_run_after_components() {
+  local temp out zsh_line ssh_line
+  temp=$(mktemp -d)
+  make_fixture_checkout "$temp/profile"
+  out=$(run_cli "$temp/profile" "$temp/home" apply --yes --dry-run --groups zsh-config --package-groups none \
+    --ssh generate --default-shell no 2>&1) || fail "dry-run apply failed: $out"
+  zsh_line=$(grep -n 'Running zsh-config' <<< "$out" | cut -d: -f1)
+  ssh_line=$(grep -n 'Would prepare the selected SSH key' <<< "$out" | cut -d: -f1)
+  [[ -n $zsh_line && -n $ssh_line ]] || fail "missing component or credential output: $out"
+  (( zsh_line < ssh_line )) || fail "credentials ran before the components"
+  rm -rf "$temp"
+}
+
+# A credential pause also reports the manual actions components queued.
+test_credential_pause_reports_queued_component_actions() {
+  local out status=0
+  queue_manual_action set-login-shell /bin/zsh tester "install chsh" 2>/dev/null
+  out=$( (credential_manual_action github-login '' https://github.com/login "log in") 2>/dev/null ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" $'manual-action\tset-login-shell\t/bin/zsh\ttester'
+  assert_contains "$out" $'manual-action\tgithub-login\t\thttps://github.com/login'
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1891,6 +1916,8 @@ TESTS=(
   test_sudo_keeps_proxy_variables
   test_brew_mirror_option_matches_the_runtime_mirror
   test_missing_chsh_queues_a_manual_action
+  test_credentials_run_after_components
+  test_credential_pause_reports_queued_component_actions
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

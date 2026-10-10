@@ -540,9 +540,6 @@ main() {
     resolve_node_version || die "Could not select a compatible Node version or resolve current LTS"
     say "Selected Node $RESOLVED_NODE_VERSION ($NODE_SELECTION)"
   fi
-  install_credential_prerequisites
-  provision_ssh
-  provision_gpg
   write_profile
   local step
   local -a steps=()
@@ -553,6 +550,13 @@ main() {
   if has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" zsh-config; then
     compile_zsh_sources
   fi
+  # Credentials come last: no component uses them, and their first run always
+  # pauses for a manual GitHub registration (exit 3), which must not hold back
+  # the components (ONB-4). A pause also prints the actions queued above.
+  install_credential_prerequisites
+  provision_ssh
+  provision_gpg
+  write_profile
   finish_manual_actions
   if [[ $COMMAND == reconcile ]]; then
     say "Profile reconciliation complete. Restart the terminal; default-shell changes apply at next login."
