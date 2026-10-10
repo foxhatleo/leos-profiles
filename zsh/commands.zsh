@@ -45,7 +45,10 @@ clear-history() {
   candidates=("$HOME/.zsh_history" "$HOME/.bash_history" "$HOME/.python_history"
               "$HOME/.node_repl_history" "$HOME/.lesshst")
   if [[ $aggressive == --aggressive ]]; then
-    candidates+=($HOME/.*history(N) $HOME/.zcompdump*(N) \
+    # Completion dumps: the profile's own (cache root, one per Zsh version)
+    # and any legacy or third-party ones in HOME/ZDOTDIR.
+    candidates+=($HOME/.*history(N) $HOME/.zcompdump*(N) ${ZDOTDIR:-$HOME}/.zcompdump*(N) \
+                 ${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/zcompdump-[0-9]*(N) \
                  $HOME/.oracle_jre_usage(N) $HOME/.*hsts(N))
   fi
   for f in "${candidates[@]}"; do

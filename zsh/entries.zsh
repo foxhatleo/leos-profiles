@@ -1,10 +1,21 @@
 # Leo's Profiles — entries: ordered PATH, environment and command loader.
 
+# Fewer fpath entries mean fewer directories for compinit to scan, and a
+# nested shell inherits FPATH from brew shellenv: keep the array unique.
+typeset -gU fpath
+
 entry "path/brew"
 entry "path/gnu"
-# add-path prepends, so PATH order is the reverse of load order: user-local bins
-# are loaded here, BEFORE the version managers below, so their shims end up in
-# front. Otherwise a stale node/python/ruby left in ~/.local/bin permanently
+# add-path prepends, so PATH order is the reverse of load order. The resulting
+# precedence is: version-manager shims, then ~/.local/bin, then Go workspace
+# bins, then Homebrew and the system.
+#
+# Go loads right after Homebrew (which usually provides the go binary): a
+# GOPATH bin is a user-local install location like ~/.local/bin, and must not
+# shadow the runtimes the version managers below select.
+entry "path/go"
+# User-local bins load BEFORE the version managers below, so their shims end up
+# in front. Otherwise a stale node/python/ruby left in ~/.local/bin permanently
 # shadows whatever fnm/pyenv/rbenv selected, defeating per-directory switching.
 entry "path/bin"
 entry "path/apt"
@@ -15,11 +26,11 @@ entry "path/pyenv"
 entry "path/rbenv"
 entry "path/fnm"
 entry "path/direnv"
-entry "path/go"
-entry "path/flutter"
-entry "path/thefuck"
-entry "path/gcloud"
 entry "path/gpg"
+
+# Tool init scripts assign PATH directly; drop any duplicates they introduced.
+typeset -gU path
+path=($path)
 
 # Load aliases and completion styles only after PATH initialisation, so tools
 # discovered by Homebrew/local-bin setup are available to env.zsh.

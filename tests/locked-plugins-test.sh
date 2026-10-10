@@ -23,10 +23,10 @@ DRY_RUN=0
 mkdir -p "$TARGET/zsh" "$HOME" "$TEMP_ROOT/bin"
 cp "$ROOT"/zsh/*.zsh "$ROOT"/zsh/*.toml "$TARGET/zsh/"
 cp -R "$ROOT/zsh/path" "$TARGET/zsh/path"
-printf '\n__leos_rehash_daily() { :; }\n' >> "$TARGET/zsh/cache.zsh"
+printf '\n__leos_rehash_daily() { :; }\n__leos_fnm_prune_daily() { :; }\n' >> "$TARGET/zsh/cache.zsh"
 # Exercise real locked plugin code, without invoking host initialization tools
 # or falling back to an absolute Homebrew installation outside the fixture.
-for tool in brew starship pyenv rbenv fnm npm pnpm bun direnv zoxide heroku thefuck; do
+for tool in brew starship pyenv rbenv fnm npm pnpm bun direnv zoxide heroku; do
   printf '%s\n' '#!/bin/sh' 'printf ":\n"' > "$TEMP_ROOT/bin/$tool"
   chmod +x "$TEMP_ROOT/bin/$tool"
 done

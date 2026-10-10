@@ -9,7 +9,16 @@ if (( $+commands[fnm] )); then
   # `--shell zsh` because fnm otherwise guesses from the parent process tree and
   # can fall back to POSIX output — which omits the zsh chpwd hook --use-on-cd
   # relies on — when zsh is started by something that is not a shell.
+  #
+  # A nested shell inherits its parent's multishell bin, and `fnm env` only
+  # prepends a new one, so every level of nesting stacked another. Drop the
+  # inherited ones first; this shell gets its own below.
+  path=(${path:#*/fnm_multishells/*/bin})
   eval "$(fnm env --use-on-cd --shell zsh)"
+  # fnm never deletes those per-shell links; prune dead ones once a day.
+  if [[ ${FNM_MULTISHELL_PATH:-} == */fnm_multishells/* ]]; then
+    __leos_fnm_prune_daily "${FNM_MULTISHELL_PATH:h}"
+  fi
 fi
 
 :

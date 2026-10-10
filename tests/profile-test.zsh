@@ -21,10 +21,10 @@ cp -R "$source_root/zsh/path" "$root/zsh/path"
 # overrides. Plugin availability remains optional for clean-checkout testing.
 [[ ! -d $source_root/zsh/plugins ]] || cp -R "$source_root/zsh/plugins" "$root/zsh/plugins"
 cp "$source_root/util/rmdsstore.py" "$root/util/"
-# Rehash is an asynchronous maintenance side effect, not part of these profile
-# assertions. Disable it in the temporary fixture so no detached writer can
+# Rehash and fnm multishell pruning are asynchronous maintenance side effects,
+# not part of these profile assertions. Disable them in the temporary fixture so no detached writer can
 # outlive the shell or race removal of its HOME.
-print -r -- '__leos_rehash_daily() { :; }' >> "$root/zsh/cache.zsh"
+print -rl -- '__leos_rehash_daily() { :; }' '__leos_fnm_prune_daily() { :; }' >> "$root/zsh/cache.zsh"
 trap 'rm -rf "$tmp"' EXIT
 fail() { print -u2 -r -- "FAIL: $*"; exit 1; }
 
@@ -51,9 +51,6 @@ print -rl -- '#!/bin/sh' 'case "$1" in' \
   ' --prefix) printf "%s\\n" "$HOME/fake-brew" ;;' \
   ' *) exit 91 ;;' 'esac' > "$tmp/fakebin/brew"
 chmod +x "$tmp/fakebin/brew"
-# thefuck must be absent except where a test supplies its own implementation.
-print -rl -- '#!/bin/sh' 'exit 1' > "$tmp/fakebin/thefuck"
-chmod +x "$tmp/fakebin/thefuck"
 # Make the system Zsh reachable on platforms where it is outside /usr/bin.
 ln -s "${commands[zsh]:-/bin/zsh}" "$tmp/fakebin/zsh"
 fakepath="$tmp/fakebin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -90,9 +87,11 @@ run_block 'default themed profile' \
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     [[ "$LEOS_PROFILES" == "$LEOS_PROFILES_HOME" ]] || { print -u2 -r -- "profile root mismatch: $LEOS_PROFILES"; exit 1; }
     (( $+functions[bye] )) || { print -u2 -r -- "bye function was not loaded"; exit 1; }
-    [[ ${aliases[ls]:-} == "ls --color=auto" || ${aliases[ls]:-} == "ls -G" || ${aliases[ls]:-} == "eza --color=auto --group-directories-first" ]] || {
-      print -u2 -r -- "unexpected ls alias: ${aliases[ls]:-(unset)}"; exit 1
-    }
+    (( $+functions[ls] && ! $+aliases[ls] )) || { print -u2 -r -- "ls wrapper was not defined"; exit 1; }
+    [[ -o hist_fcntl_lock && -o extended_glob ]]
+    print -r -- HEAD^ >/dev/null               # BP-2: no "no matches found"
+    [[ $(print -r -- HEAD^) == "HEAD^" ]]
+    (( $#fpath == ${#${(@u)fpath}} && $#path == ${#${(@u)path}} ))   # no duplicates
     [[ "$STARSHIP_CONFIG" == "$LEOS_PROFILES_HOME/zsh/starship.toml" ]] || {
       print -u2 -r -- "themed Starship config mismatch: ${STARSHIP_CONFIG:-unset}"; exit 1
     }
@@ -110,18 +109,11 @@ run_block 'alias opt-out and locale preservation' \
     setopt err_return no_unset pipe_fail
     unset LC_ALL
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
-    (( ! $+aliases[ls] ))
+    (( ! $+aliases[ls] && ! $+functions[ls] ))
+    (( ! $+functions[cat] ))
     (( ! $+aliases[grep] ))
     [[ -z ${LC_ALL:-} ]]
   '
-
-run_block 'lazy thefuck first invocation' \
-  HOME="$tmp" ZDOTDIR="$tmp" LEOS_TEST_ROOT="$root" -- '
-  setopt err_return no_unset pipe_fail
-  thefuck() { print "alias fuck=\047true\047"; }
-  source "$LEOS_TEST_ROOT/zsh/path/thefuck.zsh"
-  fuck first-call
-'
 
 run_block 'node.zsh adds ~/.yarn/bin from disk without spawning yarn' \
   HOME="$tmp/yarn-home" LEOS_TEST_ROOT="$root" -- '
@@ -305,8 +297,9 @@ for target_mode in 600 644; do
   fi
 done
 
-# heroku must load BEFORE the other post-compinit entries: its zsh_setup runs a
-# second compinit, which discards every compdef registered up to that point.
+# heroku must load BEFORE the other post-compinit entries: an older CLI's
+# zsh_setup runs a second compinit, which discards every compdef registered up
+# to that point.
 run_block 'path/heroku loads before the other compdef-registering entries' \
   LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" -- '
   setopt err_return no_unset pipe_fail
@@ -320,7 +313,7 @@ run_block 'path/heroku loads before the other compdef-registering entries' \
   source "$LEOS_PROFILES_ZSH/cache.zsh"
   source "$LEOS_PROFILES_ZSH/interactive.zsh"
   h=${loaded[(ie)path/heroku]}
-  for other in path/fzf path/zoxide path/gcloud-completion; do
+  for other in path/fzf path/zoxide; do
     (( h < ${loaded[(ie)$other]} )) || {
       print -u2 -r -- "path/heroku ($h) must load before $other (${loaded[(ie)$other]})"; exit 1
     }
@@ -535,7 +528,7 @@ run_block 'compdef-registering entries must not load from entries.zsh' LEOS_TEST
   entry() { loaded+=("$1"); }
   LEOS_PROFILES="$LEOS_TEST_ROOT"
   source "$LEOS_TEST_ROOT/zsh/entries.zsh"
-  for late in path/fzf path/zoxide path/gcloud-completion; do
+  for late in path/fzf path/zoxide; do
     (( ! ${loaded[(Ie)$late]} )) || {
       print -u2 -r -- "$late is loaded during the PATH phase"; exit 1
     }
@@ -554,7 +547,7 @@ run_block 'interactive.zsh must load the compdef-registering entries' \
   _leos_plugin() { :; }
   source "$LEOS_PROFILES_ZSH/cache.zsh"     # interactive.zsh uses leos-source-cached
   source "$LEOS_PROFILES_ZSH/interactive.zsh"
-  for late in path/fzf path/zoxide path/gcloud-completion path/heroku; do
+  for late in path/fzf path/zoxide path/heroku; do
     (( ${loaded[(Ie)$late]} )) || {
       print -u2 -r -- "$late is not loaded by interactive.zsh"; exit 1
     }
@@ -583,7 +576,7 @@ run_block 'zoxide registers its cd completion when loaded after compinit' \
   }
 '
 
-# Fresh HOME: earlier blocks leave a valid .zcompdump in $tmp, and a cached
+# Fresh HOME: earlier blocks leave a valid completion dump in $tmp, and a cached
 # dump lets even pre-compaudit code pass this test via the compinit -C path.
 insecure_home=$(mktemp -d)
 run_block 'insecure completion path handling' \
@@ -738,6 +731,346 @@ if (( $+commands[python3] )); then
   [[ $out == *'$ '* ]] || fail "TERM=dumb shell did not show the plain prompt: ${(q+)out}"
 else
   print -u2 -r -- 'SKIP: python3 unavailable; pty TERM=dumb test not run'
+fi
+
+# ls/cat wrappers: fake eza/bat/ls/cat record the argv they were run with, so
+# each case shows which program the wrapper chose and with what arguments.
+mkdir -p "$tmp/wrapbin" "$tmp/wrap-home"
+for tool in eza bat ls cat; do
+  print -rl -- '#!/bin/sh' "printf '%s\\n' \"$tool \$*\" >> \"\$WRAP_LOG\"" > "$tmp/wrapbin/$tool"
+  chmod +x "$tmp/wrapbin/$tool"
+done
+print -r -- 'wrapper text' > "$tmp/wrap-home/f"
+run_block 'ls/cat wrappers route each flag to the program that understands it' \
+  HOME="$tmp/wrap-home" WRAP_LOG="$tmp/wrap-log" LEOS_TEST_ROOT="$root" PATH="$tmp/wrapbin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { print -u2 -r -- "$*"; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  alias ls="ls -F" cat="cat -s"     # a system zshrc alias must not break or win
+  source "$LEOS_TEST_ROOT/zsh/env.zsh"
+  check() {   # check <expected argv> <command...>
+    local expected=$1; shift
+    : > "$WRAP_LOG"
+    "$@" > /dev/null
+    [[ "$(<$WRAP_LOG)" == "$expected" ]] || {
+      print -u2 -r -- "$* ran [$(<$WRAP_LOG)], expected [$expected]"; exit 1
+    }
+  }
+  E="eza --color=auto --group-directories-first"
+  check "ls --color=auto -ltr"        ls -ltr
+  check "ls --color=auto -lh d"       ls -lh d
+  check "ls --color=auto -t"          ls -t
+  check "ls --color=auto -1F"         ls -1F
+  check "ls --color=auto -G"          ls -G
+  check "ls --color=auto --sort=time" ls --sort=time
+  check "ls --color=auto --color"     ls --color
+  check "ls --color=auto --help"      ls --help
+  check "$E -la"                      ls -la
+  check "$E -1AdR x y"                ls -1AdR x y
+  check "$E --git"                    ls --git
+  check "$E --tree --level=2 ."       ls --tree --level=2 .
+  check "$E"                          ls
+  check "$E -l -- -t"                 ls -l -- -t
+  check "$E -"                        ls -
+  # Not a terminal here: always the real cat, options or not.
+  check "cat f"                       cat f
+  check "cat -v f"                    cat -v f
+  : > "$WRAP_LOG"; cat f | true
+  [[ "$(<$WRAP_LOG)" == "cat f" ]]
+'
+
+run_block 'without eza ls keeps the platform colour flag' \
+  HOME="$tmp/wrap-home" WRAP_LOG="$tmp/wrap-log" LEOS_TEST_ROOT="$root" PATH="$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { print -u2 -r -- "$*"; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  source "$LEOS_TEST_ROOT/zsh/env.zsh"
+  if (( ! $+commands[eza] )); then
+    (( $+functions[ls] ))
+    [[ $functions[ls] == *"command ls"* && $functions[ls] != *eza* ]]
+    zstyle -s ":fzf-tab:complete:cd:*" fzf-preview preview
+    [[ $preview == *"command ls -1"* ]] || { print -u2 -r -- "preview: $preview"; exit 1; }
+  fi
+'
+
+run_block 'env.zsh keeps inherited colours and pager' \
+  HOME="$tmp/wrap-home" LEOS_TEST_ROOT="$root" PATH="$tmp/wrapbin:$fakepath" \
+  LS_COLORS='di=1;34' LSCOLORS=exfxcxdxbxegedabagacad MANPAGER=less MANROFFOPT=-x -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  source "$LEOS_TEST_ROOT/zsh/env.zsh"
+  [[ $LS_COLORS == "di=1;34" && $LSCOLORS == exfxcxdxbxegedabagacad ]]
+  [[ $MANPAGER == less && $MANROFFOPT == -x ]]
+'
+
+run_block 'env.zsh fills unset colours and pager' \
+  HOME="$tmp/wrap-home" LEOS_TEST_ROOT="$root" PATH="$tmp/wrapbin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  source "$LEOS_TEST_ROOT/zsh/env.zsh"
+  [[ $LS_COLORS == di=36:* && -n $LSCOLORS ]]
+  [[ $MANPAGER == *bat* && $MANROFFOPT == -c ]]
+  [[ ${(t)LS_COLORS} == *export* && ${(t)MANPAGER} == *export* ]]
+  [[ $(alias egrep) == *"grep -E --color=auto"* && $(alias fgrep) == *"grep -F --color=auto"* ]]
+'
+
+# PATH precedence after a full startup: version-manager shims, then
+# ~/.local/bin, then Go workspace bins, then Homebrew.
+mkdir -p "$tmp/order-home/.local/bin" "$tmp/order-home/go/bin" "$tmp/order-home/.pyenv/shims" "$tmp/orderbin"
+print -rl -- '#!/bin/sh' 'case "$1" in' ' shellenv) printf "export HOMEBREW_PREFIX=%s\\n" "$HOME/fake-brew" ;;' \
+  ' --prefix) printf "%s\\n" "$HOME/fake-brew" ;;' ' *) exit 91 ;;' 'esac' > "$tmp/orderbin/brew"
+print -rl -- '#!/bin/sh' 'exit 0' > "$tmp/orderbin/go"
+print -rl -- '#!/bin/sh' '[ "$1" = init ] && printf "%s\\n" "export PATH=\"\$HOME/.pyenv/shims:\${PATH}\""' \
+  > "$tmp/orderbin/pyenv"
+chmod +x "$tmp/orderbin/"*
+run_block 'PATH precedence: shims, ~/.local/bin, go bin, brew' \
+  HOME="$tmp/order-home" ZDOTDIR="$tmp/order-home" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+  PATH="$tmp/orderbin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  source "$LEOS_PROFILES_HOME/zsh/start.zsh" 2>/dev/null
+  shims=${path[(ie)$HOME/.pyenv/shims]} local=${path[(ie)$HOME/.local/bin]}
+  gobin=${path[(ie)$HOME/go/bin]} brew=${path[(ie)${commands[brew]:h}]}
+  (( shims < local && local < gobin && gobin < brew && brew <= $#path )) || {
+    print -u2 -r -- "order: shims=$shims local=$local go=$gobin brew=$brew in ${(j.:.)path}"; exit 1
+  }
+'
+
+# Key bindings survive an EDITOR that would pick vi mode, and the terminal's
+# usual Home/End/Delete/arrow sequences reach the intended widgets.
+run_block 'emacs keymap with navigation keys and prefix history search' \
+  HOME="$tmp" LEOS_PROFILES_ZSH="$root/zsh" EDITOR=vim VISUAL=vim TERM=xterm-256color PATH="$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts-err() { :; }
+  entry() { :; }
+  source "$LEOS_PROFILES_ZSH/cache.zsh"
+  source "$LEOS_PROFILES_ZSH/interactive.zsh" 2>/dev/null
+  [[ $(bindkey -lL main) == *emacs* ]]
+  for pair in "^[[H:beginning-of-line" "^[OH:beginning-of-line" "^[[1~:beginning-of-line" \
+      "^[[F:end-of-line" "^[OF:end-of-line" "^[[4~:end-of-line" "^[[3~:delete-char" \
+      "^[[1;5D:backward-word" "^[[1;5C:forward-word" \
+      "^[[A:up-line-or-beginning-search" "^[OA:up-line-or-beginning-search" \
+      "^[[B:down-line-or-beginning-search"; do
+    seq=${pair%%:*} widget=${pair#*:}
+    [[ $(bindkey -M emacs "$seq") == *" $widget" ]] || {
+      print -u2 -r -- "$seq: $(bindkey -M emacs "$seq"), expected $widget"; exit 1
+    }
+  done
+  (( $+widgets[up-line-or-beginning-search] && $+widgets[down-line-or-beginning-search] ))
+'
+
+# heroku >= 11 skips its own compinit once compdef exists, so the `_heroku` its
+# setup put on fpath must be registered by the profile.
+mkdir -p "$tmp/heroku-home/bin" "$tmp/heroku-home/comp"
+print -rl -- '#compdef heroku' '_heroku() { :; }' > "$tmp/heroku-home/comp/_heroku"
+print -rl -- '#!/bin/sh' 'printf "%s\\n" "fpath=(\"\$HOME/comp\" \$fpath)"' > "$tmp/heroku-home/bin/heroku"
+chmod +x "$tmp/heroku-home/bin/heroku"
+run_block 'heroku completion is registered when its setup skipped compinit' \
+  HOME="$tmp/heroku-home" LEOS_TEST_ROOT="$root" PATH="$tmp/heroku-home/bin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  autoload -Uz compinit; compinit -D -u
+  (( ! ${+_comps[heroku]} ))
+  source "$LEOS_TEST_ROOT/zsh/path/heroku.zsh"
+  [[ ${_comps[heroku]-} == _heroku ]] || { print -u2 -r -- "heroku -> ${_comps[heroku]-unset}"; exit 1; }
+'
+
+# Changing a zoxide variable that alters the generated script must not reuse
+# the script cached under the old value.
+mkdir -p "$tmp/zo-home/bin"
+print -rl -- '#!/bin/sh' 'printf "%s\\n" "typeset -g ZO_GENERATED=${_ZO_ECHO:-none}"' > "$tmp/zo-home/bin/zoxide"
+chmod +x "$tmp/zo-home/bin/zoxide"
+run_block 'zoxide cache identity includes _ZO_ECHO and _ZO_RESOLVE_SYMLINKS' \
+  HOME="$tmp/zo-home" LEOS_TEST_ROOT="$root" PATH="$tmp/zo-home/bin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  source "$LEOS_TEST_ROOT/zsh/path/zoxide.zsh"
+  [[ $ZO_GENERATED == none ]]
+  export _ZO_ECHO=1
+  source "$LEOS_TEST_ROOT/zsh/path/zoxide.zsh"
+  [[ $ZO_GENERATED == 1 ]] || { print -u2 -r -- "stale zoxide init: $ZO_GENERATED"; exit 1; }
+  ZO_GENERATED=
+  export _ZO_RESOLVE_SYMLINKS=1
+  source "$LEOS_TEST_ROOT/zsh/path/zoxide.zsh"
+  # A new identity regenerates (the fake ignores this variable; the cache key must not).
+  cached=($HOME/.cache/leos-profiles/init/*.zsh(N))
+  (( $#cached == 3 )) || { print -u2 -r -- "cache entries: $cached"; exit 1; }
+'
+
+# fnm: a nested shell must not stack its parent's multishell bin, and the
+# daily prune removes only old links whose shell is gone.
+mkdir -p "$tmp/fnm-home/bin"
+print -rl -- '#!/bin/sh' 'd="$HOME/state/fnm_multishells/$$_1"' \
+  'printf "%s\\n" "export FNM_MULTISHELL_PATH=$d" "export PATH=$d/bin:\$PATH"' > "$tmp/fnm-home/bin/fnm"
+chmod +x "$tmp/fnm-home/bin/fnm"
+run_block 'fnm strips inherited multishell bins and schedules the prune' \
+  HOME="$tmp/fnm-home" LEOS_TEST_ROOT="$root" \
+  PATH="/x/fnm_multishells/111_1/bin:$tmp/fnm-home/bin:/y/fnm_multishells/222_2/bin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  typeset -g PRUNED=
+  __leos_fnm_prune_daily() { PRUNED=$1; }
+  source "$LEOS_TEST_ROOT/zsh/path/fnm.zsh"
+  multi=(${(M)path:#*/fnm_multishells/*})
+  (( $#multi == 1 )) && [[ $multi[1] == $HOME/state/fnm_multishells/*/bin ]] || {
+    print -u2 -r -- "multishell entries: $multi"; exit 1
+  }
+  [[ $PRUNED == $HOME/state/fnm_multishells ]]
+'
+
+mkdir -p "$tmp/fnm-prune/fnm_multishells"
+(sleep 0) & dead_pid=$!
+wait $dead_pid
+ms=$tmp/fnm-prune/fnm_multishells
+ln -s /nonexistent "$ms/${dead_pid}_100"            # dead, old: removed
+ln -s /nonexistent "$ms/${dead_pid}_200"            # dead, recent: kept
+ln -s /nonexistent "$ms/$$_300"                     # alive (this test), old: kept
+ln -s /nonexistent "$ms/other-name"                 # not fnm's shape: kept
+: > "$ms/${dead_pid}_400"                           # not a symlink: kept
+touch -h -t 202001010000 "$ms/${dead_pid}_100" "$ms/$$_300" "$ms/other-name" "$ms/${dead_pid}_400"
+run_block 'fnm prune removes only old links of dead shells' \
+  HOME="$tmp/fnm-prune" LEOS_TEST_ROOT="$root" MS="$ms" DEAD="$dead_pid" LIVE="$$" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  __leos_fnm_prune "$MS"
+  [[ ! -L $MS/${DEAD}_100 ]]
+  [[ -L $MS/${DEAD}_200 && -L $MS/${LIVE}_300 && -L $MS/other-name && -f $MS/${DEAD}_400 ]]
+'
+
+run_block '__leos_daily_due runs once per day per name' \
+  HOME="$tmp/daily-home" LEOS_TEST_ROOT="$root" -- '
+  setopt err_return no_unset pipe_fail
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  __leos_daily_due test-job
+  ! __leos_daily_due test-job
+  __leos_daily_due other-job
+  touch -t 202001010000 "$HOME/.cache/leos-profiles/init/test-job"
+  __leos_daily_due test-job
+'
+
+# fzf wiring when fd and bat exist; user values win.
+mkdir -p "$tmp/fzf-home/bin"
+for tool in fzf fd bat; do
+  print -rl -- '#!/bin/sh' 'exit 0' > "$tmp/fzf-home/bin/$tool"
+  chmod +x "$tmp/fzf-home/bin/$tool"
+done
+run_block 'fzf uses fd and a bat preview when they are installed' \
+  HOME="$tmp/fzf-home" LEOS_TEST_ROOT="$root" PATH="$tmp/fzf-home/bin:$fakepath" \
+  FZF_ALT_C_COMMAND=mine -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  source "$LEOS_TEST_ROOT/zsh/path/fzf.zsh"
+  [[ $FZF_DEFAULT_COMMAND == "fd --type f --hidden --follow --exclude .git" ]]
+  [[ $FZF_CTRL_T_COMMAND == "fd --type f --hidden --follow --exclude .git" ]]
+  [[ $FZF_ALT_C_COMMAND == mine ]]
+  [[ $FZF_CTRL_T_OPTS == *"bat "* ]]
+  (( $+functions[_fzf_compgen_path] && $+functions[_fzf_compgen_dir] ))
+  [[ ${(t)FZF_DEFAULT_COMMAND} == *export* ]]
+'
+
+# The completion dump lives in the private cache root, per Zsh version, and
+# dumps earlier versions left in HOME are removed once.
+mkdir -p "$tmp/dump-home/.zcompdump-dir"
+: > "$tmp/dump-home/.zcompdump"
+: > "$tmp/dump-home/.zcompdump.zwc"
+: > "$tmp/dump-home/.zcompdump-host-5.9"
+: > "$tmp/dump-home/.zcompdumpish"
+run_block 'completion dump moves to the cache root; legacy dumps removed once' \
+  HOME="$tmp/dump-home" ZDOTDIR="$tmp/dump-home" LEOS_PROFILES_ZSH="$root/zsh" TERM=xterm-256color PATH="$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts-err() { :; }
+  entry() { :; }
+  source "$LEOS_PROFILES_ZSH/cache.zsh"
+  source "$LEOS_PROFILES_ZSH/interactive.zsh"
+  (( $+functions[compdef] ))
+  [[ -s $HOME/.cache/leos-profiles/zcompdump-$ZSH_VERSION ]]
+  [[ ! -e $HOME/.zcompdump && ! -e $HOME/.zcompdump.zwc && ! -e $HOME/.zcompdump-host-5.9 ]]
+  [[ -e $HOME/.zcompdumpish && -d $HOME/.zcompdump-dir ]]
+  : > "$HOME/.zcompdump"          # some other tool writes one later
+  source "$LEOS_PROFILES_ZSH/interactive.zsh"
+  [[ -e $HOME/.zcompdump ]]       # ...and it is not removed again
+'
+
+mkdir -p "$tmp/unsafe-home/shared"
+chmod 777 "$tmp/unsafe-home/shared"
+run_block 'completion dump falls back to ZDOTDIR when the cache root is unsafe' \
+  HOME="$tmp/unsafe-home" ZDOTDIR="$tmp/unsafe-home/zdot" XDG_CACHE_HOME="$tmp/unsafe-home/shared/cache" \
+  LEOS_PROFILES_ZSH="$root/zsh" TERM=xterm-256color PATH="$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  mkdir -p "$ZDOTDIR"
+  puts-err() { :; }
+  entry() { :; }
+  source "$LEOS_PROFILES_ZSH/cache.zsh"
+  source "$LEOS_PROFILES_ZSH/interactive.zsh" 2>/dev/null
+  [[ -s $ZDOTDIR/.zcompdump && ! -e $XDG_CACHE_HOME ]]
+'
+
+run_block 'aggressive clear-history removes the cache-root dump' \
+  HOME="$tmp/dump-home" LEOS_TEST_ROOT="$root" -- '
+  setopt err_return no_unset pipe_fail
+  HISTFILE="$HOME/.zsh_history"
+  puts() { :; }; puts-err() { :; }; fc() { :; }
+  source "$LEOS_TEST_ROOT/zsh/commands.zsh"
+  clear-history --aggressive
+  dumps=($HOME/.cache/leos-profiles/zcompdump-[0-9]*(N))
+  (( ! $#dumps ))
+  [[ -e $HOME/.cache/leos-profiles/zcompdump-legacy-removed ]]
+'
+
+# No terminal at all (IDE tasks, agents, CI): an interactive shell must start
+# without writing anything to stderr. A fake fzf would announce itself there.
+print -rl -- '#!/bin/sh' 'printf "%s\\n" "print -u2 FZF-WIDGETS-LOADED"' > "$tmp/notty-fzf"
+mkdir -p "$tmp/notty-bin" "$tmp/notty-home"
+mv "$tmp/notty-fzf" "$tmp/notty-bin/fzf"
+chmod +x "$tmp/notty-bin/fzf"
+run_block 'zsh -ic without a terminal prints nothing to stderr' \
+  HOME="$tmp/notty-home" ZDOTDIR="$tmp/ptyrc" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+  PATH="$tmp/notty-bin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  err=$(zsh -dic true 2>&1 >/dev/null </dev/null)
+  [[ -z $err ]] || { print -u2 -r -- "stderr: $err"; exit 1; }
+'
+
+if (( $+commands[python3] )); then
+  # On a terminal, cat with plain operands is bat; any option is the real cat.
+  out=$(/usr/bin/env HOME="$tmp/wrap-home" WRAP_LOG="$tmp/wrap-log" LEOS_TEST_ROOT="$root" \
+    PATH="$tmp/wrapbin:$fakepath" python3 -I "$tmp/pty.py" "$zsh_bin" -dfc '
+      puts() { :; }; puts-err() { :; }
+      source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+      source "$LEOS_TEST_ROOT/zsh/env.zsh"
+      : > "$WRAP_LOG"
+      cat f; cat -n f; cat -- f
+      print -r -- "LOG[$(<$WRAP_LOG)]"')
+  out=${out//$'\r'/}
+  [[ $out == *$'LOG[bat --style=plain --paging=never f\ncat -n f\ncat -- f]'* ]] ||
+    fail "cat wrapper on a terminal: ${(q+)out}"
+fi
+
+# Starship formats show user@host over SSH only, with no dangling `@` locally.
+# CI validates the TOML itself; this checks the modules wiring when a Python
+# with tomllib (3.11+) is available.
+toml_python=
+for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
+  (( $+commands[$candidate] )) || continue
+  $candidate -c 'import tomllib' 2>/dev/null && { toml_python=$candidate; break; }
+done
+if [[ -n $toml_python ]]; then
+  $toml_python -I - "$root/zsh/starship.toml" "$root/zsh/starship-plain.toml" <<'PY' || fail 'Starship hostname wiring'
+import sys, tomllib
+for name in sys.argv[1:]:
+    with open(name, "rb") as handle:
+        config = tomllib.load(handle)
+    assert "$username$hostname" in config["format"], name
+    assert config["hostname"]["ssh_only"] is True, name
+    assert "@" not in config["username"]["format"], name
+    assert "@" in config["hostname"]["format"], name
+PY
 fi
 
 print -r -- 'profile tests: PASS'
