@@ -38,6 +38,10 @@ GPG_MODE="skip"
 GPG_PASSPHRASE_MODE="empty"
 GPG_KEY_ID=""
 GPG_EXPIRY="2y"
+# Commit signing: skip, ssh or gpg. Empty until validate_options resolves
+# it: an explicit --signing, else gpg when a GPG key is selected (what --gpg
+# alone always meant), else skip.
+SIGNING_MODE=""
 INSTALL_FONTS="auto"
 CHANGE_DEFAULT_SHELL="auto"
 DRY_RUN=0
@@ -95,9 +99,14 @@ Options:
   --ssh-config <yes|no>           Write a managed Host github.com block in
                                   ~/.ssh/config (AddKeysToAgent; macOS UseKeychain;
                                   IdentityFile for a key file). Default no
-  --gpg <skip|reuse|generate>     Git commit-signing choice
+  --signing <skip|ssh|gpg>        Sign Git commits with the SSH key (needs --ssh;
+                                  the simpler choice) or the GPG key (needs
+                                  --gpg). Default skip, or gpg when --gpg selects
+                                  a key; skip leaves signing settings alone
+  --gpg <skip|reuse|generate>     GPG-key provisioning choice
   --gpg-key <fingerprint>         Required explicit secret key when --gpg reuse
-  --gpg-passphrase <empty|prompt> New-key passphrase policy
+  --gpg-passphrase <empty|prompt> New-key passphrase policy; prompt is
+                                  recommended and sets up a GUI pinentry
   --gpg-expiry <duration>         New GPG key lifetime: Ny, Nm, Nw or Nd, or
                                   0/never for none (default 2y)
   --fonts <auto|yes|no>           Nerd Fonts policy
@@ -195,6 +204,7 @@ parse_args() {
     --ssh-passphrase) require_value "$1" "${2:-}"; SSH_PASSPHRASE_MODE=$2; shift 2 ;;
     --ssh-config) require_value "$1" "${2:-}"; SSH_CONFIG=$2; shift 2 ;;
     --gpg) require_value "$1" "${2:-}"; GPG_MODE=$2; shift 2 ;;
+    --signing) require_value "$1" "${2:-}"; SIGNING_MODE=$2; shift 2 ;;
     --gpg-key) require_value "$1" "${2:-}"; GPG_KEY_ID=$2; shift 2 ;;
     --gpg-passphrase) require_value "$1" "${2:-}"; GPG_PASSPHRASE_MODE=$2; shift 2 ;;
     --gpg-expiry) require_value "$1" "${2:-}"; GPG_EXPIRY=$2; shift 2 ;;
@@ -268,6 +278,12 @@ validate_options() {
   [[ $SSH_CONFIG == no || $SSH_MODE != skip ]] || die "--ssh-config yes needs an SSH key: --ssh reuse, generate or agent"
   [[ $SSH_PASSPHRASE_MODE == empty || $SSH_PASSPHRASE_MODE == prompt ]] || die "Invalid --ssh-passphrase value"
   [[ $GPG_MODE == skip || $GPG_MODE == reuse || $GPG_MODE == generate ]] || die "Invalid --gpg value"
+  if [[ -z $SIGNING_MODE ]]; then
+    if [[ $GPG_MODE != skip ]]; then SIGNING_MODE=gpg; else SIGNING_MODE=skip; fi
+  fi
+  [[ $SIGNING_MODE == skip || $SIGNING_MODE == ssh || $SIGNING_MODE == gpg ]] || die "Invalid --signing value"
+  [[ $SIGNING_MODE != ssh || $SSH_MODE != skip ]] || die "--signing ssh signs with the SSH key: choose --ssh reuse, generate or agent"
+  [[ $SIGNING_MODE != gpg || $GPG_MODE != skip ]] || die "--signing gpg signs with a GPG key: choose --gpg reuse or generate"
   [[ $GPG_PASSPHRASE_MODE == empty || $GPG_PASSPHRASE_MODE == prompt ]] || die "Invalid --gpg-passphrase value"
   valid_gpg_expiry "$GPG_EXPIRY" || die "Invalid --gpg-expiry value: use Ny, Nm, Nw or Nd (for example 2y), or 0/never for no expiry"
   [[ $INSTALL_FONTS == auto || $INSTALL_FONTS == yes || $INSTALL_FONTS == no ]] || die "Invalid --fonts value"
@@ -489,6 +505,7 @@ inspect_tsv() {
   done
   printf 'group\tcredential\tssh\t%s\n' "$SSH_MODE"
   printf 'group\tcredential\tgpg\t%s\n' "$GPG_MODE"
+  printf 'group\tcredential\tsigning\t%s\n' "$SIGNING_MODE"
   collect_selected_packages
   if (( ${#SELECTED_PACKAGES[@]} > 0 )); then
     for package in "${SELECTED_PACKAGES[@]}"; do printf 'package\t%s\t%s\n' "$OS_FAMILY" "$package"; done
@@ -518,7 +535,6 @@ inspect_tsv() {
     printf 'external\tgithub\tmanual SSH public-key registration and guided SSH/Git protocol configuration\n'
     printf 'file\tssh-known-hosts\t~/.ssh/known_hosts\n'
     if [[ $SSH_MODE == agent ]]; then
-      printf 'behaviour\tssh-agent\tlists the running agent'"'"'s keys (ssh-add -L through SSH_AUTH_SOCK) and uses the one --ssh-key names; no private-key file is read\n'
       printf 'file\tssh-agent-public-key\t%s\n' "$LOCAL_DIR/ssh-agent-key.pub"
     fi
     if [[ $SSH_CONFIG == yes ]]; then
@@ -529,8 +545,22 @@ inspect_tsv() {
     fi
   fi
   if [[ $GPG_MODE != skip ]]; then
-    printf 'action\tgpg\tverify GitHub email, manual public-key registration, and configure commit signing\n'
+    if [[ $SIGNING_MODE == gpg ]]; then
+      printf 'action\tgpg\tverify GitHub email, manual public-key registration, and configure commit signing\n'
+    else
+      printf 'action\tgpg\tverify GitHub email and manual public-key registration; signing settings unchanged (--signing %s)\n' "$SIGNING_MODE"
+    fi
     printf 'external\tgithub\tverified-email query and manual GPG public-key registration\n'
+  fi
+  if [[ $SIGNING_MODE == ssh ]]; then
+    printf 'action\tsigning\tsign Git commits with the SSH key: verify a signed commit locally, then manual GitHub signing-key registration before enabling commit.gpgsign\n'
+    printf 'external\tgithub\tverified-email query and manual SSH signing-key registration\n'
+    printf 'file\tallowed-signers\t%s\n' "$LOCAL_DIR/allowed_signers"
+  fi
+  if gpg_pinentry_needed; then
+    printf 'action\tpinentry\t%s for GPG passphrases outside a terminal, set in a managed block of gpg-agent.conf\n' "$(pinentry_program)"
+    for package in $(pinentry_packages); do printf 'package\t%s\t%s\n' "$OS_FAMILY" "$package"; done
+    printf 'file\tgpg-agent-conf\t%s\n' "$(gpg_agent_conf_path)"
   fi
   if has_csv_item "$SELECTED_STEPS" zsh-config; then
     printf 'action\tzsh-config\tmanaged blocks in the zsh startup files listed as file records\n'
@@ -543,7 +573,10 @@ inspect_tsv() {
   printf 'file\tlocal-profile\t%s\n' "$PROFILE_FILE"
   printf 'file\tlocal-state\t%s\n' "$STATE_FILE"
   if [[ $SSH_MODE == reuse || $SSH_MODE == generate ]]; then printf 'file\tssh-reference\t%s\n' "${SSH_KEY_PATH:-generated path under ~/.ssh}"; fi
-  if [[ $GPG_MODE != skip ]]; then printf 'global\tgit\tuser.signingkey,gpg.format,commit.gpgsign\n'; fi
+  case $SIGNING_MODE in
+    gpg) printf 'global\tgit\tuser.signingkey,gpg.format,commit.gpgsign\n' ;;
+    ssh) printf 'global\tgit\tuser.signingkey,gpg.format,gpg.ssh.allowedSignersFile,commit.gpgsign\n' ;;
+  esac
   if has_csv_item "$SELECTED_STEPS" default-shell && [[ $CHANGE_DEFAULT_SHELL != no ]]; then printf 'irreversible\tlogin-shell\tchsh may require a new login\n'; fi
   inspect_artifacts
   if has_csv_item "$SELECTED_STEPS" pyenv; then printf 'artifact\tgit\tpyenv\t%s\t%s\n' "$PYENV_REPOSITORY" "$PYENV_COMMIT"; fi
@@ -680,6 +713,7 @@ main() {
   install_credential_prerequisites
   provision_ssh
   provision_gpg
+  provision_ssh_signing
   write_profile
   print_terminal_font_hint
   finish_manual_actions

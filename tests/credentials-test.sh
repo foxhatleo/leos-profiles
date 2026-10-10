@@ -18,12 +18,21 @@ fixture=$(mktemp -d /tmp/leos-credentials.XXXXXX)
 trap 'rm -rf -- "$fixture"' EXIT
 export HOME="$fixture/home"
 export TMPDIR="$fixture"
+# gpg-agent.conf and the agent must be the fixture's (~/.gnupg under the
+# fixture HOME), never a keyring GNUPGHOME points at.
+unset GNUPGHOME
 mkdir -p "$HOME" "$fixture/local"
 LOCAL_DIR="$fixture/local"
 PROFILE_FILE="$LOCAL_DIR/profile"
 TARGET="$fixture/profile"
 DRY_RUN=0 COMMAND=apply SSH_MODE=reuse SSH_PASSPHRASE_MODE=empty
-GPG_MODE=reuse GPG_PASSPHRASE_MODE=empty GPG_EXPIRY=2y SIGNING_MODE=skip
+GPG_MODE=reuse GPG_PASSPHRASE_MODE=empty GPG_EXPIRY=2y SIGNING_MODE=gpg
+# GPG signing sets up a pinentry: a fixture program, and a gpgconf that
+# only records the agent restarts.
+printf '#!/bin/sh\necho OK\n' > "$fixture/pinentry"
+chmod 755 "$fixture/pinentry"
+pinentry_program() { printf '%s\n' "$fixture/pinentry"; }
+gpgconf() { printf '%s\n' "$*" >> "$fixture/gpgconf-calls"; }
 SSH_KEY_PATH="$fixture/custom-key"
 GPG_KEY_ID=0123456789ABCDEF0123456789ABCDEF01234567
 GIT_NAME='Test User' GIT_EMAIL=test@example.com
@@ -36,7 +45,7 @@ track_temp() { TEMP_PATHS+=("$1"); }
 prepare_local_dir() { mkdir -p "$LOCAL_DIR"; }
 write_profile() { printf '%s\t%s\n%s\t%s\n' "$SSH_MODE" "$SSH_KEY_PATH" "$GPG_MODE" "$GPG_KEY_ID" > "$PROFILE_FILE"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
-api_keys='' api_gpg='' ordinary_login=tester selected_login=tester auth_ok=yes api_ok=yes signing_ok=yes
+api_keys='' api_gpg='' ordinary_login=tester selected_login=tester auth_ok=yes api_ok=yes signing_ok=yes verify_ok=yes
 # Toggles for the refusal and manual-action branches (CI-9): the login the
 # API reports, the verified emails, and a failure of one endpoint, which gh
 # reports on stderr with exit status 1:
@@ -151,9 +160,11 @@ git() {
   case "$*" in
     'config --global user.name') echo 'Test User' ;;
     'config --global user.email') echo test@example.com ;;
-    '-C '*commit*) [[ $signing_ok == yes ]] ;;
+    '-C '*' commit '*) [[ $signing_ok == yes ]] ;;
+    '-C '*' verify-commit '*) [[ $verify_ok == yes ]] ;;
     '-C '*) return 0 ;;
     'config --global user.signingkey '*|'config --global gpg.format openpgp'|'config --global commit.gpgsign true') return 0 ;;
+    'config --global gpg.format ssh'|'config --global gpg.ssh.allowedSignersFile '*) return 0 ;;
     *) fail "unexpected git call: $*" ;;
   esac
 }
@@ -414,6 +425,109 @@ SSH_MODE=reuse SSH_KEY_PATH="$fixture/custom-key" api_keys='ssh-ed25519 AAAATEST
 unset OS_FAMILY
 rm -rf "$HOME/.ssh"
 
+# --- --signing ssh (MI-2) ---
+ssh_signing_flow() { provision_ssh; provision_ssh_signing; }
+global_signing_calls() { grep -E '^config --global (gpg\.|user\.signingkey|commit\.gpgsign)' "$fixture/git-calls" || true; }
+SSH_MODE=reuse SSH_KEY_PATH="$fixture/custom-key" GPG_MODE=skip SIGNING_MODE=ssh
+api_keys='ssh-ed25519 AAAATEST' api_signing_keys='' signing_ok=yes
+: > "$fixture/git-calls"
+expect_exit 3 ssh_signing_flow
+expect_action register-ssh-signing-key https://github.com/settings/ssh/new
+grep -q $'^manual-action\tregister-ssh-signing-key\t'"$SSH_KEY_PATH.pub"$'\t' "$fixture/output" || fail 'signing key path missing'
+grep -q -- "gh ssh-key add $SSH_KEY_PATH.pub --type signing" "$fixture/error" || fail 'gh signing-key command missing'
+grep -q 'SHA256:TEST' "$fixture/error" || fail 'signing key fingerprint missing'
+[[ $(cat "$LOCAL_DIR/allowed_signers") == 'test@example.com namespaces="git" ssh-ed25519 AAAATEST' ]] ||
+  fail "allowed signers: $(cat "$LOCAL_DIR/allowed_signers")"
+grep -q '^-C .* config gpg.format ssh$' "$fixture/git-calls" || fail 'test repository not set to SSH signing'
+grep -q '^-C .* verify-commit HEAD$' "$fixture/git-calls" || fail 'signed test commit not verified'
+[[ -z $(global_signing_calls) ]] || fail "global signing changed before registration: $(global_signing_calls)"
+# A token that may not read signing keys asks for that scope too.
+gh_fail_endpoint=user/ssh_signing_keys gh_fail_kind=404
+expect_exit 3 ssh_signing_flow
+expect_action github-key-scope 'gh auth refresh -h github.com -s read:public_key,read:ssh_signing_key'
+gh_fail_kind=net
+expect_exit 1 ssh_signing_flow
+expect_no_action
+gh_fail_endpoint='' gh_fail_kind=''
+# A key that cannot sign stops before anything global changes.
+signing_ok=no
+: > "$fixture/git-calls"
+expect_exit 1 ssh_signing_flow
+grep -q 'cannot sign' "$fixture/error" || fail 'signing failure not reported'
+[[ -z $(global_signing_calls) ]] || fail 'global signing changed after a failed test commit'
+signing_ok=yes verify_ok=no
+expect_exit 1 ssh_signing_flow
+grep -q 'could not verify' "$fixture/error" || fail 'verification failure not reported'
+[[ -z $(global_signing_calls) ]] || fail 'global signing changed after a failed verification'
+verify_ok=yes
+# Registered: global SSH signing, with the public key and the allowed signers.
+api_signing_keys='ssh-ed25519 AAAATEST other-comment'
+: > "$fixture/git-calls"
+expect_exit 0 ssh_signing_flow
+[[ $(global_signing_calls) == "config --global gpg.format ssh
+config --global user.signingkey $SSH_KEY_PATH.pub
+config --global gpg.ssh.allowedSignersFile $LOCAL_DIR/allowed_signers
+config --global commit.gpgsign true" ]] || fail "global SSH signing settings: $(global_signing_calls)"
+# An agent key signs through the agent with the key:: form.
+if [[ -S $fixture/agent.sock ]]; then
+  SSH_MODE=agent SSH_KEY_PATH=SHA256:AGENTONE SSH_AUTH_SOCK="$fixture/agent.sock"
+  api_keys='ssh-ed25519 AAAAAGENTONE' api_signing_keys='ssh-ed25519 AAAAAGENTONE'
+  : > "$fixture/git-calls"
+  expect_exit 0 ssh_signing_flow
+  grep -qxF 'config --global user.signingkey key::ssh-ed25519 AAAAAGENTONE' "$fixture/git-calls" || fail 'agent signing key not used'
+  SSH_MODE=reuse SSH_KEY_PATH="$fixture/custom-key" api_keys='ssh-ed25519 AAAATEST'
+fi
+# --signing skip changes no signing setting; a GPG key under --signing ssh
+# is prepared and registered but does not take over signing.
+SIGNING_MODE=skip
+: > "$fixture/git-calls"
+expect_exit 0 ssh_signing_flow
+[[ ! -s $fixture/git-calls ]] || fail "--signing skip touched Git: $(cat "$fixture/git-calls")"
+SIGNING_MODE=ssh GPG_MODE=reuse api_gpg=89ABCDEF01234567
+: > "$fixture/git-calls"
+expect_exit 0 provision_gpg
+[[ -z $(global_signing_calls) ]] || fail "a GPG key changed signing under --signing ssh: $(global_signing_calls)"
+
+# --- pinentry for GPG (MI-1) ---
+agent_conf="$HOME/.gnupg/gpg-agent.conf"
+rm -rf "$HOME/.gnupg" "$fixture/gpgconf-calls"
+SIGNING_MODE=skip GPG_PASSPHRASE_MODE=empty GPG_MODE=reuse
+expect_exit 0 ensure_gpg_pinentry
+[[ ! -e $agent_conf ]] || fail 'pinentry configured without GPG signing or a prompt passphrase'
+for SIGNING_MODE in gpg skip; do
+  [[ $SIGNING_MODE == gpg ]] || GPG_PASSPHRASE_MODE=prompt
+  rm -rf "$HOME/.gnupg" "$fixture/gpgconf-calls"
+  expect_exit 0 ensure_gpg_pinentry
+  [[ $(cat "$agent_conf") == $'# >>> leos-profiles pinentry >>>\npinentry-program '"$fixture/pinentry"$'\n# <<< leos-profiles pinentry <<<' ]] ||
+    fail "gpg-agent.conf: $(cat "$agent_conf")"
+  [[ $(file_mode "$HOME/.gnupg") == 700 ]] || fail 'a new GnuPG home is not private'
+  [[ $(cat "$fixture/gpgconf-calls") == '--kill gpg-agent' ]] || fail 'gpg-agent was not restarted'
+  # Idempotent: no second block and no second restart.
+  expect_exit 0 ensure_gpg_pinentry
+  [[ $(grep -c 'pinentry-program' "$agent_conf") == 1 ]] || fail 'pinentry block duplicated'
+  [[ $(wc -l < "$fixture/gpgconf-calls") -eq 1 ]] || fail 'an unchanged block restarted gpg-agent'
+done
+# Existing settings stay when the block is added.
+printf '%s\n' 'default-cache-ttl 600' > "$agent_conf"
+expect_exit 0 ensure_gpg_pinentry
+[[ $(head -n 1 "$agent_conf") == 'default-cache-ttl 600' ]] || fail 'user gpg-agent settings lost'
+grep -qxF "pinentry-program $fixture/pinentry" "$agent_conf" || fail 'pinentry block not added to an existing file'
+# A pinentry-program of the user's own is kept, and no block is added.
+printf '%s\n' 'pinentry-program /usr/local/bin/my-pinentry' > "$agent_conf"
+: > "$fixture/gpgconf-calls"
+expect_exit 0 ensure_gpg_pinentry
+[[ $(cat "$agent_conf") == 'pinentry-program /usr/local/bin/my-pinentry' ]] || fail "the user's pinentry was overridden"
+[[ ! -s $fixture/gpgconf-calls ]] || fail 'gpg-agent restarted for an unchanged file'
+# A missing pinentry is an error, not a silent no-op.
+rm -f "$agent_conf"
+(
+  pinentry_program() { printf '%s\n' "$fixture/no-such-pinentry"; }
+  expect_exit 1 ensure_gpg_pinentry
+  grep -q 'pinentry for GPG passphrases is not installed' "$fixture/error" || fail 'missing pinentry not reported'
+)
+GPG_PASSPHRASE_MODE=empty SIGNING_MODE=gpg
+SSH_MODE=reuse SSH_KEY_PATH="$fixture/custom-key" api_keys='ssh-ed25519 AAAATEST'
+
 # New GPG keys get the approved expiry (SEC-1).
 GPG_MODE=generate GPG_EXPIRY=2y
 : > "$fixture/gpg-calls"
@@ -450,7 +564,42 @@ GPG_MODE=reuse
   ensure_brew() { fail 'unnecessary Homebrew bootstrap'; }
   run() { local IFS=' '; printf '%s\n' "$*" >> "$fixture/prerequisites"; }
   package_installed() { [[ ,$installed_packages, == *,"$1",* ]]; }
-  SSH_MODE=reuse GPG_MODE=reuse
+  SSH_MODE=reuse GPG_MODE=reuse SIGNING_MODE=skip GPG_PASSPHRASE_MODE=empty
+  # The pinentry package (MI-1) joins them for GPG signing or a prompt
+  # passphrase: the GNOME one in a desktop session, curses elsewhere.
+  (
+    unset DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
+    SIGNING_MODE=gpg installed_packages=''
+    for OS_FAMILY in apt fedora arch; do
+      case $OS_FAMILY in
+        apt) expected='pinentry-curses' desktop='pinentry-gnome3' ;;
+        fedora) expected='pinentry' desktop='pinentry-gnome3' ;;
+        arch) expected='pinentry' desktop='pinentry gcr-4' ;;
+      esac
+      [[ $(credential_package_candidates | tail -n "$(wc -w <<< "$expected")" | paste -sd ' ' -) == "$expected" ]] ||
+        fail "$OS_FAMILY pinentry: $(credential_package_candidates | paste -sd ' ' -)"
+      [[ $(credential_prerequisites_missing) == *" $expected" ]] || fail "$OS_FAMILY: pinentry not disclosed as missing"
+      [[ $(XDG_CURRENT_DESKTOP=GNOME credential_package_candidates | tail -n "$(wc -w <<< "$desktop")" | paste -sd ' ' -) == "$desktop" ]] ||
+        fail "$OS_FAMILY desktop pinentry: $(XDG_CURRENT_DESKTOP=GNOME credential_package_candidates | paste -sd ' ' -)"
+    done
+    # The module's own pinentry_program, not the fixture's.
+    source "$ROOT/installer/credentials.sh"
+    OS_FAMILY=apt
+    [[ $(pinentry_program) == /usr/bin/pinentry-curses ]] || fail 'Linux terminal pinentry path'
+    [[ $(WAYLAND_DISPLAY=wayland-0 pinentry_program) == /usr/bin/pinentry-gnome3 ]] || fail 'Linux desktop pinentry path'
+    OS_FAMILY=macos HOMEBREW_PREFIX="$fixture/brew"
+    [[ $(pinentry_program) == "$fixture/brew/bin/pinentry-mac" ]] || fail 'macOS pinentry path'
+    # macOS installs pinentry-mac with Homebrew when it is missing.
+    ensure_brew() { :; }
+    : > "$fixture/prerequisites"
+    install_credential_prerequisites
+    [[ $(cat "$fixture/prerequisites") == 'brew install pinentry-mac' ]] ||
+      fail "macOS pinentry prerequisites: $(cat "$fixture/prerequisites")"
+    SIGNING_MODE=skip
+    : > "$fixture/prerequisites"
+    install_credential_prerequisites
+    [[ ! -s $fixture/prerequisites ]] || fail 'pinentry installed without GPG signing or a prompt passphrase'
+  )
   for OS_FAMILY in apt fedora arch; do
     case $OS_FAMILY in
       apt) installed_packages=gh; expected_ssh=openssh-client; expected_gpg=gnupg ;;
@@ -537,6 +686,28 @@ if command -v gpg >/dev/null && command -v gpgconf >/dev/null && command -v ssh-
     api_keys=$(command ssh-keygen -y -f "$SSH_KEY_PATH")
     SSH_MODE=reuse
     expect_exit 0 provision_ssh
+    # Real SSH signing (MI-2): ssh-keygen -Y signs the test commit with the
+    # generated key file (user.signingkey is its .pub) and Git verifies it
+    # against the managed allowed-signers file. No agent is consulted.
+    unset SSH_AUTH_SOCK
+    real_ssh_signing() { provision_ssh; provision_ssh_signing; }
+    SIGNING_MODE=ssh GPG_MODE=skip api_signing_keys=''
+    expect_exit 3 real_ssh_signing
+    expect_action register-ssh-signing-key https://github.com/settings/ssh/new
+    if command git config --global --get commit.gpgsign >/dev/null; then fail 'real SSH signing enabled before registration'; fi
+    api_signing_keys=$api_keys
+    expect_exit 0 real_ssh_signing
+    [[ $(command git config --global --get gpg.format) == ssh ]] || fail 'real SSH signing was not enabled'
+    [[ $(command git config --global --get user.signingkey) == "$SSH_KEY_PATH.pub" ]] || fail 'real SSH signing key not set'
+    # The global settings alone sign, and verify, a commit in another repository.
+    command git init -q "$fixture/real-repo"
+    command git -C "$fixture/real-repo" commit -q --allow-empty -m 'Signed by the global settings'
+    command git -C "$fixture/real-repo" verify-commit HEAD >/dev/null 2>&1 ||
+      fail 'a commit signed with the global SSH settings did not verify'
+    for setting in commit.gpgsign gpg.format user.signingkey gpg.ssh.allowedSignersFile; do
+      command git config --global --unset "$setting"
+    done
+    SIGNING_MODE=gpg
     GPG_MODE=generate api_gpg=''
     expect_exit 3 provision_gpg
     GPG_KEY_ID=$(command gpg --batch --with-colons --list-secret-keys 2>/dev/null | awk -F: '/^fpr:/{print $10; exit}')

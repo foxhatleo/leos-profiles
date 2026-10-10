@@ -316,9 +316,20 @@ remove_managed_blocks() {
   fi
   strip_legacy_loader "$ZSH_RC_DIR/.zshrc" loader
   strip_legacy_loader "$ZSH_ENV_DIR/.zshenv" environment
-  # The opt-in credential blocks (--ssh-config yes, GPG pinentry).
+  # The credential blocks (--ssh-config yes, the GPG pinentry).
   if [[ -e $HOME/.ssh/config ]]; then
     remove_managed_block "$HOME/.ssh/config" ssh-config
+  fi
+  local agent_conf="${GNUPGHOME:-$HOME/.gnupg}/gpg-agent.conf"
+  if [[ -e $agent_conf ]]; then
+    block_markers pinentry
+    if grep -qxF "$BLOCK_BEGIN" "$(resolve_config_path "$agent_conf")" 2>/dev/null; then
+      remove_managed_block "$agent_conf" pinentry
+      # gpg-agent reads its configuration only when it starts.
+      if [[ $DRY_RUN -eq 0 ]] && command -v gpgconf >/dev/null 2>&1; then
+        gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+      fi
+    fi
   fi
   say "Packages, plugins and credentials are left untouched; remove those manually if wanted."
 }

@@ -2,37 +2,104 @@
 # Sourced by install.sh; shares the installer context.
 # shellcheck disable=SC2034
 
+# ---------------------------------------------------------------------------
+# pinentry (MI-1). A GPG key with a passphrase asks for it through
+# gpg-agent's pinentry. Commits from an IDE, a GUI or an agent have no
+# terminal, so GPG commit signing and prompt passphrases get a pinentry that
+# needs none: pinentry-mac on macOS, pinentry-gnome3 in a Linux desktop
+# session, pinentry-curses elsewhere. A managed block in gpg-agent.conf
+# selects it.
+gpg_pinentry_needed() {
+  [[ ${GPG_MODE:-skip} != skip ]] || return 1
+  [[ ${SIGNING_MODE:-skip} == gpg || ${GPG_PASSPHRASE_MODE:-empty} == prompt ]]
+}
+
+linux_desktop_session() {
+  [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-}${XDG_CURRENT_DESKTOP:-} ]]
+}
+
+# The packages providing the pinentry, space-separated. Arch's pinentry
+# holds every front end; its GNOME one needs gcr-4 at run time.
+pinentry_packages() {
+  case $OS_FAMILY in
+    macos) printf 'pinentry-mac' ;;
+    apt) if linux_desktop_session; then printf 'pinentry-gnome3'; else printf 'pinentry-curses'; fi ;;
+    fedora) if linux_desktop_session; then printf 'pinentry-gnome3'; else printf 'pinentry'; fi ;;
+    arch) if linux_desktop_session; then printf 'pinentry gcr-4'; else printf 'pinentry'; fi ;;
+  esac
+}
+
+pinentry_program() {
+  local prefix=${HOMEBREW_PREFIX:-}
+  if [[ $OS_FAMILY == macos ]]; then
+    [[ -n $prefix ]] || prefix=$(brew --prefix 2>/dev/null) || prefix=""
+    printf '%s/bin/pinentry-mac\n' "${prefix:-/opt/homebrew}"
+  elif linux_desktop_session; then
+    printf '/usr/bin/pinentry-gnome3\n'
+  else
+    printf '/usr/bin/pinentry-curses\n'
+  fi
+}
+
+gpg_agent_conf_path() { printf '%s/gpg-agent.conf\n' "${GNUPGHOME:-$HOME/.gnupg}"; }
+
+# ensure_gpg_pinentry: point gpg-agent at the pinentry through a managed
+# `pinentry` block, and restart the agent when that changed it. A
+# pinentry-program the user set outside the block is theirs and wins.
+ensure_gpg_pinentry() {
+  gpg_pinentry_needed || return 0
+  local conf home=${GNUPGHOME:-$HOME/.gnupg} program content
+  conf=$(gpg_agent_conf_path)
+  if [[ -f $conf ]] && strip_block pinentry "$(resolve_config_path "$conf")" |
+      grep -Eq '^[[:space:]]*pinentry-program[[:space:]]'; then
+    say "Keeping the pinentry-program already set in $conf"
+    return 0
+  fi
+  program=$(pinentry_program)
+  [[ -x $program ]] || die "The pinentry for GPG passphrases is not installed: $program"
+  content="pinentry-program $program"
+  managed_block_equals "$conf" pinentry "$content" && return 0
+  if [[ ! -d $home ]]; then (umask 077 && mkdir -p "$home"); fi
+  install_managed_block "$conf" pinentry "$content"
+  # gpg-agent reads its configuration only when it starts.
+  gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+  say "GPG passphrases are asked for by $program (managed block in $conf)"
+}
+
+# ---------------------------------------------------------------------------
+# credential_package_candidates: the Linux packages the selected credential
+# modes need, one per line.
+credential_package_candidates() {
+  case $OS_FAMILY in
+    apt) printf '%s\n' gh; [[ $SSH_MODE == skip ]] || printf '%s\n' openssh-client
+      [[ $GPG_MODE == skip ]] || printf '%s\n' gnupg ;;
+    fedora) printf '%s\n' gh; [[ $SSH_MODE == skip ]] || printf '%s\n' openssh-clients
+      [[ $GPG_MODE == skip ]] || printf '%s\n' gnupg2 ;;
+    arch) printf '%s\n' github-cli; [[ $SSH_MODE == skip ]] || printf '%s\n' openssh
+      [[ $GPG_MODE == skip ]] || printf '%s\n' gnupg ;;
+    *) return 0 ;;
+  esac
+  if gpg_pinentry_needed; then
+    # shellcheck disable=SC2046  # a space-separated package list
+    printf '%s\n' $(pinentry_packages)
+  fi
+}
+
 # credential_prerequisites_missing: on Linux, the credential packages this
 # host lacks, space-separated (they install as root).
 credential_prerequisites_missing() {
   [[ $SSH_MODE == skip && $GPG_MODE == skip ]] && return 0
   local package missing=""
-  local -a candidates=()
-  case $OS_FAMILY in
-    apt)
-      candidates=(gh)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh-client)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
-    fedora)
-      candidates=(gh)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh-clients)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg2) ;;
-    arch)
-      candidates=(github-cli)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
-    *) return 0 ;;
-  esac
-  for package in "${candidates[@]}"; do
+  while IFS= read -r package; do
     package_installed "$package" || missing+=" $package"
-  done
+  done < <(credential_package_candidates)
   printf '%s' "${missing# }"
 }
 
 install_credential_prerequisites() {
   [[ $SSH_MODE == skip && $GPG_MODE == skip ]] && return 0
   local package tool
-  local -a candidates=() missing=()
+  local -a missing=()
   case $OS_FAMILY in
     macos)
       if [[ $SSH_MODE != skip ]]; then
@@ -42,25 +109,15 @@ install_credential_prerequisites() {
       fi
       command -v gh >/dev/null 2>&1 || missing+=(gh)
       if [[ $GPG_MODE != skip ]] && ! command -v gpg >/dev/null 2>&1; then missing+=(gnupg); fi
+      if gpg_pinentry_needed && [[ ! -x $(pinentry_program) ]]; then missing+=(pinentry-mac); fi
       pkg_install ${missing[@]+"${missing[@]}"}
       return ;;
-    apt)
-      candidates=(gh)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh-client)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
-    fedora)
-      candidates=(gh)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh-clients)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg2) ;;
-    arch)
-      candidates=(github-cli)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
+    apt|fedora|arch) ;;
     *) die "Unsupported credential package family: $OS_FAMILY" ;;
   esac
-  for package in "${candidates[@]}"; do
+  while IFS= read -r package; do
     package_installed "$package" || missing+=("$package")
-  done
+  done < <(credential_package_candidates)
   (( ${#missing[@]} > 0 )) || return 0
   ensure_sudo
   pkg_install "${missing[@]}"
@@ -190,7 +247,7 @@ credential_manual_action() {
   done
   [[ $action =~ ^[a-z][a-z-]+$ ]] || die "Invalid manual action name"
   case $action in
-    register-ssh-key)
+    register-ssh-key|register-ssh-signing-key)
       material=$(ssh_public_material "$public_path")
       [[ $material == ssh-* || $material == ecdsa-* || $material == sk-* ]] || die "Invalid SSH public material"
       printf 'SSH public key:\n%s\nFingerprint:\n' "$material" >&2
@@ -515,7 +572,8 @@ gpg_generation_guard() {
 provision_gpg() {
   [[ $GPG_MODE == skip ]] && return 0
   if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would prepare the selected GPG key, verify signing and registration, and enable commit signing; missing registration requires manual action"
+    say "Would prepare the selected GPG key, verify signing and registration$([[ $SIGNING_MODE != gpg ]] || printf ', and enable commit signing'); missing registration requires manual action"
+    if gpg_pinentry_needed; then say "Would set pinentry-program $(pinentry_program) in a managed block of $(gpg_agent_conf_path)"; fi
     return 0
   fi
   if [[ $COMMAND == reconcile && $GPG_MODE == generate ]]; then
@@ -532,6 +590,8 @@ provision_gpg() {
   local name=$GIT_NAME email=$GIT_EMAIL keyid="" creation_output exported_key
   [[ -n $name && -n $email ]] || die "Set global git user.name and user.email before GPG provisioning"
   github_email_is_verified "$email" || die "Git email is not verified on the authenticated GitHub account: $email"
+  # Before a prompt-mode key asks for its passphrase, so it already uses it.
+  ensure_gpg_pinentry
   if [[ $GPG_MODE == reuse ]]; then
     [[ $GPG_KEY_ID =~ ^[A-Fa-f0-9]{40}$ || $GPG_KEY_ID =~ ^[A-Fa-f0-9]{64}$ ]] || die "Select a full GPG fingerprint"
     # gpg exits non-zero for an unknown key; that is the "not found" case
@@ -581,10 +641,95 @@ provision_gpg() {
     ! grep -q -- 'PRIVATE KEY' "$export_tmp" || die "GPG export contained private key material; refusing to save it"
     chmod 600 "$export_tmp"
     mv -f "$export_tmp" "$exported_key"
+    local after="Then rerun reconcile."
+    [[ $SIGNING_MODE != gpg ]] || after="Then rerun reconcile; global commit signing is not enabled until registration is verified."
     credential_manual_action register-gpg-key "$exported_key" https://github.com/settings/gpg/new \
-      "Register this public GPG key yourself on GitHub account $GITHUB_LOGIN: $exported_key. Then rerun reconcile; global commit signing is not enabled until registration is verified."
+      "Register this public GPG key yourself on GitHub account $GITHUB_LOGIN: $exported_key (or: gh gpg-key add $exported_key, which needs the admin:gpg_key scope). $after"
   fi
+  # --signing skip or ssh: the key is ready, the signing settings are not ours.
+  [[ $SIGNING_MODE == gpg ]] || return 0
   git config --global user.signingkey "$keyid"
   git config --global gpg.format openpgp
+  git config --global commit.gpgsign true
+}
+
+# ---------------------------------------------------------------------------
+# SSH commit signing (MI-2): Git signs with the selected SSH key
+# (gpg.format ssh), verifies with an allowed-signers file this checkout
+# manages, and GitHub shows the commits as verified once the same public key
+# is registered as a *signing* key, a separate registration from the
+# authentication key.
+allowed_signers_path() { printf '%s\n' "$LOCAL_DIR/allowed_signers"; }
+
+# user.signingkey for the selected key: a key file's public key, from which
+# ssh-keygen -Y sign finds the private key beside it (or the agent's copy),
+# or for an agent key the literal key:: form, which signs through the agent.
+ssh_signing_key_value() {
+  if [[ $SSH_MODE == agent ]]; then
+    printf 'key::%s\n' "$(ssh_public_material "$SSH_PUBLIC_KEY")"
+  else
+    printf '%s\n' "$SSH_PUBLIC_KEY"
+  fi
+}
+
+github_ssh_signing_key_present() {
+  local material remote_keys status=0
+  material=$(ssh_public_material "$1")
+  [[ -n $material ]] || return 1
+  remote_keys=$(github_list user/ssh_signing_keys '.[].key') || status=$?
+  (( status == 0 )) || github_list_failed "$status" user/ssh_signing_keys "SSH signing keys"
+  awk 'NF >= 2 { print $1 " " $2 }' <<< "$remote_keys" | grep -qxF "$material"
+}
+
+provision_ssh_signing() {
+  [[ ${SIGNING_MODE:-skip} == ssh ]] || return 0
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would sign and verify a test commit with the SSH key, check its GitHub signing-key registration, and enable commit signing (gpg.format ssh); missing registration requires manual action"
+    return 0
+  fi
+  [[ -n $SSH_PUBLIC_KEY && -f $SSH_PUBLIC_KEY ]] || die "SSH signing needs the SSH key, which was not prepared"
+  ensure_git_identity
+  local name=$GIT_NAME email=$GIT_EMAIL material signing_key signers signers_tmp temp_repo
+  [[ -n $name && -n $email ]] || die "Set global git user.name and user.email before enabling SSH signing"
+  github_email_is_verified "$email" ||
+    die "Git email is not verified on the authenticated GitHub account: $email (GitHub marks a signed commit verified only for a verified email)"
+  material=$(ssh_public_material "$SSH_PUBLIC_KEY")
+  [[ $material == ssh-* || $material == ecdsa-* || $material == sk-* ]] || die "Invalid SSH public material in $SSH_PUBLIC_KEY"
+  signing_key=$(ssh_signing_key_value)
+  # The allowed-signers file is entirely managed: this identity, git only.
+  prepare_local_dir
+  signers=$(allowed_signers_path)
+  signers_tmp=$(mktemp "$LOCAL_DIR/.allowed-signers.XXXXXX")
+  track_temp "$signers_tmp"
+  printf '%s namespaces="git" %s\n' "$email" "$material" > "$signers_tmp"
+  chmod 600 "$signers_tmp"
+  mv -f "$signers_tmp" "$signers"
+  # Sign, then verify, a commit in a throwaway repository first, as the GPG
+  # path does; global settings change only after both work.
+  temp_repo=$(mktemp -d)
+  track_temp "$temp_repo"
+  git -C "$temp_repo" init -q
+  git -C "$temp_repo" config user.name "$name"
+  git -C "$temp_repo" config user.email "$email"
+  git -C "$temp_repo" config gpg.format ssh
+  git -C "$temp_repo" config user.signingkey "$signing_key"
+  git -C "$temp_repo" config gpg.ssh.allowedSignersFile "$signers"
+  git -C "$temp_repo" config commit.gpgsign true
+  if ! git -C "$temp_repo" commit --allow-empty -S -m 'Verify Leo profiles signing setup' >/dev/null; then
+    rm -rf "$temp_repo"
+    die "The SSH key cannot sign a Git commit (a passphrase-protected key needs a terminal or your agent)"
+  fi
+  if ! git -C "$temp_repo" verify-commit HEAD >/dev/null 2>&1; then
+    rm -rf "$temp_repo"
+    die "Git could not verify the SSH-signed test commit against $signers"
+  fi
+  rm -rf "$temp_repo"
+  if ! github_ssh_signing_key_present "$SSH_PUBLIC_KEY"; then
+    credential_manual_action register-ssh-signing-key "$SSH_PUBLIC_KEY" https://github.com/settings/ssh/new \
+      "Register this public key yourself as a signing key on GitHub account $GITHUB_LOGIN: gh ssh-key add $SSH_PUBLIC_KEY --type signing (needs the admin:ssh_signing_key scope: gh auth refresh -h github.com -s admin:ssh_signing_key), or choose Key type: Signing Key on the settings page. Then rerun reconcile; global commit signing is not enabled until registration is verified."
+  fi
+  git config --global gpg.format ssh
+  git config --global user.signingkey "$signing_key"
+  git config --global gpg.ssh.allowedSignersFile "$signers"
   git config --global commit.gpgsign true
 }

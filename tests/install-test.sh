@@ -6,8 +6,9 @@ set -Eeuo pipefail
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 export LEOS_PROFILES_INSTALL_LIB_ONLY=1
 # The zsh-config tests resolve startup files from ZDOTDIR; never let the
-# developer's own value point them outside the fixture HOME.
-unset ZDOTDIR
+# developer's own value point them outside the fixture HOME. GNUPGHOME
+# likewise: gpg-agent.conf must be the fixture HOME's (~/.gnupg).
+unset ZDOTDIR GNUPGHOME
 # shellcheck source=../install.sh
 source "$ROOT/install.sh"
 
@@ -2215,6 +2216,16 @@ test_preflight_refuses_a_second_gpg_generation() {
   GPG_MODE=reuse
   GPG_KEY_ID=0123456789ABCDEF0123456789ABCDEF01234567
   preflight >/dev/null 2>&1 || fail "reusing the saved key was refused"
+  # --ssh agent without an agent stops before any change, too.
+  SSH_MODE=agent
+  status=0
+  out=$(unset SSH_AUTH_SOCK; preflight 2>&1) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "SSH_AUTH_SOCK is not set"
+  status=0
+  out=$(SSH_AUTH_SOCK="$PROFILE_FILE" preflight 2>&1) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "not a socket"
   rm -rf "$temp"
 }
 
@@ -2235,6 +2246,132 @@ test_profile_reads_optional_credential_keys() {
   GPG_EXPIRY=2y
   read_profile
   assert_equals "$GPG_EXPIRY" 2y
+  rm -rf "$temp"
+}
+
+test_signing_options_and_profile_compatibility() {
+  local temp
+  SELECTED_STEPS=packages
+  # Default: skip, or gpg when a GPG key is selected (what --gpg always meant).
+  SIGNING_MODE='' GPG_MODE=skip
+  validate_options
+  assert_equals "$SIGNING_MODE" skip
+  SIGNING_MODE='' GPG_MODE=generate
+  validate_options
+  assert_equals "$SIGNING_MODE" gpg
+  SIGNING_MODE=skip GPG_MODE=generate
+  validate_options
+  assert_equals "$SIGNING_MODE" skip
+  # Each signing method needs its key; bad values stop.
+  SIGNING_MODE=ssh SSH_MODE=skip
+  if (validate_options) >/dev/null 2>&1; then fail "--signing ssh without an SSH key was accepted"; fi
+  SIGNING_MODE=gpg GPG_MODE=skip
+  if (validate_options) >/dev/null 2>&1; then fail "--signing gpg without a GPG key was accepted"; fi
+  SIGNING_MODE=x509
+  if (validate_options) >/dev/null 2>&1; then fail "an unknown --signing value was accepted"; fi
+  SIGNING_MODE=skip SSH_CONFIG=yes SSH_MODE=skip
+  if (validate_options) >/dev/null 2>&1; then fail "--ssh-config yes without an SSH key was accepted"; fi
+  SSH_CONFIG=maybe SSH_MODE=reuse SSH_KEY_PATH=/fixture/key
+  if (validate_options) >/dev/null 2>&1; then fail "an unknown --ssh-config value was accepted"; fi
+  # --ssh agent takes a selector, not a path, and requires one.
+  SSH_CONFIG=no SSH_MODE=agent SSH_KEY_PATH=''
+  if (validate_options) >/dev/null 2>&1; then fail "--ssh agent without --ssh-key was accepted"; fi
+  SSH_KEY_PATH='SHA256:abc laptop'
+  SIGNING_MODE=ssh
+  validate_options
+  # A saved profile from before --signing: a GPG key keeps signing with it.
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
+  DRY_RUN=0
+  SSH_MODE=skip SSH_KEY_PATH='' GPG_MODE=reuse GPG_KEY_ID=0123456789ABCDEF0123456789ABCDEF01234567 SIGNING_MODE=gpg
+  write_profile
+  grep -v -e '^signing' -e '^ssh-config' -e '^gpg-expiry' "$PROFILE_FILE" > "$temp/old"
+  mv "$temp/old" "$PROFILE_FILE"
+  SIGNING_MODE=''
+  read_profile
+  validate_options
+  assert_equals "$SIGNING_MODE" gpg
+  # Saved choices round-trip.
+  SSH_MODE=agent SSH_KEY_PATH=SHA256:abc SSH_CONFIG=yes SIGNING_MODE=ssh GPG_MODE=skip GPG_KEY_ID=''
+  write_profile
+  SSH_MODE=skip SSH_CONFIG=no SIGNING_MODE=''
+  read_profile
+  assert_equals "$SSH_MODE|$SSH_KEY_PATH|$SSH_CONFIG|$SIGNING_MODE" 'agent|SHA256:abc|yes|ssh'
+  rm -rf "$temp"
+}
+
+test_inspect_discloses_signing_agent_and_pinentry() {
+  local out
+  HOME=$(mktemp -d)
+  track_temp "$HOME"
+  SELECTED_STEPS=""
+  SELECTED_GROUPS=""
+  REQUESTED_STEPS=""
+  REQUESTED_GROUPS=""
+  OS_FAMILY=macos
+  HOMEBREW_PREFIX=/fixture/brew
+  LOCAL_DIR=/fixture/local
+  SSH_MODE=agent SSH_KEY_PATH=SHA256:abc SSH_CONFIG=yes GPG_MODE=skip SIGNING_MODE=ssh
+  validate_options
+  out=$(inspect_tsv)
+  assert_contains "$out" $'group\tcredential\tsigning\tssh'
+  assert_contains "$out" $'global\tgit\tuser.signingkey,gpg.format,gpg.ssh.allowedSignersFile,commit.gpgsign'
+  assert_contains "$out" $'file\tallowed-signers\t/fixture/local/allowed_signers'
+  assert_contains "$out" $'file\tssh-agent-public-key\t/fixture/local/ssh-agent-key.pub'
+  assert_contains "$out" $'behaviour\tssh-agent\t'
+  assert_contains "$out" $'action\tssh-config\tmanaged Host github.com block: AddKeysToAgent yes, UseKeychain yes\n'
+  assert_contains "$out" $'file\tssh-config\t'"$HOME/.ssh/config"
+  assert_contains "$out" $'behaviour\tgit-identity\t'
+  [[ $out != *$'file\tssh-reference\t'* ]] || fail "an agent selector was reported as a key file"
+  [[ $out != *pinentry* ]] || fail "pinentry disclosed without GPG"
+  # GPG signing: the pinentry package and gpg-agent.conf.
+  SSH_MODE=reuse SSH_KEY_PATH=/fixture/id_ed25519 GPG_MODE=generate SIGNING_MODE=gpg
+  out=$(inspect_tsv)
+  assert_contains "$out" $'action\tssh-config\tmanaged Host github.com block: AddKeysToAgent yes, UseKeychain yes, IdentityFile /fixture/id_ed25519'
+  assert_contains "$out" $'global\tgit\tuser.signingkey,gpg.format,commit.gpgsign'
+  assert_contains "$out" $'action\tpinentry\t/fixture/brew/bin/pinentry-mac '
+  assert_contains "$out" $'package\tmacos\tpinentry-mac'
+  assert_contains "$out" $'file\tgpg-agent-conf\t'"$HOME/.gnupg/gpg-agent.conf"
+  # --signing skip with a GPG key: no global signing settings.
+  SIGNING_MODE=skip
+  out=$(inspect_tsv)
+  [[ $out != *$'global\tgit\t'* ]] || fail "--signing skip disclosed global signing settings"
+  assert_contains "$out" $'action\tgpg\tverify GitHub email and manual public-key registration; signing settings unchanged'
+}
+
+test_remove_blocks_and_inventory_cover_credential_blocks() {
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  LOCAL_DIR="$TARGET/local"
+  OS_FAMILY=macos
+  DRY_RUN=0
+  mkdir -p "$HOME/.ssh" "$HOME/.gnupg" "$LOCAL_DIR"
+  printf '%s\n' 'Host *' '  ServerAliveInterval 60' > "$HOME/.ssh/config"
+  printf '%s\n' 'default-cache-ttl 600' > "$HOME/.gnupg/gpg-agent.conf"
+  cp "$HOME/.ssh/config" "$temp/ssh-config.before"
+  cp "$HOME/.gnupg/gpg-agent.conf" "$temp/gpg-agent.before"
+  install_managed_block "$HOME/.ssh/config" ssh-config $'Host github.com\n  AddKeysToAgent yes'
+  install_managed_block "$HOME/.gnupg/gpg-agent.conf" pinentry 'pinentry-program /fixture/pinentry'
+  : > "$LOCAL_DIR/allowed_signers"
+  export GIT_CONFIG_GLOBAL="$temp/gitconfig"
+  out=$(inventory_records)
+  assert_contains "$out" $'item\tmanaged-block\tssh-config\t'"$HOME/.ssh/config"$'\tpresent'
+  assert_contains "$out" $'item\tmanaged-block\tpinentry\t'"$HOME/.gnupg/gpg-agent.conf"$'\tpresent'
+  assert_contains "$out" $'item\tlocal\tallowed_signers\t'"$LOCAL_DIR/allowed_signers"$'\tpresent'
+  assert_contains "$out" $'item\tlocal\tssh-agent-key.pub\t'"$LOCAL_DIR/ssh-agent-key.pub"$'\tabsent'
+  assert_contains "$out" $'item\tgit-global\tgpg.ssh.allowedSignersFile\t'
+  gpgconf() { printf '%s\n' "$*" >> "$temp/gpgconf-calls"; }
+  out=$(DRY_RUN=1 remove_managed_blocks)
+  assert_contains "$out" "Would remove the leos-profiles ssh-config block"
+  assert_contains "$out" "Would remove the leos-profiles pinentry block"
+  [[ ! -e $temp/gpgconf-calls ]] || fail "a dry run restarted gpg-agent"
+  remove_managed_blocks >/dev/null
+  cmp -s "$HOME/.ssh/config" "$temp/ssh-config.before" || fail "remove-blocks left ~/.ssh/config changed: $(cat "$HOME/.ssh/config")"
+  cmp -s "$HOME/.gnupg/gpg-agent.conf" "$temp/gpg-agent.before" || fail "remove-blocks left gpg-agent.conf changed"
+  assert_equals "$(cat "$temp/gpgconf-calls")" '--kill gpg-agent'
   rm -rf "$temp"
 }
 
@@ -2352,6 +2489,9 @@ TESTS=(
   test_gpg_expiry_validation
   test_preflight_refuses_a_second_gpg_generation
   test_profile_reads_optional_credential_keys
+  test_signing_options_and_profile_compatibility
+  test_inspect_discloses_signing_agent_and_pinentry
+  test_remove_blocks_and_inventory_cover_credential_blocks
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do
