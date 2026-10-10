@@ -4,6 +4,7 @@
 .ai/
 docs/*
 !docs/development.md
+!docs/audit-2026-10.md
 ssh-shortcuts.zsh
 zsh/_private.zsh
 zsh/plugins/
