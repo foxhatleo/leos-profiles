@@ -1628,6 +1628,18 @@ test_retired_flags_are_rejected_everywhere() {
   done
 }
 
+test_version_manager_extension_compile_is_best_effort() {
+  local temp err
+  temp=$(mktemp -d)
+  mkdir -p "$temp/root/src"
+  printf '#!/bin/sh\nexit 1\n' > "$temp/root/src/configure"
+  chmod +x "$temp/root/src/configure"
+  DRY_RUN=0
+  err=$(compile_optional_extension "$temp/root" pyenv 2>&1) || fail "a failed optional compile aborted the step"
+  assert_contains "$err" "pyenv's optional native extension did not compile"
+  rm -rf "$temp"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1716,6 +1728,7 @@ TESTS=(
   test_apt_upgrade_keeps_local_configuration
   test_fedora_media_swaps_only_ffmpeg
   test_arch_installs_with_a_synced_database
+  test_version_manager_extension_compile_is_best_effort
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

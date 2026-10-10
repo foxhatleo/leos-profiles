@@ -48,19 +48,25 @@ clone_pinned() {
 
 install_local_bins() { artifact_install rpatool; }
 
+# pyenv and rbenv ship an optional native extension that speeds up their
+# bash code. Both work without it, so a failed compile only warns (BP-10).
+compile_optional_extension() {
+  local root=$1 label=$2
+  [[ $DRY_RUN -eq 0 && -x $root/src/configure ]] || return 0
+  if ! (cd "$root" && src/configure && make -C src); then
+    warn "$label's optional native extension did not compile; $label works without it, a little slower."
+  fi
+}
+
 install_pyenv() {
   clone_pinned "$PYENV_REPOSITORY" "$PYENV_COMMIT" "$HOME/.pyenv" pyenv
-  if [[ $DRY_RUN -eq 0 ]]; then
-    (cd "$HOME/.pyenv" && src/configure && make -C src)
-  fi
+  compile_optional_extension "$HOME/.pyenv" pyenv
 }
 
 install_rbenv() {
   clone_pinned "$RBENV_REPOSITORY" "$RBENV_COMMIT" "$HOME/.rbenv" rbenv
   clone_pinned "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT" "$HOME/.rbenv/plugins/ruby-build" ruby-build
-  if [[ $DRY_RUN -eq 0 && -x $HOME/.rbenv/src/configure ]]; then
-    (cd "$HOME/.rbenv" && src/configure && make -C src)
-  fi
+  compile_optional_extension "$HOME/.rbenv" rbenv
 }
 
 install_plugins() {
