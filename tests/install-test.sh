@@ -1560,6 +1560,8 @@ test_artifact_registry_matches_legacy_lookup() {
   done
   FAKE_MACHINE=riscv64
   ! artifact_asset bun >/dev/null || fail "an unsupported CPU resolved a locked asset"
+  assert_equals "$(component_handler plugins artifacts)" starship
+  assert_equals "$(component_handler zsh-config artifacts)" ""
 }
 
 # Verification checks the version line (archives) or the digest (files), and

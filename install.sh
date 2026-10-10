@@ -415,18 +415,20 @@ run_step() {
 
 # One `artifact direct` record per registry artifact a selected component owns.
 inspect_artifacts() {
-  local name url digest asset
-  while IFS= read -r name; do
-    artifact_row "$name"
-    has_csv_item "$SELECTED_STEPS" "$ARTIFACT_COMPONENT" || continue
-    if ! asset=$(artifact_asset "$name"); then
-      printf 'warning\tno-locked-artifact\t%s has no locked build for %s on %s; the %s component cannot be installed here\n' \
-        "$name" "$OS_FAMILY" "$(uname -m)" "$ARTIFACT_COMPONENT"
-      continue
-    fi
-    IFS=$'\t' read -r url digest <<< "$asset"
-    printf 'artifact\tdirect\t%s\t%s\t%s\n' "$name" "$url" "$digest"
-  done < <(artifact_names)
+  local step name url digest asset
+  local -a steps=()
+  csv_split steps "$SELECTED_STEPS"
+  for step in ${steps[@]+"${steps[@]}"}; do
+    while IFS= read -r name; do
+      if ! asset=$(artifact_asset "$name"); then
+        printf 'warning\tno-locked-artifact\t%s has no locked build for %s on %s; the %s component cannot be installed here\n' \
+          "$name" "$OS_FAMILY" "$(uname -m)" "$step"
+        continue
+      fi
+      IFS=$'\t' read -r url digest <<< "$asset"
+      printf 'artifact\tdirect\t%s\t%s\t%s\n' "$name" "$url" "$digest"
+    done < <(component_handler "$step" artifacts)
+  done
 }
 
 inspect_tsv() {

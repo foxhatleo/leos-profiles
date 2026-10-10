@@ -27,13 +27,20 @@ ROWS
 CANONICAL_STEPS=$(component_registry | awk -F '|' '{printf "%s%s", sep, $1; sep=","}')
 readonly CANONICAL_STEPS
 
+# component_handler <component> <install|verify|signature|artifacts>: the
+# handler function name, or for `artifacts` the names of the direct locked
+# artifacts the component owns (from artifact_registry below), one per line.
 component_handler() {
-  local name=$1 kind=$2 step dependencies groups installer
+  local name=$1 kind=$2 step dependencies groups installer artifact owner rest
   while IFS='|' read -r step dependencies groups installer; do
     [[ $step == "$name" ]] || continue
     case $kind in
       install) printf '%s\n' "$installer" ;;
       verify|signature) printf '%s_%s\n' "$kind" "${step//-/_}" ;;
+      artifacts)
+        while IFS='|' read -r artifact owner rest; do
+          [[ $owner != "$step" ]] || printf '%s\n' "$artifact"
+        done < <(artifact_registry) ;;
       *) die "Unknown component handler kind: $kind" ;;
     esac
     return 0
