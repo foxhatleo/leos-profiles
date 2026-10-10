@@ -780,6 +780,29 @@ run_block 'ls/cat wrappers route each flag to the program that understands it' \
   [[ "$(<$WRAP_LOG)" == "cat f" ]]
 '
 
+# env.zsh settles the locale, the ls colour flag and grep colours from paths,
+# without running locale, ls or grep (each a fork on every shell).
+mkdir -p "$tmp/probe/gnubin"
+for tool in ls grep locale; do
+  print -rl -- '#!/bin/sh' "printf '%s\\n' \"$tool \$*\" >> \"\$PROBE_LOG\"" > "$tmp/probe/gnubin/$tool"
+  chmod +x "$tmp/probe/gnubin/$tool"
+done
+run_block 'env.zsh decides locale, ls and grep colours without running them' \
+  HOME="$tmp/wrap-home" PROBE_LOG="$tmp/probe/log" LEOS_TEST_ROOT="$root" PATH="$tmp/probe/gnubin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  unset LANG LC_ALL
+  puts() { :; }; puts-err() { :; }
+  : > "$PROBE_LOG"
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  source "$LEOS_TEST_ROOT/zsh/env.zsh"
+  [[ ! -s $PROBE_LOG ]] || { print -u2 -r -- "probed: $(<$PROBE_LOG)"; exit 1; }
+  [[ $__leos_ls_color == --color=auto ]]
+  [[ $(alias grep) == *"grep --color=auto"* ]]
+  if [[ -d /usr/lib/locale/C.utf8 || -d /usr/lib/locale/C.UTF-8 || -d /usr/share/locale/C.UTF-8 ]]; then
+    [[ $LANG == C.UTF-8 ]]
+  fi
+'
+
 run_block 'without eza ls keeps the platform colour flag' \
   HOME="$tmp/wrap-home" WRAP_LOG="$tmp/wrap-log" LEOS_TEST_ROOT="$root" PATH="$fakepath" -- '
   setopt err_return no_unset pipe_fail
