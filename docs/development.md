@@ -38,26 +38,33 @@ channel. Schema-1 profiles remain readable and are migrated by an approved
 apply/reconcile. Inspection and dry-run must not write the migration.
 
 The parser must preserve empty TSV columns and dispatch by record type; it must
-not treat prose progress output during apply as inspection records. Relevant
-records include:
+not treat prose progress output during apply as inspection records. Every
+record type the installer emits is listed below; "Columns" counts the record
+type itself, so `meta` has three tab-separated fields. `tests/readonly-test.sh`
+reads this table and fails on an undocumented type or a different count, so
+update it together with the emitter in `install.sh`.
 
-| Record | Remaining columns | Meaning |
-| --- | --- | --- |
-| `meta` | `schema`, `1` | Inspection format version |
-| `platform` | `family`, value | Selected OS package family |
-| `profile` | `root`, path | Authoritative local checkout |
-| `group` | category, name, status | Selected, implied or internal group |
-| `package` | OS family, name | Exact OS package member |
-| `artifact` | source kind, name, URL/repository, digest/commit | Locked executable dependency |
-| `policy` | `node`, `preserve-compatible` | Node selection policy |
-| `runtime` | `node`, version, origin | `preserved-fnm`, `adopted-existing`, or `current-lts` |
-| `migration` | `profile-schema`, `1`, `2` | Pending profile migration |
-| `postcondition` | component, status | Current `verified` or `needed` result |
-| `manual-action` | action, public path, destination | Manual intervention required; process exits 3 |
+| Record | Columns | Remaining columns | Meaning |
+| --- | --- | --- | --- |
+| `meta` | 3 | `schema`, `1` | Inspection format version |
+| `platform` | 3 | `family`, value | Selected OS package family |
+| `profile` | 3 | `root`, path | Authoritative local checkout |
+| `policy` | 3 | `node` or `full-upgrade`, value | Node selection policy; `yes`/`no` host upgrade |
+| `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
+| `migration` | 4 | `profile-schema`, `1`, `2` | Pending profile migration |
+| `group` | 4 | category, name, status | Selected, implied or internal group |
+| `package` | 3 | OS family, name | Exact OS package member |
+| `action` | 3 | step, description | Planned effect of a step or bootstrap |
+| `artifact` | 5 | source kind, name, URL/repository, digest/commit | Locked executable dependency |
+| `external` | 3 | service, description or URL | External service the plan contacts |
+| `file` | 3 | name, path | File the plan reads or writes |
+| `global` | 3 | `git`, keys | Global Git settings the plan configures |
+| `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone |
+| `runtime` | 4 | `node`, version, origin | `preserved-fnm`, `adopted-existing`, or `current-lts` |
+| `postcondition` | 3 | component, status | Current `verified` or `needed` result |
+| `manual-action` | 4 | action, public path, destination | Manual intervention required; process exits 3 |
 
-Other `channel`, `external`, `action`, `file`, and `global` records describe the
-plan's sources and effects. Read the emitter in `install.sh` when extending the
-contract. A runtime preview may report `unresolved` / `resolve-during-apply`.
+A runtime preview may report `unresolved` / `resolve-during-apply`.
 
 Manual-action names cover registration, login, email-read scope, key selection,
 and SSH identity configuration. An empty public-path field is valid for actions
@@ -96,12 +103,37 @@ for file in install.sh installer/*.sh tests/*.sh; do bash -n "$file" || exit; do
 for file in zsh/*.zsh zsh/path/*.zsh tests/*.zsh; do zsh -n "$file" || exit; done
 shellcheck -s bash -x install.sh installer/*.sh tests/*.sh
 bash tests/install-test.sh
+/bin/bash tests/install-test.sh  # macOS: the system Bash 3.2 a fresh Mac runs
 bash tests/apply-dryrun-test.sh
+bash tests/readonly-test.sh
 bash tests/node-test.sh
 bash tests/credentials-test.sh
 zsh tests/profile-test.zsh
 zsh tests/runtime-cache-test.zsh
-python3 tests/rmdsstore_test.py
+/usr/bin/python3 -I tests/rmdsstore_test.py  # macOS; elsewhere python3
+```
+
+These suites use fixtures and are safe on a provisioned workstation: they
+redirect HOME, XDG state and Git configuration, and the CLI-level tests
+(`apply-dryrun-test.sh`, `readonly-test.sh`) run a temporary copy of the public
+checkout so your `local/` state is never read or written. `install-test.sh`
+runs every test in its own subshell, reports each failing test by name and
+removes the temporary files the code under test tracked. `readonly-test.sh`
+snapshots the fixture HOME and checkout around `inspect`, `apply --dry-run` and
+`reconcile --dry-run` through the real CLI, with package managers and network
+clients replaced by PATH fakes, and checks every inspect record against the
+table above. `profile-test.zsh` runs each Zsh block through `run_block`, which
+fails unless the block reaches an appended sentinel: a shell error inside a
+block (an unmatched glob, an unset parameter) otherwise ends `zsh -c` with
+status 0 and silently skips the remaining assertions.
+
+CI also lints the workflows and Python. With the same pinned versions:
+
+```bash
+actionlint                                  # 1.7.12; uses shellcheck from PATH
+zizmor --no-progress .github                # 1.30.1
+ruff check --no-cache util tests            # 0.16.10; ruff.toml targets Python 3.9
+shfmt -d -i 2 -ci install.sh installer/*.sh tests/*.sh  # informational only
 ```
 
 Credential tests mock all GitHub and SSH connections. Where GPG, gpgconf and
@@ -123,6 +155,38 @@ The artifact checks execute downloaded binaries appropriate to the host and
 verify npm package engine declarations. Plugin checks load the combined real
 Zsh plugin integration. CI also checks TOML and fenced Bash in the runbook.
 None of these alone substitutes for actual package installation.
+
+## CI layout
+
+Two workflows split fast feedback from real provisioning:
+
+- `.github/workflows/ci.yml` runs on every push to `master`, every pull request
+  and on demand: Zsh syntax and profile tests, lint (ShellCheck, actionlint,
+  zizmor, ruff; shfmt informational), installer/credential/Node/cache/util
+  suites, locked artifacts, package-map availability on macOS, apt and
+  containers, the dry-run smoke test and the read-only test. The macOS jobs run
+  the Bash suites under `/bin/bash` (3.2) and `rmdsstore_test.py` under
+  `/usr/bin/python3 -I`, the interpreters the installer and `rmdsstore`
+  actually use there. Jobs whose names end in "(gating)" are the branch
+  ruleset's required checks; keep those names stable. The workflow has no
+  paths filter on purpose: a required check that never runs blocks a docs-only
+  pull request. A startup-benchmark job reports timings in its job summary and
+  never fails the run.
+- `.github/workflows/provision.yml` runs the real provisioning matrix weekly
+  (Monday 08:23 UTC), on demand (Actions, "Provision", "Run workflow"), and on
+  pull requests that carry the `provision` label. Add the label when a change
+  affects package maps, provisioning or bootstrap behaviour; every later push
+  to the labelled pull request re-runs it. Docs-only changes do not trigger it.
+  Only `macos-15` runs the recommended scenario with the full `brew upgrade`;
+  the other macOS runners set `LEOS_CI_FULL_UPGRADE=0`, which makes
+  `tests/provisioning-test.sh` pass `--no-full-upgrade` for that scenario.
+  Linux containers keep the full upgrade. These jobs are not required checks.
+
+Both workflows cancel superseded pull-request runs but never cancel runs on
+`master`. Actions are pinned by commit SHA with the exact release in a comment,
+checkouts do not persist credentials, and Dependabot proposes action updates
+weekly. Container images stay on tags on purpose: CI tests each distro's
+current image, which is what a new user installs.
 
 ## Real provisioning coverage
 
@@ -147,7 +211,8 @@ manual end-to-end GitHub registration remains outside automated CI.
 
 The configured matrix is a coverage target. Claim a particular platform passed
 only with that run's evidence, and report failures or unexecuted jobs separately.
-See [the workflow](../.github/workflows/ci.yml) for exact runner labels and gates.
+See [the provisioning workflow](../.github/workflows/provision.yml) for exact
+runner labels and triggers.
 
 ## Updating dependencies
 
@@ -174,8 +239,26 @@ See [the workflow](../.github/workflows/ci.yml) for exact runner labels and gate
 Measure the actual installed public checkout with the benchmark helper:
 
 ```bash
-zsh tests/startup-benchmark.zsh "$HOME/.leos-profiles"
+zsh tests/startup-benchmark.zsh "$HOME/.leos-profiles"        # non-terminal exit time
+zsh tests/startup-benchmark.zsh --pty "$HOME/.leos-profiles"  # first prompt and command lag
 ```
+
+Each mode measures three scenarios: cold (no init cache, no completion dump),
+warm, and aged-dump (warm caches with `~/.zcompdump` backdated two days, which
+takes the full `compinit` path instead of `compinit -C`, as the first shell of
+each day does). The default mode times `zsh -dfi -c 'source start.zsh'` without
+a terminal. `--pty` starts an interactive shell on a pseudo-terminal, as
+[zsh-bench](https://github.com/romkatv/zsh-bench) does, with a wrapper
+`.zshrc` whose ZLE `line-init` hook marks each prompt that is ready for input.
+It reports time to the first prompt and command lag: Enter on an empty line
+until the next prompt is ready, which includes every precmd hook and the
+prompt itself. Where `strace` is available (Linux), the default mode also counts
+process creations and execs in one warm startup; macOS has no unprivileged
+equivalent, so the count is reported as unavailable there. Set
+`LEOS_BENCH_SAMPLES` to change the ten samples per scenario. CI runs both modes
+on Ubuntu and macOS in a non-gating job and writes the results to the job
+summary; hosted runners lack most workstation tools, so read those numbers as
+trends for the same runner image, not as workstation latency.
 
 Record the OS/architecture, Zsh version, checkout revision, installed tools and
 number of samples alongside the output. Compare cold initialization with warm
@@ -195,6 +278,15 @@ real detected PATH tools, excludes private overrides and background rehashes,
 and captures output without a terminal. That run reported a ZLE-option
 diagnostic in the captured environment. These are harness measurements, not a
 claim about every workstation or the supported macOS CI matrix.
+
+A run on 2026-10-10 on the same macOS 27.0 arm64 machine (Zsh 5.9.2, installed
+checkout `7b08822` with its plugins, Homebrew 7.0.9, fnm 1.39.0, Node 24.18.0,
+pnpm 12.10.1, Bun 1.3.11, Starship 1.26.0, same pyenv/rbenv; ten samples)
+measured, without a terminal: cold **1984.2 ms**, warm **364.4 ms**, aged-dump
+**452.1 ms**; and with `--pty`: first prompt cold **2042.8 ms**, warm
+**407.8 ms**, aged-dump **493.6 ms**, command lag **36.0 ms** (20 presses).
+Against zsh-bench's perceptibility thresholds (50 ms first prompt, 10 ms
+command lag) both warm startup and per-prompt cost are well above the target.
 
 The cache hashes binary path, arguments, HOME and version-manager roots. It
 checks ownership, write permissions and symlinks before executing persisted

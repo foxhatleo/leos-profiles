@@ -121,10 +121,20 @@ remove_managed_block() {
   mode=$(file_mode "$file")
   tmp=$(mktemp "$(dirname -- "$file")/.$(basename -- "$file").leos-profiles.tmp.XXXXXX")
   track_temp "$tmp"
+  # install_managed_block puts one blank separator line between non-empty user
+  # content and the block, so drop exactly that shape too: a single blank line
+  # directly after a non-empty line and directly before the begin marker. Any
+  # other blank line is printed unchanged. (A user's own trailing blank line
+  # before the block looks identical and is also dropped; that loses one empty
+  # line, never content, and does not accumulate.)
   awk -v begin="# >>> leos-profiles ${marker} >>>" -v end="# <<< leos-profiles ${marker} <<<" '
-    $0 == begin { skip=1; next }
+    $0 == begin { skip=1; held=0; next }
     $0 == end { skip=0; next }
-    !skip { print }
+    skip { next }
+    held { print ""; held=0 }
+    $0 == "" && last != "" { held=1; last=$0; next }
+    { print; last=$0 }
+    END { if (held) print "" }
   ' "$file" > "$tmp"
   chmod "$mode" "$tmp"
   mv -f "$tmp" "$file"

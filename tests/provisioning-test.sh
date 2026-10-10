@@ -111,8 +111,17 @@ verify_npm_tool pnpm "$PNPM_VERSION"
 
 printf '%s\n' '=== Recommended setup with the default full host upgrade ==='
 # Force fonts on headless Linux too, so this tests their real install path.
-# The default group/package selection and upgrade policy remain unchanged.
-apply --fonts yes --font JetBrainsMono
+# The default group/package selection and upgrade policy remain unchanged,
+# except that LEOS_CI_FULL_UPGRADE=0 opts a runner out of the full host
+# upgrade. CI keeps the full upgrade on one macOS runner and every Linux
+# container; a full `brew upgrade` on each hosted macOS image mostly tests
+# Homebrew and dominates the job time.
+if [[ ${LEOS_CI_FULL_UPGRADE:-1} == 0 ]]; then
+  printf '%s\n' 'LEOS_CI_FULL_UPGRADE=0: recommended setup without the full host upgrade'
+  apply --fonts yes --font JetBrainsMono --no-full-upgrade
+else
+  apply --fonts yes --font JetBrainsMono
+fi
 verify_npm_tool yarn "$YARN_VERSION"
 verify_npm_tool pnpm "$PNPM_VERSION"
 real_shell_smoke "$FIXTURE/first-shell"

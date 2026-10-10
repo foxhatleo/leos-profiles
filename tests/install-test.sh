@@ -9,20 +9,21 @@ export LEOS_PROFILES_INSTALL_LIB_ONLY=1
 # shellcheck source=../install.sh
 source "$ROOT/install.sh"
 
-fail() { printf '%s\n' "FAIL: $*" >&2; exit 1; }
+CURRENT_TEST=""
+fail() { printf '%s\n' "FAIL [${CURRENT_TEST:-?}]: $*" >&2; exit 1; }
 assert_equals() { [[ $1 == "$2" ]] || fail "expected '$2', got '$1'"; }
 assert_contains() { [[ $1 == *"$2"* ]] || fail "expected '$1' to contain '$2'"; }
 
-test_dependency_normalisation() (
+test_dependency_normalisation() {
   SELECTED_STEPS="zsh-config"
   SELECTED_GROUPS="core-utils"
   normalise_dependencies
   order_selected_steps
   assert_equals "$SELECTED_STEPS" "packages,zsh-config"
   assert_contains "$SELECTED_GROUPS" "shell"
-)
+}
 
-test_package_group_selection_is_whole_and_executable() (
+test_package_group_selection_is_whole_and_executable() {
   SELECTED_STEPS=""
   SELECTED_GROUPS=media
   normalise_dependencies
@@ -30,13 +31,13 @@ test_package_group_selection_is_whole_and_executable() (
   SELECTED_STEPS=""
   SELECTED_GROUPS=""
   validate_options
-)
+}
 
 test_default_does_not_include_unreleased_local_bin() {
   [[ $SELECTED_STEPS != *bins* ]] || fail "rpatool bins step must be opt-in"
 }
 
-test_option_validation_rejects_bad_csv_and_implicit_keys() (
+test_option_validation_rejects_bad_csv_and_implicit_keys() {
   SELECTED_STEPS='packages,,plugins'
   if (validate_options) >/dev/null 2>&1; then
     fail "CSV with an empty item was accepted"
@@ -47,9 +48,9 @@ test_option_validation_rejects_bad_csv_and_implicit_keys() (
   if (validate_options) >/dev/null 2>&1; then
     fail "GPG reuse without an explicit fingerprint was accepted"
   fi
-)
+}
 
-test_state_is_input_specific() (
+test_state_is_input_specific() {
   local temp first_signature
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
@@ -64,9 +65,9 @@ test_state_is_input_specific() (
   SELECTED_GROUPS=shell
   ! state_done packages || fail "state leaked across different package selections"
   rm -rf "$temp"
-)
+}
 
-test_recorded_state_must_pass_verification() (
+test_recorded_state_must_pass_verification() {
   local temp installed=0
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
@@ -80,7 +81,7 @@ test_recorded_state_must_pass_verification() (
   run_step bins
   assert_equals "$installed" "1"
   rm -rf "$temp"
-)
+}
 
 test_managed_blocks_are_safe_and_reversible() {
   local temp file first second count mode target link malformed before_repeat
@@ -142,7 +143,7 @@ test_zsh_config_preserves_runtime_expansions() {
   rm -rf "$temp"
 }
 
-test_tar_archive_install_creates_extraction_directory() (
+test_tar_archive_install_creates_extraction_directory() {
   local temp
   temp=$(mktemp -d)
   mkdir -p "$temp/source" "$temp/home"
@@ -157,7 +158,7 @@ test_tar_archive_install_creates_extraction_directory() (
   install_locked_archive_binary starship tar.gz "$HOME/.local/bin/starship"
   [[ -x $HOME/.local/bin/starship ]] || fail "tar archive binary was not installed"
   rm -rf "$temp"
-)
+}
 
 test_platform_assets_are_locked() {
   OS_FAMILY=macos
@@ -194,19 +195,21 @@ test_package_maps_cover_every_supported_os() {
   assert_contains "$(package_list_for_group dev-tools)" "openssl@3"
 }
 
-test_default_font_policy_and_npm_versions_are_locked() {
+# Version literals live only in lock.sh; restating them here would just make
+# every dependency bump edit two files. Check the shape of the locked data.
+test_default_font_policy_and_npm_artifacts_are_locked() {
   OS_FAMILY=macos
   INSTALL_FONTS=auto
   FONT_NAME=""
   font_should_install || fail "automatic font policy should install a font on desktop macOS"
-  assert_equals "$YARN_VERSION" "1.22.22"
-  assert_equals "$PNPM_VERSION" "11.11.0"
+  [[ $YARN_URL == *"/yarn-$YARN_VERSION.tgz" && $PNPM_URL == *"/pnpm-$PNPM_VERSION.tgz" ]] ||
+    fail "npm tarball URLs do not match their locked versions"
   [[ $YARN_URL == https://registry.npmjs.org/yarn/-/* ]] || fail "Yarn tarball URL is not locked"
   [[ $PNPM_URL == https://registry.npmjs.org/pnpm/-/* ]] || fail "pnpm tarball URL is not locked"
   [[ $YARN_SHA256 =~ ^[0-9a-f]{64}$ && $PNPM_SHA256 =~ ^[0-9a-f]{64}$ ]] || fail "npm tarball digest is invalid"
 }
 
-test_macos_package_verification_batches_brew_calls() (
+test_macos_package_verification_batches_brew_calls() {
   OS_FAMILY=macos
   SELECTED_GROUPS=core-utils
   BREW_CALLS_FILE=$(mktemp)
@@ -221,9 +224,9 @@ test_macos_package_verification_batches_brew_calls() (
   selected_packages_installed || fail "installed package set not recognised"
   [[ $(grep -c call "$BREW_CALLS_FILE") == 1 ]] || fail "brew was spawned more than once for verification"
   rm -f "$BREW_CALLS_FILE"
-)
+}
 
-test_font_verifier_accepts_renamed_families() (
+test_font_verifier_accepts_renamed_families() {
   local temp pair font filename
   temp=$(mktemp -d)
   HOME="$temp"
@@ -267,9 +270,9 @@ test_font_verifier_accepts_renamed_families() (
   : > "$XDG_DATA_HOME/fonts/NerdFonts/JetBrainsMonoNerdFont-Regular.ttf"
   font_is_installed || fail "Linux verifier ignored XDG_DATA_HOME"
   rm -rf "$temp"
-)
+}
 
-test_nerd_fonts_installer_ignores_xdg_data_home_on_macos() (
+test_nerd_fonts_installer_ignores_xdg_data_home_on_macos() {
   local temp seen
   temp=$(mktemp -d)
   printf '#!/bin/sh\nprintf "%%s" "${XDG_DATA_HOME-unset}" > "$1"\n' > "$temp/fake-install"
@@ -282,7 +285,7 @@ test_nerd_fonts_installer_ignores_xdg_data_home_on_macos() (
   seen=$(cat "$temp/seen")
   [[ $seen == "$temp/xdg-data" ]] || fail "Linux Nerd Fonts install lost XDG_DATA_HOME"
   rm -rf "$temp"
-)
+}
 
 test_ssh_public_material_ignores_comments() {
   local temp
@@ -292,7 +295,7 @@ test_ssh_public_material_ignores_comments() {
   rm -f "$temp"
 }
 
-test_github_key_checks_fail_closed_on_api_errors() (
+test_github_key_checks_fail_closed_on_api_errors() {
   local temp
   temp=$(mktemp -d)
   printf '%s\n' 'ssh-ed25519 AAAATEST comment' > "$temp/key.pub"
@@ -311,9 +314,9 @@ test_github_key_checks_fail_closed_on_api_errors() (
   [[ $error_output == *'GitHub GPG keys'* ]] \
     || fail "GPG check did not die loudly on an API failure"
   rm -rf "$temp"
-)
+}
 
-test_github_key_checks_still_match_present_keys() (
+test_github_key_checks_still_match_present_keys() {
   local temp
   temp=$(mktemp -d)
   printf '%s\n' 'ssh-ed25519 AAAATEST workstation' > "$temp/key.pub"
@@ -325,15 +328,15 @@ test_github_key_checks_still_match_present_keys() (
   github_gpg_key_present AAAA1234567890ABCDEF \
     || fail "suffix-matching GPG key id not detected"
   rm -rf "$temp"
-)
+}
 
-test_auto_shell_verifier_accepts_an_existing_zsh() (
+test_auto_shell_verifier_accepts_an_existing_zsh() {
   CHANGE_DEFAULT_SHELL=auto
   current_login_shell() { printf '%s\n' /bin/zsh; }
   verify_step default-shell || fail "auto shell policy rejected an existing zsh login shell"
-)
+}
 
-test_shell_matchers_agree_on_non_zsh_shells() (
+test_shell_matchers_agree_on_non_zsh_shells() {
   CHANGE_DEFAULT_SHELL=auto
   # tzsh ends in "zsh" — the old skip matcher (*zsh) accepts it, which is
   # the divergence that hard-failed installs. Both matchers must reject it.
@@ -347,9 +350,9 @@ test_shell_matchers_agree_on_non_zsh_shells() (
   # while the old skip matcher accepts it — this is the failing case pre-fix.
   current_login_shell() { printf '%s\n' zsh; }
   verify_step default-shell || fail "verifier rejected a bare zsh login shell"
-)
+}
 
-test_git_identity_only_fills_missing_fields() (
+test_git_identity_only_fills_missing_fields() {
   local temp
   temp=$(mktemp -d)
   export GIT_CONFIG_GLOBAL="$temp/gitconfig"
@@ -361,9 +364,9 @@ test_git_identity_only_fills_missing_fields() (
   assert_equals "$(git config --global user.name)" 'Existing Name'
   assert_equals "$(git config --global user.email)" 'new@example.invalid'
   rm -rf "$temp"
-)
+}
 
-test_profile_round_trip_and_control_character_rejection() (
+test_profile_round_trip_and_control_character_rejection() {
   local temp mode
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
@@ -394,9 +397,9 @@ test_profile_round_trip_and_control_character_rejection() (
     fail "duplicate profile key was accepted"
   fi
   rm -rf "$temp"
-)
+}
 
-test_local_migration_and_conflict_detection() (
+test_local_migration_and_conflict_detection() {
   local temp
   temp=$(mktemp -d)
   HOME="$temp/home"
@@ -416,9 +419,9 @@ test_local_migration_and_conflict_detection() (
     fail "conflicting local marker values were accepted"
   fi
   rm -rf "$temp"
-)
+}
 
-test_prepare_local_dir_hardens_private_zsh() (
+test_prepare_local_dir_hardens_private_zsh() {
   local temp mode
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
@@ -437,14 +440,13 @@ test_prepare_local_dir_hardens_private_zsh() (
   rm -f "$LOCAL_DIR/private.zsh"
   prepare_local_dir || fail "prepare_local_dir failed without a private.zsh"
   rm -rf "$temp"
-)
+}
 
-test_canonical_lists_are_single_sourced() (
+test_component_registry_rejects_missing_handlers() {
   validate_component_registry
-  assert_equals "$SELECTED_STEPS" "${CANONICAL_STEPS/,bins/}"
   unset -f verify_bun
   if (validate_component_registry) >/dev/null 2>&1; then fail "registry accepted missing verifier"; fi
-)
+}
 
 test_valid_csv_rejects_duplicates() {
   valid_csv "core-utils,shell" "$CANONICAL_GROUPS" || fail "a valid group list was rejected"
@@ -452,19 +454,59 @@ test_valid_csv_rejects_duplicates() {
   ! valid_csv "shell,core-utils,shell" "$CANONICAL_GROUPS" || fail "a repeated group was accepted"
 }
 
-test_node_lts_curl_and_download_have_timeouts() {
-  # A stalled connection must not hang an apply that is holding the lock.
-  local resolve
-  resolve=$(sed -n '/^resolve_node_lts()/,/^}/p' "$ROOT/installer/tools.sh")
-  assert_contains "$resolve" '--connect-timeout 15'
-  assert_contains "$resolve" '--max-time 30'
-  local download
-  download=$(sed -n '/^download_verified()/,/^}/p' "$ROOT/install.sh")
-  assert_contains "$download" '--speed-limit 1'
-  assert_contains "$download" '--speed-time 60'
+# Record the argv each curl call actually receives, one `<arg>` per argument,
+# so adjacent option/value pairs can be asserted without parsing source text.
+record_curl_argv() {
+  CURL_LOG=$1
+  curl() {
+    if [[ ${1:-} == --help ]]; then printf '%s\n' '     --retry-all-errors  Retry all errors'; return 0; fi
+    printf '<%s>' "$@" >> "$CURL_LOG"
+    printf '\n' >> "$CURL_LOG"
+    local out="" want=0 a
+    for a in "$@"; do
+      [[ $want == 1 ]] && { out=$a; want=0; }
+      [[ $a == --output ]] && want=1
+    done
+    if [[ -n $out ]]; then
+      printf 'fixture-bytes' > "$out"
+    else
+      printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv22.1.0\tx\tx\tx\tx\tx\tx\tx\tx\tIron\tfalse\n'
+    fi
+  }
 }
 
-test_lock_without_pid_gives_removal_guidance() (
+test_node_lts_and_download_curl_policy() {
+  # Both calls run while apply holds the lock (and inspect must stay quick), so
+  # a stalled connection must time out, and neither may downgrade to HTTP.
+  local temp argv
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME"
+  record_curl_argv "$temp/curl-argv"
+  SELECTED_STEPS=fnm
+  RESOLVED_NODE_VERSION=""
+  resolve_node_lts
+  assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
+  argv=$(cat "$temp/curl-argv")
+  assert_contains "$argv" '<--proto><=https><--tlsv1.2>'
+  assert_contains "$argv" '<--connect-timeout><15><--max-time><30>'
+  assert_contains "$argv" '<https://nodejs.org/dist/index.tab>'
+
+  : > "$temp/curl-argv"
+  DRY_RUN=0
+  download_verified "https://example.invalid/artifact" \
+    "$(printf 'fixture-bytes' | hash_text)" "$temp/out/artifact"
+  [[ $(cat "$temp/out/artifact") == fixture-bytes ]] || fail "verified download was not installed"
+  argv=$(cat "$temp/curl-argv")
+  assert_contains "$argv" '<--fail>'
+  assert_contains "$argv" '<--proto><=https><--tlsv1.2>'
+  assert_contains "$argv" '<--connect-timeout><15><--speed-limit><1><--speed-time><60>'
+  assert_contains "$argv" '<--retry-all-errors>'
+  [[ $argv == *'<https://example.invalid/artifact>' ]] || fail "the URL is not curl's final argument: $argv"
+  rm -rf "$temp"
+}
+
+test_lock_without_pid_gives_removal_guidance() {
   local temp out
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
@@ -480,9 +522,9 @@ test_lock_without_pid_gives_removal_guidance() (
   [[ $out != *"Another Leo's Profiles operation is running"* ]] ||
     fail "reported a running operation for an ownerless lock"
   rm -rf "$temp"
-)
+}
 
-test_dry_run_still_detects_local_conflicts() (
+test_dry_run_still_detects_local_conflicts() {
   local temp
   temp=$(mktemp -d)
   HOME="$temp/home"
@@ -501,9 +543,9 @@ test_dry_run_still_detects_local_conflicts() (
   # ...and it must not have mutated anything while detecting that.
   [[ -f $HOME/.lp-no-gnu ]] || fail "dry-run removed the legacy marker"
   rm -rf "$temp"
-)
+}
 
-test_remove_blocks_strips_only_the_managed_block() (
+test_remove_blocks_strips_only_the_managed_block() {
   local temp mode
   temp=$(mktemp -d)
   HOME="$temp/home"
@@ -515,13 +557,113 @@ test_remove_blocks_strips_only_the_managed_block() (
   assert_equals "$(< "$HOME/.zshrc")" "$(printf '%s\n%s' 'user line 1' 'user line 2')"
   mode=$(file_mode "$HOME/.zshrc")
   assert_equals "$mode" "644"
-  # Idempotent, and a dry run changes nothing.
+  # Idempotent once the block is gone.
   remove_managed_block "$HOME/.zshrc" loader >/dev/null
   assert_equals "$(< "$HOME/.zshrc")" "$(printf '%s\n%s' 'user line 1' 'user line 2')"
+  # Blank lines that are not the installer's separator survive removal.
+  printf '%s\n' 'top' '' '' '# >>> leos-profiles loader >>>' 'x' '# <<< leos-profiles loader <<<' '' 'tail' > "$HOME/.zshrc"
+  remove_managed_block "$HOME/.zshrc" loader >/dev/null
+  assert_equals "$(cat "$HOME/.zshrc"; printf .)" "$(printf '%s\n' 'top' '' '' '' 'tail'; printf .)"
   rm -rf "$temp"
-)
+}
 
-test_bootstrap_skips_present_tools_on_linux() (
+# Snapshot both managed files with their bytes and modes, so a comparison
+# catches content, permission and trailing-newline changes alike.
+managed_files_snapshot() {
+  local file
+  for file in "$HOME/.zshrc" "$HOME/.zshenv"; do
+    if [[ -e $file ]]; then
+      printf '%s %s %s\n' "$file" "$(file_mode "$file")" "$(sha256 "$file")"
+    else
+      printf '%s absent\n' "$file"
+    fi
+  done
+}
+
+test_remove_blocks_dry_run_changes_nothing() {
+  local temp before out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  mkdir -p "$HOME"
+  printf '%s\n' 'user rc' > "$HOME/.zshrc"
+  printf '%s\n' 'user env' > "$HOME/.zshenv"
+  DRY_RUN=0
+  install_zsh_config
+  before=$(managed_files_snapshot)
+  DRY_RUN=1
+  out=$(remove_managed_blocks)
+  assert_contains "$out" "Would remove the leos-profiles loader block"
+  assert_contains "$out" "Would remove the leos-profiles environment block"
+  assert_equals "$(managed_files_snapshot)" "$before"
+  rm -rf "$temp"
+}
+
+test_install_then_remove_round_trip_is_byte_identical() {
+  local temp content before
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  # Newline-terminated user files, with and without internal blank lines.
+  for content in $'user rc\n' $'# user\n\nexport A=1\nalias b=c\n'; do
+    printf '%s' "$content" > "$HOME/.zshrc"
+    printf '%s' "$content" > "$HOME/.zshenv"
+    chmod 640 "$HOME/.zshrc"
+    before=$(managed_files_snapshot)
+    install_zsh_config
+    verify_step zsh-config || fail "installed managed blocks did not verify"
+    remove_managed_blocks >/dev/null
+    assert_equals "$(managed_files_snapshot)" "$before"
+    rm -f "$HOME"/.zsh*.leos-profiles.bak
+  done
+  rm -rf "$temp"
+}
+
+test_remove_blocks_preserves_a_symlinked_zshrc() {
+  local temp expected
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME" "$temp/dotfiles"
+  printf '%s\n' 'linked rc' > "$temp/dotfiles/zshrc"
+  expected=$(sha256 "$temp/dotfiles/zshrc")
+  ln -s ../dotfiles/zshrc "$HOME/.zshrc"
+  install_zsh_config
+  [[ -L $HOME/.zshrc ]] || fail "install replaced the symlinked .zshrc"
+  assert_contains "$(< "$temp/dotfiles/zshrc")" "# >>> leos-profiles loader >>>"
+  remove_managed_blocks >/dev/null
+  [[ -L $HOME/.zshrc && $(readlink "$HOME/.zshrc") == ../dotfiles/zshrc ]] ||
+    fail "remove-blocks replaced the symlinked .zshrc"
+  assert_equals "$(sha256 "$temp/dotfiles/zshrc")" "$expected"
+  rm -rf "$temp"
+}
+
+test_remove_blocks_cli_dispatch() {
+  # The real entrypoint: argument parsing, the dispatch that skips --yes and the
+  # lock, and both files. LIB_ONLY is exported for this suite, so override it.
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  printf '%s\n' 'user rc' > "$HOME/.zshrc"
+  printf '%s\n' 'user env' > "$HOME/.zshenv"
+  install_zsh_config
+  out=$(LEOS_PROFILES_INSTALL_LIB_ONLY=0 HOME="$HOME" "$BASH" "$ROOT/install.sh" remove-blocks --dry-run)
+  assert_contains "$out" "Would remove the leos-profiles loader block from $HOME/.zshrc"
+  grep -q '^# >>> leos-profiles environment >>>$' "$HOME/.zshenv" || fail "CLI --dry-run removed a block"
+  out=$(LEOS_PROFILES_INSTALL_LIB_ONLY=0 HOME="$HOME" "$BASH" "$ROOT/install.sh" remove-blocks)
+  assert_contains "$out" "Removed the leos-profiles environment block from $HOME/.zshenv"
+  assert_equals "$(cat "$HOME/.zshrc"; printf .)" "$(printf '%s\n.' 'user rc')"
+  assert_equals "$(cat "$HOME/.zshenv"; printf .)" "$(printf '%s\n.' 'user env')"
+  rm -rf "$temp"
+}
+
+test_bootstrap_skips_present_tools_on_linux() {
   local out
   OS_FAMILY=apt
   package_installed() { return 0; }
@@ -536,9 +678,9 @@ test_bootstrap_skips_present_tools_on_linux() (
     # unzip is what install_locked_archive_binary needs for bun and fnm.
     assert_contains "$out" "apt-get"
   fi
-)
+}
 
-test_bootstrap_installs_unzip_when_missing() (
+test_bootstrap_installs_unzip_when_missing() {
   local out
   OS_FAMILY=apt
   package_installed() { return 0; }
@@ -552,9 +694,9 @@ test_bootstrap_installs_unzip_when_missing() (
   out=$( (bootstrap_tools) 2>&1 )
   assert_contains "$out" "unzip"
   [[ $out != *"already present"* ]] || fail "bootstrap skipped while unzip was missing"
-)
+}
 
-test_concurrent_lock_rejection() (
+test_concurrent_lock_rejection() {
   local temp
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
@@ -568,7 +710,7 @@ test_concurrent_lock_rejection() (
     fail "concurrent live lock was accepted"
   fi
   rm -rf "$temp"
-)
+}
 
 test_equivalent_github_origins() {
   github_origins_equivalent 'git@github.com:Owner/Repo.git' 'https://github.com/owner/repo' || fail "SSH/HTTPS origins were not normalized"
@@ -576,7 +718,7 @@ test_equivalent_github_origins() {
   ! github_origins_equivalent 'https://github.com/owner/other' 'https://github.com/owner/repo' || fail "different origins were accepted"
 }
 
-test_recommended_and_whole_group_closure() (
+test_recommended_and_whole_group_closure() {
   [[ $SELECTED_STEPS == 'packages,pyenv,rbenv,bun,fnm,yarn,pnpm,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
   [[ $SELECTED_GROUPS == 'core-utils,shell,dev-tools,languages,media,network,system' ]] || fail "Recommended package groups changed"
   SELECTED_STEPS=bun
@@ -584,9 +726,9 @@ test_recommended_and_whole_group_closure() (
   normalise_dependencies
   assert_contains "$SELECTED_STEPS" packages
   assert_contains "$SELECTED_GROUPS" languages
-)
+}
 
-test_node_lts_is_resolved_once_per_run() (
+test_node_lts_is_resolved_once_per_run() {
   local temp
   temp=$(mktemp -d)
   HOME="$temp/home"
@@ -604,9 +746,9 @@ test_node_lts_is_resolved_once_per_run() (
   resolve_node_lts
   assert_equals "$RESOLVED_NODE_VERSION" v24.2.0
   rm -rf "$temp"
-)
+}
 
-test_node_verifier_checks_the_real_executable() (
+test_node_verifier_checks_the_real_executable() {
   local temp
   temp=$(mktemp -d)
   HOME="$temp/home"
@@ -623,9 +765,9 @@ test_node_verifier_checks_the_real_executable() (
   export FAKE_NODE_VERSION=v20.0.0
   ! verify_step fnm || fail "wrong actual Node executable version was accepted"
   rm -rf "$temp"
-)
+}
 
-test_inspection_schema_and_membership() (
+test_inspection_schema_and_membership() {
   local output
   OS_FAMILY=macos
   SELECTED_STEPS=bun
@@ -643,9 +785,9 @@ test_inspection_schema_and_membership() (
   assert_contains "$output" $'group\tpackage\tlanguages\timplied'
   assert_contains "$output" $'package\tmacos\tnode'
   assert_contains "$output" $'artifact\tdirect\tbun\t'
-)
+}
 
-test_empty_custom_selection_is_inspectable() (
+test_empty_custom_selection_is_inspectable() {
   local output
   OS_FAMILY=macos
   SELECTED_STEPS=""
@@ -655,7 +797,7 @@ test_empty_custom_selection_is_inspectable() (
   output=$(inspect_tsv)
   assert_contains "$output" $'group\tinternal\tbootstrap\tselected'
   [[ $output != *$'package\tmacos\t'* ]] || fail "empty selection emitted a package"
-)
+}
 
 test_runtime_and_signing_invariants() {
   [[ $(grep '^_leos_plugin ' "$ROOT/zsh/interactive.zsh" | tail -n 1) == *zsh-syntax-highlighting* ]] || fail "syntax highlighting is not the last plugin action"
@@ -663,7 +805,7 @@ test_runtime_and_signing_invariants() {
   ! grep -Eq 'npm (install|update).*(claude|codex)|(@anthropic-ai/claude-code|@openai/codex)' "$ROOT/zsh/commands.zsh" || fail "AI updater contains an npm fallback"
 }
 
-test_reconcile_upgrade_policy_and_cleanup() (
+test_reconcile_upgrade_policy_and_cleanup() {
   local temp
   temp=$(mktemp -d)
   COMMAND=""
@@ -685,9 +827,9 @@ test_reconcile_upgrade_policy_and_cleanup() (
   cleanup
   [[ ! -e ${TEMP_PATHS[0]} && ! -e $LOCK_DIR ]] || fail "cleanup left temporary or lock paths"
   rm -rf "$temp"
-)
+}
 
-test_node_lts_returns_nonzero_when_unresolvable() (
+test_node_lts_returns_nonzero_when_unresolvable() {
   local temp
   temp=$(mktemp -d)
   HOME="$temp/home"
@@ -698,9 +840,9 @@ test_node_lts_returns_nonzero_when_unresolvable() (
   if resolve_node_lts; then fail "resolve_node_lts must return nonzero (not die) when unresolvable"; fi
   [[ -z $RESOLVED_NODE_VERSION ]] || fail "resolve_node_lts set a version despite failing"
   rm -rf "$temp"
-)
+}
 
-test_inspect_degrades_when_node_lts_unresolvable() (
+test_inspect_degrades_when_node_lts_unresolvable() {
   local output
   OS_FAMILY=macos
   SELECTED_STEPS=fnm
@@ -713,9 +855,9 @@ test_inspect_degrades_when_node_lts_unresolvable() (
   verify_step() { return 1; }
   output=$(inspect_tsv)
   assert_contains "$output" $'runtime\tnode\tunresolved\tresolve-during-apply'
-)
+}
 
-test_packages_full_upgrade_rerun_has_no_false_warning() (
+test_packages_full_upgrade_rerun_has_no_false_warning() {
   local temp err
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
@@ -731,9 +873,9 @@ test_packages_full_upgrade_rerun_has_no_false_warning() (
   err=$(run_step packages 2>&1 >/dev/null)
   [[ $err != *"failed verification"* ]] || fail "packages full-upgrade re-run emitted a false verification warning"
   rm -rf "$temp"
-)
+}
 
-test_stale_lock_fails_closed_with_guidance() (
+test_stale_lock_fails_closed_with_guidance() {
   local temp dead_pid err
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
@@ -752,9 +894,9 @@ test_stale_lock_fails_closed_with_guidance() (
   assert_contains "$err" "$LOCK_DIR"
   [[ $(sed -n '1p' "$LOCK_DIR/pid") == "$dead_pid" ]] || fail "acquire_lock mutated the stale lock instead of leaving it for the operator"
   rm -rf "$temp"
-)
+}
 
-test_sparse_font_checkout_is_blobless_and_scoped() (
+test_sparse_font_checkout_is_blobless_and_scoped() {
   local temp log
   temp=$(mktemp -d)
   log="$temp/git-args"
@@ -773,7 +915,7 @@ test_sparse_font_checkout_is_blobless_and_scoped() (
   assert_contains "$(cat "$log")" "sparse-checkout set install.sh bin patched-fonts/JetBrainsMono"
   assert_contains "$(cat "$log")" "fetch --depth 1 --filter=blob:none origin DEADBEEFCOMMIT"
   rm -rf "$temp"
-)
+}
 
 test_no_os_release_upgrade_tooling() {
   # Full-upgrade / checkup paths must stay in-release. Strip comments first so
@@ -787,7 +929,7 @@ test_no_os_release_upgrade_tooling() {
   done
 }
 
-test_download_verified_rejects_bad_digest() (
+test_download_verified_rejects_bad_digest() {
   local temp err
   temp=$(mktemp -d)
   DRY_RUN=0
@@ -808,9 +950,9 @@ test_download_verified_rejects_bad_digest() (
   assert_contains "$err" "Digest mismatch"
   [[ ! -e $temp/artifact ]] || fail "download_verified kept the artifact despite a digest mismatch"
   rm -rf "$temp"
-)
+}
 
-test_macos_package_verification_detects_missing() (
+test_macos_package_verification_detects_missing() {
   OS_FAMILY=macos
   SELECTED_GROUPS=core-utils
   brew() {
@@ -822,9 +964,9 @@ test_macos_package_verification_detects_missing() (
     done
   }
   ! selected_packages_installed || fail "a missing package was reported as fully installed"
-)
+}
 
-test_set_default_shell_auto_skips_existing_zsh() (
+test_set_default_shell_auto_skips_existing_zsh() {
   CHANGE_DEFAULT_SHELL=auto
   DRY_RUN=1
   OS_FAMILY=apt
@@ -833,9 +975,9 @@ test_set_default_shell_auto_skips_existing_zsh() (
   out=$(set_default_shell)
   assert_contains "$out" "already zsh"
   [[ $out != *chsh* ]] || fail "auto policy ran chsh though the login shell is already zsh"
-)
+}
 
-test_set_default_shell_uses_unprivileged_chsh_on_linux() (
+test_set_default_shell_uses_unprivileged_chsh_on_linux() {
   CHANGE_DEFAULT_SHELL=yes
   DRY_RUN=1
   OS_FAMILY=apt
@@ -844,9 +986,9 @@ test_set_default_shell_uses_unprivileged_chsh_on_linux() (
   out=$(set_default_shell 2>&1)
   assert_contains "$out" "chsh -s"
   [[ $out != *"sudo chsh"* ]] || fail "the Linux default-shell path used sudo chsh"
-)
+}
 
-test_set_default_shell_uses_sudo_chsh_on_macos() (
+test_set_default_shell_uses_sudo_chsh_on_macos() {
   CHANGE_DEFAULT_SHELL=yes
   DRY_RUN=1
   OS_FAMILY=macos
@@ -855,9 +997,9 @@ test_set_default_shell_uses_sudo_chsh_on_macos() (
   local out
   out=$(set_default_shell 2>&1)
   assert_contains "$out" "sudo chsh -s"
-)
+}
 
-test_known_hosts_matches_metadata_and_dedupes() (
+test_known_hosts_matches_metadata_and_dedupes() {
   local temp
   temp=$(mktemp -d)
   HOME="$temp"
@@ -875,59 +1017,92 @@ test_known_hosts_matches_metadata_and_dedupes() (
   ensure_github_known_hosts                                  # re-run must not duplicate
   [[ $(cat "$HOME/.ssh/known_hosts") == "$written" ]] || fail "re-running duplicated known_hosts entries"
   rm -rf "$temp"
-)
+}
 
-test_default_does_not_include_unreleased_local_bin
-test_option_validation_rejects_bad_csv_and_implicit_keys
-test_dependency_normalisation
-test_package_group_selection_is_whole_and_executable
-test_state_is_input_specific
-test_recorded_state_must_pass_verification
-test_managed_blocks_are_safe_and_reversible
-test_zsh_config_preserves_runtime_expansions
-test_tar_archive_install_creates_extraction_directory
-test_platform_assets_are_locked
-test_package_maps_cover_every_supported_os
-test_default_font_policy_and_npm_versions_are_locked
-test_macos_package_verification_batches_brew_calls
-test_font_verifier_accepts_renamed_families
-test_nerd_fonts_installer_ignores_xdg_data_home_on_macos
-test_ssh_public_material_ignores_comments
-test_github_key_checks_fail_closed_on_api_errors
-test_github_key_checks_still_match_present_keys
-test_auto_shell_verifier_accepts_an_existing_zsh
-test_shell_matchers_agree_on_non_zsh_shells
-test_git_identity_only_fills_missing_fields
-test_profile_round_trip_and_control_character_rejection
-test_local_migration_and_conflict_detection
-test_prepare_local_dir_hardens_private_zsh
-test_canonical_lists_are_single_sourced
-test_valid_csv_rejects_duplicates
-test_node_lts_curl_and_download_have_timeouts
-test_lock_without_pid_gives_removal_guidance
-test_dry_run_still_detects_local_conflicts
-test_remove_blocks_strips_only_the_managed_block
-test_bootstrap_skips_present_tools_on_linux
-test_bootstrap_installs_unzip_when_missing
-test_concurrent_lock_rejection
-test_equivalent_github_origins
-test_recommended_and_whole_group_closure
-test_node_lts_is_resolved_once_per_run
-test_node_verifier_checks_the_real_executable
-test_inspection_schema_and_membership
-test_empty_custom_selection_is_inspectable
-test_runtime_and_signing_invariants
-test_reconcile_upgrade_policy_and_cleanup
-test_node_lts_returns_nonzero_when_unresolvable
-test_inspect_degrades_when_node_lts_unresolvable
-test_packages_full_upgrade_rerun_has_no_false_warning
-test_stale_lock_fails_closed_with_guidance
-test_sparse_font_checkout_is_blobless_and_scoped
-test_no_os_release_upgrade_tooling
-test_download_verified_rejects_bad_digest
-test_macos_package_verification_detects_missing
-test_set_default_shell_auto_skips_existing_zsh
-test_set_default_shell_uses_unprivileged_chsh_on_linux
-test_set_default_shell_uses_sudo_chsh_on_macos
-test_known_hosts_matches_metadata_and_dedupes
-printf '%s\n' 'install tests: PASS'
+# Explicit order: each test runs in its own subshell, so stubs and globals it
+# changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
+# later tests, and every test starts from install.sh's defaults. An EXIT trap
+# runs the installer's own cleanup, removing temporary files a test's code
+# under test tracked (ensure_github_known_hosts, download_verified, ...).
+TESTS=(
+  test_default_does_not_include_unreleased_local_bin
+  test_option_validation_rejects_bad_csv_and_implicit_keys
+  test_dependency_normalisation
+  test_package_group_selection_is_whole_and_executable
+  test_state_is_input_specific
+  test_recorded_state_must_pass_verification
+  test_managed_blocks_are_safe_and_reversible
+  test_zsh_config_preserves_runtime_expansions
+  test_tar_archive_install_creates_extraction_directory
+  test_platform_assets_are_locked
+  test_package_maps_cover_every_supported_os
+  test_default_font_policy_and_npm_artifacts_are_locked
+  test_macos_package_verification_batches_brew_calls
+  test_font_verifier_accepts_renamed_families
+  test_nerd_fonts_installer_ignores_xdg_data_home_on_macos
+  test_ssh_public_material_ignores_comments
+  test_github_key_checks_fail_closed_on_api_errors
+  test_github_key_checks_still_match_present_keys
+  test_auto_shell_verifier_accepts_an_existing_zsh
+  test_shell_matchers_agree_on_non_zsh_shells
+  test_git_identity_only_fills_missing_fields
+  test_profile_round_trip_and_control_character_rejection
+  test_local_migration_and_conflict_detection
+  test_prepare_local_dir_hardens_private_zsh
+  test_component_registry_rejects_missing_handlers
+  test_valid_csv_rejects_duplicates
+  test_node_lts_and_download_curl_policy
+  test_lock_without_pid_gives_removal_guidance
+  test_dry_run_still_detects_local_conflicts
+  test_remove_blocks_strips_only_the_managed_block
+  test_remove_blocks_dry_run_changes_nothing
+  test_install_then_remove_round_trip_is_byte_identical
+  test_remove_blocks_preserves_a_symlinked_zshrc
+  test_remove_blocks_cli_dispatch
+  test_bootstrap_skips_present_tools_on_linux
+  test_bootstrap_installs_unzip_when_missing
+  test_concurrent_lock_rejection
+  test_equivalent_github_origins
+  test_recommended_and_whole_group_closure
+  test_node_lts_is_resolved_once_per_run
+  test_node_verifier_checks_the_real_executable
+  test_inspection_schema_and_membership
+  test_empty_custom_selection_is_inspectable
+  test_runtime_and_signing_invariants
+  test_reconcile_upgrade_policy_and_cleanup
+  test_node_lts_returns_nonzero_when_unresolvable
+  test_inspect_degrades_when_node_lts_unresolvable
+  test_packages_full_upgrade_rerun_has_no_false_warning
+  test_stale_lock_fails_closed_with_guidance
+  test_sparse_font_checkout_is_blobless_and_scoped
+  test_no_os_release_upgrade_tooling
+  test_download_verified_rejects_bad_digest
+  test_macos_package_verification_detects_missing
+  test_set_default_shell_auto_skips_existing_zsh
+  test_set_default_shell_uses_unprivileged_chsh_on_linux
+  test_set_default_shell_uses_sudo_chsh_on_macos
+  test_known_hosts_matches_metadata_and_dedupes
+)
+failed=()
+for CURRENT_TEST in "${TESTS[@]}"; do
+  # set +e here and set -e inside: a subshell used as an `if` condition would
+  # run with errexit disabled, hiding failures the tests rely on errexit for.
+  set +e
+  (
+    set -e
+    trap cleanup EXIT
+    "$CURRENT_TEST"
+  )
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    printf 'FAILED: %s (exit %s)\n' "$CURRENT_TEST" "$status" >&2
+    failed+=("$CURRENT_TEST")
+  fi
+done
+if (( ${#failed[@]} > 0 )); then
+  printf 'install tests: %s of %s failed:\n' "${#failed[@]}" "${#TESTS[@]}" >&2
+  printf '  %s\n' "${failed[@]}" >&2
+  exit 1
+fi
+printf 'install tests: PASS (%s tests)\n' "${#TESTS[@]}"
