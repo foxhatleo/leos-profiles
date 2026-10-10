@@ -560,6 +560,106 @@ test_remove_blocks_strips_only_the_managed_block() {
   # Idempotent once the block is gone.
   remove_managed_block "$HOME/.zshrc" loader >/dev/null
   assert_equals "$(< "$HOME/.zshrc")" "$(printf '%s\n%s' 'user line 1' 'user line 2')"
+  # Blank lines that are not the installer's separator survive removal.
+  printf '%s\n' 'top' '' '' '# >>> leos-profiles loader >>>' 'x' '# <<< leos-profiles loader <<<' '' 'tail' > "$HOME/.zshrc"
+  remove_managed_block "$HOME/.zshrc" loader >/dev/null
+  assert_equals "$(cat "$HOME/.zshrc"; printf .)" "$(printf '%s\n' 'top' '' '' '' 'tail'; printf .)"
+  rm -rf "$temp"
+}
+
+# Snapshot both managed files with their bytes and modes, so a comparison
+# catches content, permission and trailing-newline changes alike.
+managed_files_snapshot() {
+  local file
+  for file in "$HOME/.zshrc" "$HOME/.zshenv"; do
+    if [[ -e $file ]]; then
+      printf '%s %s %s\n' "$file" "$(file_mode "$file")" "$(sha256 "$file")"
+    else
+      printf '%s absent\n' "$file"
+    fi
+  done
+}
+
+test_remove_blocks_dry_run_changes_nothing() {
+  local temp before out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  mkdir -p "$HOME"
+  printf '%s\n' 'user rc' > "$HOME/.zshrc"
+  printf '%s\n' 'user env' > "$HOME/.zshenv"
+  DRY_RUN=0
+  install_zsh_config
+  before=$(managed_files_snapshot)
+  DRY_RUN=1
+  out=$(remove_managed_blocks)
+  assert_contains "$out" "Would remove the leos-profiles loader block"
+  assert_contains "$out" "Would remove the leos-profiles environment block"
+  assert_equals "$(managed_files_snapshot)" "$before"
+  rm -rf "$temp"
+}
+
+test_install_then_remove_round_trip_is_byte_identical() {
+  local temp content before
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  # Newline-terminated user files, with and without internal blank lines.
+  for content in $'user rc\n' $'# user\n\nexport A=1\nalias b=c\n'; do
+    printf '%s' "$content" > "$HOME/.zshrc"
+    printf '%s' "$content" > "$HOME/.zshenv"
+    chmod 640 "$HOME/.zshrc"
+    before=$(managed_files_snapshot)
+    install_zsh_config
+    verify_step zsh-config || fail "installed managed blocks did not verify"
+    remove_managed_blocks >/dev/null
+    assert_equals "$(managed_files_snapshot)" "$before"
+    rm -f "$HOME"/.zsh*.leos-profiles.bak
+  done
+  rm -rf "$temp"
+}
+
+test_remove_blocks_preserves_a_symlinked_zshrc() {
+  local temp expected
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME" "$temp/dotfiles"
+  printf '%s\n' 'linked rc' > "$temp/dotfiles/zshrc"
+  expected=$(sha256 "$temp/dotfiles/zshrc")
+  ln -s ../dotfiles/zshrc "$HOME/.zshrc"
+  install_zsh_config
+  [[ -L $HOME/.zshrc ]] || fail "install replaced the symlinked .zshrc"
+  assert_contains "$(< "$temp/dotfiles/zshrc")" "# >>> leos-profiles loader >>>"
+  remove_managed_blocks >/dev/null
+  [[ -L $HOME/.zshrc && $(readlink "$HOME/.zshrc") == ../dotfiles/zshrc ]] ||
+    fail "remove-blocks replaced the symlinked .zshrc"
+  assert_equals "$(sha256 "$temp/dotfiles/zshrc")" "$expected"
+  rm -rf "$temp"
+}
+
+test_remove_blocks_cli_dispatch() {
+  # The real entrypoint: argument parsing, the dispatch that skips --yes and the
+  # lock, and both files. LIB_ONLY is exported for this suite, so override it.
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  printf '%s\n' 'user rc' > "$HOME/.zshrc"
+  printf '%s\n' 'user env' > "$HOME/.zshenv"
+  install_zsh_config
+  out=$(LEOS_PROFILES_INSTALL_LIB_ONLY=0 HOME="$HOME" "$BASH" "$ROOT/install.sh" remove-blocks --dry-run)
+  assert_contains "$out" "Would remove the leos-profiles loader block from $HOME/.zshrc"
+  grep -q '^# >>> leos-profiles environment >>>$' "$HOME/.zshenv" || fail "CLI --dry-run removed a block"
+  out=$(LEOS_PROFILES_INSTALL_LIB_ONLY=0 HOME="$HOME" "$BASH" "$ROOT/install.sh" remove-blocks)
+  assert_contains "$out" "Removed the leos-profiles environment block from $HOME/.zshenv"
+  assert_equals "$(cat "$HOME/.zshrc"; printf .)" "$(printf '%s\n.' 'user rc')"
+  assert_equals "$(cat "$HOME/.zshenv"; printf .)" "$(printf '%s\n.' 'user env')"
   rm -rf "$temp"
 }
 
@@ -955,6 +1055,10 @@ TESTS=(
   test_lock_without_pid_gives_removal_guidance
   test_dry_run_still_detects_local_conflicts
   test_remove_blocks_strips_only_the_managed_block
+  test_remove_blocks_dry_run_changes_nothing
+  test_install_then_remove_round_trip_is_byte_identical
+  test_remove_blocks_preserves_a_symlinked_zshrc
+  test_remove_blocks_cli_dispatch
   test_bootstrap_skips_present_tools_on_linux
   test_bootstrap_installs_unzip_when_missing
   test_concurrent_lock_rejection
