@@ -58,9 +58,34 @@ chmod +x "$tmp/fakebin/thefuck"
 ln -s "${commands[zsh]:-/bin/zsh}" "$tmp/fakebin/zsh"
 fakepath="$tmp/fakebin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH=$fakepath
+zsh_bin=${commands[zsh]:-/bin/zsh}
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" \
-  zsh -dfc '
+# run_block <label> [NAME=value ...] -- <script>
+#
+# Run <script> with `zsh -dfc` in the given environment (stdin from /dev/null)
+# and fail unless the block exits 0 AND reaches a sentinel appended after its
+# last line. The exit status alone proves nothing: a shell error such as an
+# unmatched glob, or an unset parameter under NO_UNSET (including one inside a
+# function's `local` assignment), aborts `zsh -c` with status 0, so a block
+# could skip its remaining assertions and still pass. The block's combined
+# output, minus the sentinel, is left in $block_out for diagnostic assertions.
+typeset -g block_out=
+run_block() {
+  local label=$1 sentinel="__leos_block_reached_end_$$" st=0 reached=yes
+  shift
+  local -a assignments=()
+  while (( $# )) && [[ $1 != -- ]]; do assignments+=("$1"); shift; done
+  (( $# == 2 )) || fail "run_block $label: expected [NAME=value ...] -- <script>"
+  block_out=$(/usr/bin/env "${assignments[@]}" "$zsh_bin" -dfc "$2"$'\n'"print -r -- $sentinel" \
+    2>&1 </dev/null) || st=$?
+  [[ $block_out == *$sentinel* ]] || reached=no
+  block_out=${block_out//$sentinel/}
+  (( st == 0 )) && [[ $reached == yes ]] ||
+    fail "$label (exit $st, reached end: $reached): $block_out"
+}
+
+run_block 'default themed profile' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" -- '
     setopt err_return no_unset pipe_fail
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     [[ "$LEOS_PROFILES" == "$LEOS_PROFILES_HOME" ]] || { print -u2 -r -- "profile root mismatch: $LEOS_PROFILES"; exit 1; }
@@ -71,33 +96,35 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="
     [[ "$STARSHIP_CONFIG" == "$LEOS_PROFILES_HOME/zsh/starship.toml" ]] || {
       print -u2 -r -- "themed Starship config mismatch: ${STARSHIP_CONFIG:-unset}"; exit 1
     }
-  ' || fail 'default themed profile'
+  '
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" LEOS_PLAIN_PROMPT=1 TERM=xterm-256color PATH="$fakepath" \
-  zsh -dfc '
+run_block 'plain Starship profile' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" LEOS_PLAIN_PROMPT=1 TERM=xterm-256color PATH="$fakepath" -- '
     setopt err_return no_unset pipe_fail
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     [[ "$STARSHIP_CONFIG" == "$LEOS_PROFILES_HOME/zsh/starship-plain.toml" ]]
-  ' || fail 'plain Starship profile'
+  '
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" LEOS_DISABLE_ALIASES=1 TERM=xterm-256color PATH="$fakepath" \
-  zsh -dfc '
+run_block 'alias opt-out and locale preservation' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" LEOS_DISABLE_ALIASES=1 TERM=xterm-256color PATH="$fakepath" -- '
     setopt err_return no_unset pipe_fail
     unset LC_ALL
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     (( ! $+aliases[ls] ))
     (( ! $+aliases[grep] ))
     [[ -z ${LC_ALL:-} ]]
-  ' || fail 'alias opt-out and locale preservation'
+  '
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_TEST_ROOT="$root" zsh -dfc '
+run_block 'lazy thefuck first invocation' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   thefuck() { print "alias fuck=\047true\047"; }
   source "$LEOS_TEST_ROOT/zsh/path/thefuck.zsh"
   fuck first-call
-' || fail 'lazy thefuck first invocation'
+'
 
-HOME="$tmp/yarn-home" LEOS_TEST_ROOT="$root" zsh -dfc '
+run_block 'node.zsh adds ~/.yarn/bin from disk without spawning yarn' \
+  HOME="$tmp/yarn-home" LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   mkdir -p "$HOME/.yarn/bin"
   yarn() { : > "$HOME/yarn-spawned"; }        # node.zsh must never invoke yarn
@@ -106,11 +133,12 @@ HOME="$tmp/yarn-home" LEOS_TEST_ROOT="$root" zsh -dfc '
   source "$LEOS_TEST_ROOT/zsh/path/node.zsh"
   (( ${path[(Ie)$HOME/.yarn/bin]} ))          # ~/.yarn/bin was added from disk
   [[ ! -e $HOME/yarn-spawned ]]               # ...without spawning a Node process
-' || fail "node.zsh adds ~/.yarn/bin from disk without spawning yarn"
+'
 
 # Fake npm/pnpm/bun ahead of the real ones on PATH, so the spawn count below
 # measures only this profile's behaviour and never the host's package managers.
-HOME="$tmp/pm-home" LEOS_TEST_ROOT="$root" zsh -dfc '
+run_block 'node.zsh caches npm/pnpm/bun completions without respawning them' \
+  HOME="$tmp/pm-home" LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   mkdir -p "$HOME/bin"
   for tool in npm pnpm bun; do
@@ -137,10 +165,10 @@ printf %s\\\\n \"compdef _${tool}_stub ${tool}\"" > "$HOME/bin/$tool"
   leos-node-completions                         # second shell: cache hit only
   (( $+functions[_npm_stub] && $+functions[_pnpm_stub] && $+functions[_bun_stub] ))
   [[ $(wc -l < "$HOME/spawns") -eq 3 ]]
-' || fail "node.zsh caches npm/pnpm/bun completions without respawning them"
+'
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" \
-  zsh -dfc '
+run_block 'multi-root metadata cleanup wrapper' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" -- '
     setopt err_return no_unset pipe_fail
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     uname() { print -r -- Darwin; }
@@ -150,10 +178,10 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="
     : > "$HOME/metadata-two/Thumbs.db"
     rmdsstore --dry-run "$HOME/metadata-one" "$HOME/metadata-two"
     [[ -e $HOME/metadata-one/.DS_Store && -e $HOME/metadata-two/Thumbs.db ]]
-  ' || fail 'multi-root metadata cleanup wrapper'
+  '
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" \
-  zsh -dfc '
+run_block 'rmdsstore must run the pinned, isolated system python under sudo, not a PATH-resolved one' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" -- '
     setopt err_return no_unset pipe_fail
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     uname() { print -r -- Darwin; }
@@ -161,16 +189,16 @@ HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="
     sudo() { print -r -- "$*" > "$SUDO_LOG"; }    # capture the full sudo argv
     rmdsstore --dry-run "$HOME" >/dev/null 2>&1
     [[ "$(<$SUDO_LOG)" == "/usr/bin/python3 -I "* ]]
-  ' || fail 'rmdsstore must run the pinned, isolated system python under sudo, not a PATH-resolved one'
+  '
 
-LEOS_TEST_ROOT="$root" zsh -dfc '
+run_block 'private override load order' LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   typeset -a loaded
   entry() { loaded+=("$1"); }
   LEOS_PROFILES="$LEOS_TEST_ROOT"
   source "$LEOS_TEST_ROOT/zsh/entries.zsh"
   [[ ${loaded[-2]} == commands && ${loaded[-1]} == interactive ]]
-' || fail 'private override load order'
+'
 
 mkdir -p "$tmp/profile/local" "$tmp/profile/zsh"
 cp "$root/zsh/entries.zsh" "$tmp/profile/zsh/entries.zsh"
@@ -178,31 +206,31 @@ print -r -- 'typeset -g LEOS_PRIVATE_LOADED=yes' > "$tmp/profile/local/private.z
 # 600 is the mode a secrets file is supposed to have, and the mode the installer
 # enforces; a laxer fixture would trip the permission warning asserted below.
 chmod 600 "$tmp/profile/local/private.zsh"
-LEOS_TEST_ROOT="$tmp/profile" zsh -dfc '
+run_block 'local private override' LEOS_TEST_ROOT="$tmp/profile" -- '
   setopt err_return no_unset pipe_fail
   entry() { :; }
   puts-err() { print -u2 -r -- "$*"; }
   LEOS_PROFILES="$LEOS_TEST_ROOT"
   source "$LEOS_TEST_ROOT/zsh/entries.zsh"
   [[ $LEOS_PRIVATE_LOADED == yes ]]
-' || fail 'local private override'
+'
 
 # A secrets file readable beyond its owner must be reported, and must still load
 # (warn, never silently drop the override or rewrite the user's mode).
 for mode in 600 640 604 644; do
   chmod $mode "$tmp/profile/local/private.zsh"
-  private_warning=$(LEOS_TEST_ROOT="$tmp/profile" zsh -dfc '
+  run_block "private override at mode $mode" LEOS_TEST_ROOT="$tmp/profile" -- '
     setopt err_return no_unset pipe_fail
     entry() { :; }
     puts-err() { print -u2 -r -- "$*"; }
     LEOS_PROFILES="$LEOS_TEST_ROOT"
     source "$LEOS_TEST_ROOT/zsh/entries.zsh"
     [[ $LEOS_PRIVATE_LOADED == yes ]]
-  ' 2>&1) || fail "private override errored at mode $mode"
+  '
   if [[ $mode == 600 ]]; then
-    [[ $private_warning != *"readable beyond its owner"* ]] || fail 'mode 600 private.zsh warned anyway'
+    [[ $block_out != *"readable beyond its owner"* ]] || fail 'mode 600 private.zsh warned anyway'
   else
-    [[ $private_warning == *"readable beyond its owner"* ]] || fail "mode $mode private.zsh did not warn"
+    [[ $block_out == *"readable beyond its owner"* ]] || fail "mode $mode private.zsh did not warn"
   fi
 done
 chmod 600 "$tmp/profile/local/private.zsh"
@@ -215,26 +243,27 @@ print -r -- 'typeset -g LEOS_PRIVATE_LOADED=yes' > "$tmp/symtarget/private.zsh"
 ln -sf "$tmp/symtarget/private.zsh" "$tmp/symprofile/local/private.zsh"
 for target_mode in 600 644; do
   chmod $target_mode "$tmp/symtarget/private.zsh"
-  sym_warning=$(LEOS_TEST_ROOT="$tmp/symprofile" zsh -dfc '
+  run_block "symlinked private.zsh at target mode $target_mode" LEOS_TEST_ROOT="$tmp/symprofile" -- '
     setopt err_return no_unset pipe_fail
     entry() { :; }
     puts-err() { print -u2 -r -- "$*"; }
     LEOS_PROFILES="$LEOS_TEST_ROOT"
     source "$LEOS_TEST_ROOT/zsh/entries.zsh"
     [[ $LEOS_PRIVATE_LOADED == yes ]]
-  ' 2>&1) || fail "symlinked private.zsh errored at target mode $target_mode"
+  '
   if [[ $target_mode == 600 ]]; then
-    [[ $sym_warning != *"readable beyond its owner"* ]] ||
+    [[ $block_out != *"readable beyond its owner"* ]] ||
       fail 'a symlink to a 600 private.zsh warned about the link mode'
   else
-    [[ $sym_warning == *"readable beyond its owner"* ]] ||
+    [[ $block_out == *"readable beyond its owner"* ]] ||
       fail 'a symlink to a 644 private.zsh did not warn'
   fi
 done
 
 # heroku must load BEFORE the other post-compinit entries: its zsh_setup runs a
 # second compinit, which discards every compdef registered up to that point.
-heroku_order_out=$(LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" zsh -dfc '
+run_block 'path/heroku loads before the other compdef-registering entries' \
+  LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" -- '
   setopt err_return no_unset pipe_fail
   typeset -a loaded
   entry() { loaded+=("$1"); }
@@ -251,10 +280,7 @@ heroku_order_out=$(LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" zsh -dfc
       print -u2 -r -- "path/heroku ($h) must load before $other (${loaded[(ie)$other]})"; exit 1
     }
   done
-  print -r -- ORDER-OK
-' 2>&1) || true
-[[ $heroku_order_out == *ORDER-OK* ]] ||
-  fail "path/heroku loads before the other compdef-registering entries: $heroku_order_out"
+'
 
 # The init-cache status contract, which every startup file depends on:
 #   0  something was sourced — even if the sourced script's own last command was
@@ -271,7 +297,8 @@ print -rl -- '#!/bin/sh' \
   > "$tmp/cachehome/bin/falsetail"
 print -rl -- '#!/bin/sh' 'exit 0' > "$tmp/cachehome/bin/silenttool"
 chmod +x "$tmp/cachehome/bin/falsetail" "$tmp/cachehome/bin/silenttool"
-contract_out=$(HOME="$tmp/cachehome" LEOS_TEST_ROOT="$root" zsh -dfc '
+run_block 'init-cache status contract and warn-once behaviour' \
+  HOME="$tmp/cachehome" LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   typeset -g WARNINGS=0
   puts() { :; }
@@ -298,10 +325,7 @@ contract_out=$(HOME="$tmp/cachehome" LEOS_TEST_ROOT="$root" zsh -dfc '
   (( WARNINGS == 1 ))
   leos-source-cached-warn "nope" et2 "$HOME/bin/silenttool"; (( $? == 0 ))
   (( WARNINGS == 1 ))
-  print -r -- CONTRACT-OK
-' 2>&1) || true   # err_return would abort before the assertion otherwise
-[[ $contract_out == *CONTRACT-OK* ]] ||
-  fail "init-cache status contract and warn-once behaviour: $contract_out"
+'
 
 # A generator that yields nothing must not take the rest of the profile down with
 # it. This is the ERR_RETURN hazard that `(( guard )) && leos-source-cached …`
@@ -311,27 +335,26 @@ print -rl -- '#!/bin/sh' 'exit 0' > "$tmp/deadtool/bin/zoxide"
 print -rl -- '#!/bin/sh' 'exit 0' > "$tmp/deadtool/bin/direnv"
 chmod +x "$tmp/deadtool/bin/zoxide" "$tmp/deadtool/bin/direnv"
 for broken in zoxide direnv; do
-  dead_out=$(HOME="$tmp/deadtool" LEOS_TEST_ROOT="$root" BROKEN="$broken" zsh -dfc '
+  run_block "a silent $broken generator must not abort path/$broken.zsh" \
+    HOME="$tmp/deadtool" LEOS_TEST_ROOT="$root" BROKEN="$broken" -- '
     setopt err_return no_unset pipe_fail
     path=("$HOME/bin" $path)
     puts() { :; }; puts-err() { :; }
     source "$LEOS_TEST_ROOT/zsh/cache.zsh"
-    source "$LEOS_TEST_ROOT/zsh/path/$BROKEN.zsh"
-    print -r -- REACHED-END               # the sentinel IS the assertion here
-  ' 2>&1) || true
-  [[ $dead_out == *REACHED-END* ]] ||
-    fail "a silent $broken generator must not abort path/$broken.zsh: $dead_out"
+    source "$LEOS_TEST_ROOT/zsh/path/$BROKEN.zsh"   # reaching the sentinel IS the assertion
+  '
 done
 
 # leos-refresh-init-cache must actually delete the cached scripts (an unmatched
 # glob would otherwise abort the whole rm under NOMATCH and clear nothing), leave
-# the rehash stamps alone, and cope with awkward filenames.
-#
-# Asserted via a trailing sentinel rather than the block's exit status: an
-# ERR_RETURN abort mid-block (which is exactly what an unmatched glob causes)
-# still leaves `zsh -dfc` exiting 0, so `|| fail` alone would pass vacuously.
-mkdir -p "$tmp/refreshhome/.cache/leos-profiles/init"
-refresh_out=$(HOME="$tmp/refreshhome" LEOS_TEST_ROOT="$root" zsh -dfc '
+# the rehash stamps alone, and cope with awkward filenames. An unmatched glob
+# aborts the block yet still exits 0, which is why run_block checks a sentinel.
+# Private like the directories the profile creates: under a umask 002 session a
+# group-writable fixture would make the profile discard the planted files first.
+mkdir -p -m 700 "$tmp/refreshhome/.cache" "$tmp/refreshhome/.cache/leos-profiles" \
+  "$tmp/refreshhome/.cache/leos-profiles/init"
+run_block 'leos-refresh-init-cache clears init scripts and keeps rehash stamps' \
+  HOME="$tmp/refreshhome" LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   puts() { :; }; puts-err() { :; }
   source "$LEOS_TEST_ROOT/zsh/cache.zsh"
@@ -346,10 +369,7 @@ refresh_out=$(HOME="$tmp/refreshhome" LEOS_TEST_ROOT="$root" zsh -dfc '
   [[ -e $d/pyenv-rehash ]]
   leos-refresh-init-cache            # idempotent on an already-empty cache
   [[ -e $d/pyenv-rehash ]]
-  print -r -- REFRESH-OK
-' 2>&1) || true
-[[ $refresh_out == *REFRESH-OK* ]] ||
-  fail "leos-refresh-init-cache clears init scripts and keeps rehash stamps: $refresh_out"
+'
 
 # brew-checkup gained a `|| return 1` and a cache-refresh call: it must still
 # report success on a clean run, fail when brew fails, and only clear the cache
@@ -362,7 +382,8 @@ print -rl -- '#!/bin/sh' 'case "$1" in' \
   'esac' > "$tmp/checkuphome/bin/brew"
 chmod +x "$tmp/checkuphome/bin/brew"
 for expect in success failure; do
-  HOME="$tmp/checkuphome" LEOS_TEST_ROOT="$root" EXPECT="$expect" zsh -dfc '
+  run_block "brew-checkup control flow on $expect" \
+    HOME="$tmp/checkuphome" LEOS_TEST_ROOT="$root" EXPECT="$expect" -- '
     setopt no_unset pipe_fail
     path=("$HOME/bin" $path)
     puts() { :; }; puts-err() { :; }
@@ -382,7 +403,7 @@ for expect in success failure; do
       brew-checkup >/dev/null 2>&1 && exit 1        # must report failure
       [[ -e $d/marker_x.zsh ]] || exit 1            # ...and leave the cache alone
     fi
-  ' || fail "brew-checkup control flow on $expect"
+  '
 done
 
 # brew-china-enable snapshots three HOMEBREW_* vars and must restore them exactly
@@ -397,7 +418,8 @@ print -rl -- '#!/bin/sh' 'case "$1" in' \
 chmod +x "$tmp/brewhome/bin/brew"
 
 for preset in unset preset; do
-  HOME="$tmp/brewhome" LEOS_TEST_ROOT="$root" BREW_PRESET="$preset" zsh -dfc '
+  run_block "brew-china-enable rollback preserves prior env ($preset)" \
+    HOME="$tmp/brewhome" LEOS_TEST_ROOT="$root" BREW_PRESET="$preset" -- '
     setopt err_return no_unset pipe_fail
     path=("$HOME/bin" $path)
     puts() { :; }; puts-err() { :; }
@@ -420,10 +442,11 @@ for preset in unset preset; do
     fi
     (( ! ${+HOMEBREW_BREW_GIT_REMOTE} ))
     (( ! ${+HOMEBREW_API_DOMAIN} ))
-  ' || fail "brew-china-enable rollback preserves prior env ($preset)"
+  '
 done
 
-HOME="$tmp/brewhome" LEOS_TEST_ROOT="$root" zsh -dfc '
+run_block 'brew-china-enable records the flag and exports the mirrors on success' \
+  HOME="$tmp/brewhome" LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   path=("$HOME/bin" $path)
   puts() { :; }; puts-err() { :; }
@@ -436,7 +459,7 @@ HOME="$tmp/brewhome" LEOS_TEST_ROOT="$root" zsh -dfc '
   brew-china-enable --yes
   [[ -f $LEOS_PROFILES/local/flags/brew-china ]]          # flag recorded
   [[ $HOMEBREW_BOTTLE_DOMAIN == *mirrors.ustc.edu.cn* ]]  # mirror env exported
-' || fail 'brew-china-enable records the flag and exports the mirrors on success'
+'
 
 # add-path's dedup escapes pattern metacharacters. zsh only reinterprets an
 # expanded value as a pattern under GLOB_SUBST, so the test sets it explicitly:
@@ -444,7 +467,8 @@ HOME="$tmp/brewhome" LEOS_TEST_ROOT="$root" zsh -dfc '
 mkdir -p "$tmp/globroot/zsh" "$tmp/globdirs/a[1]/bin" "$tmp/globdirs/a1/bin" "$tmp/globdirs/keep/bin"
 cp "$root/zsh/start.zsh" "$root/zsh/cache.zsh" "$tmp/globroot/zsh/"
 : > "$tmp/globroot/zsh/entries.zsh"          # keep start.zsh from loading the world
-HOME="$tmp/globroot" LEOS_PROFILES_HOME="$tmp/globroot" GLOBDIRS="$tmp/globdirs" zsh -dfc '
+run_block 'add-path escapes glob metacharacters when deduping' \
+  HOME="$tmp/globroot" LEOS_PROFILES_HOME="$tmp/globroot" GLOBDIRS="$tmp/globdirs" -- '
   setopt err_return no_unset pipe_fail
   source "$LEOS_PROFILES_HOME/zsh/start.zsh"
   setopt glob_subst
@@ -455,12 +479,12 @@ HOME="$tmp/globroot" LEOS_PROFILES_HOME="$tmp/globroot" GLOBDIRS="$tmp/globdirs"
   (( ${path[(ie)$GLOBDIRS/keep/bin]} <= $#path ))
   add-path "$GLOBDIRS/a[1]/bin"
   (( $#path == 3 ))                                     # re-adding dedups
-' || fail 'add-path escapes glob metacharacters when deduping'
+'
 
 # Completion-registering entries must load from interactive.zsh (after compinit),
 # never from entries.zsh (the PATH phase), where `compdef` does not exist yet and
 # their registrations silently no-op.
-LEOS_TEST_ROOT="$root" zsh -dfc '
+run_block 'compdef-registering entries must not load from entries.zsh' LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   typeset -a loaded
   entry() { loaded+=("$1"); }
@@ -471,9 +495,10 @@ LEOS_TEST_ROOT="$root" zsh -dfc '
       print -u2 -r -- "$late is loaded during the PATH phase"; exit 1
     }
   done
-' || fail 'compdef-registering entries must not load from entries.zsh'
+'
 
-late_entries_out=$(LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" zsh -dfc '
+run_block 'interactive.zsh must load the compdef-registering entries' \
+  LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" -- '
   setopt err_return no_unset pipe_fail
   typeset -a loaded
   entry() { loaded+=("$1"); }
@@ -489,14 +514,12 @@ late_entries_out=$(LEOS_TEST_ROOT="$root" LEOS_PROFILES_ZSH="$root/zsh" zsh -dfc
       print -u2 -r -- "$late is not loaded by interactive.zsh"; exit 1
     }
   done
-  print -r -- LATE-OK
-' 2>&1) || true
-[[ $late_entries_out == *LATE-OK* ]] ||
-  fail "interactive.zsh must load the compdef-registering entries: $late_entries_out"
+'
 
 # zoxide registers its `cd` completion with a compdef guarded on compdef being
 # defined, so a load before compinit loses it with no error at all.
-HOME="$tmp/zoxide-home" LEOS_TEST_ROOT="$root" zsh -dfc '
+run_block 'zoxide registers its cd completion when loaded after compinit' \
+  HOME="$tmp/zoxide-home" LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   mkdir -p "$HOME/bin"
   print -rl -- "#!/bin/sh" \
@@ -513,67 +536,67 @@ HOME="$tmp/zoxide-home" LEOS_TEST_ROOT="$root" zsh -dfc '
   [[ $COMPDEF_LOG == "__zoxide_z_complete cd" ]] || {
     print -u2 -r -- "zoxide compdef not registered: ${COMPDEF_LOG:-<none>}"; exit 1
   }
-' || fail 'zoxide registers its cd completion when loaded after compinit'
+'
 
 # Fresh HOME: earlier blocks leave a valid .zcompdump in $tmp, and a cached
 # dump lets even pre-compaudit code pass this test via the compinit -C path.
 insecure_home=$(mktemp -d)
-HOME="$insecure_home" ZDOTDIR="$insecure_home" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" \
-  zsh -dfc '
+run_block 'insecure completion path handling' \
+  HOME="$insecure_home" ZDOTDIR="$insecure_home" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" -- '
     setopt err_return no_unset pipe_fail
     mkdir -p "$HOME/insecure-completions"
     chmod 777 "$HOME/insecure-completions"
     fpath=("$HOME/insecure-completions" $fpath)
     source "$LEOS_PROFILES_HOME/zsh/start.zsh" 2>/dev/null
     (( $+functions[compdef] ))
-  ' </dev/null || fail 'insecure completion path handling'
+  '
 rm -rf "$insecure_home"
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" PATH=/usr/bin:/bin TERM=xterm-256color \
-  zsh -dfc '
+run_block 'missing-Starship fallback prompt' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" PATH=/usr/bin:/bin TERM=xterm-256color -- '
     setopt err_return no_unset pipe_fail
     puts-err() { :; }
     entry() { :; }
     source "$LEOS_PROFILES_ZSH/interactive.zsh" 2>/dev/null
     [[ $PROMPT == *"%n@%m"* ]]
-  ' || fail 'missing-Starship fallback prompt'
+  '
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" TERM=xterm-256color PATH="$fakepath" \
-  zsh -dfc '
+run_block 'startup resilient when compinit fails' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$root/zsh" TERM=xterm-256color PATH="$fakepath" -- '
     setopt err_return no_unset pipe_fail
     puts-err() { :; }
     entry() { :; }
     compinit() { return 1 }   # a defined function survives autoload -Uz
     source "$LEOS_PROFILES_ZSH/interactive.zsh" 2>/dev/null
     [[ -n ${STARSHIP_CONFIG:-} ]]
-  ' || fail 'startup resilient when compinit fails'
+  '
 
 flag_root=$(mktemp -d)
 mkdir -p "$flag_root/zsh" "$flag_root/local/flags"
 cp "$root/zsh/interactive.zsh" "$flag_root/zsh/interactive.zsh"
 : > "$flag_root/local/flags/no-starship-warning"
-warning_output=$(HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$flag_root/zsh" PATH=/usr/bin:/bin TERM=xterm-256color \
-  zsh -dfc '
+run_block 'silenced-warning block' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$flag_root/zsh" PATH=/usr/bin:/bin TERM=xterm-256color -- '
     setopt err_return no_unset pipe_fail
     puts-err() { print -r -- "WARN: $*"; }
     entry() { :; }
     source "$LEOS_PROFILES_ZSH/interactive.zsh" 2>/dev/null
     [[ $PROMPT == *"%n@%m"* ]]
-  ' 2>&1) || fail 'silenced-warning block errored'
-[[ $warning_output != *"Starship is not installed"* ]] || fail 'no-starship-warning flag did not silence the warning'
+  '
+[[ $block_out != *"Starship is not installed"* ]] || fail 'no-starship-warning flag did not silence the warning'
 rm -rf "$flag_root"
 
-HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$tmp/empty-zsh" LEOS_TEST_ROOT="$root" TERM=xterm-256color PATH="$fakepath" \
-  zsh -dfc '
+run_block 'clean checkout without cloned plugins' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_ZSH="$tmp/empty-zsh" LEOS_TEST_ROOT="$root" TERM=xterm-256color PATH="$fakepath" -- '
     setopt err_return no_unset pipe_fail
     mkdir -p "$LEOS_PROFILES_ZSH"
     puts-err() { :; }
     entry() { :; }
     source "$LEOS_TEST_ROOT/zsh/interactive.zsh" 2>/dev/null
     [[ $STARSHIP_CONFIG == "$LEOS_PROFILES_ZSH/starship.toml" ]]
-  ' || fail 'clean checkout without cloned plugins'
+  '
 
-HOME="$tmp/history-home" LEOS_TEST_ROOT="$root" zsh -dfc '
+run_block 'safe and aggressive history boundaries' HOME="$tmp/history-home" LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail extended_glob
   mkdir -p "$HOME/.directory_history"
   : > "$HOME/.zsh_history"
@@ -585,10 +608,11 @@ HOME="$tmp/history-home" LEOS_TEST_ROOT="$root" zsh -dfc '
   [[ ! -s $HOME/.zsh_history && -e $HOME/.legacy_history && -d $HOME/.directory_history ]]
   clear-history --aggressive
   [[ ! -e $HOME/.legacy_history && -d $HOME/.directory_history ]]
-' || fail 'safe and aggressive history boundaries'
+'
 
-HOME="$tmp/ai-home" LEOS_TEST_ROOT="$root" AI_LOG="$tmp/ai-log" PATH="$fakepath" \
-  HOMEBREW_PREFIX="$tmp/not-a-real-brew" zsh -dfc '
+run_block 'native AI updates and contradictory bye options' \
+  HOME="$tmp/ai-home" LEOS_TEST_ROOT="$root" AI_LOG="$tmp/ai-log" PATH="$fakepath" \
+  HOMEBREW_PREFIX="$tmp/not-a-real-brew" -- '
   setopt err_return no_unset pipe_fail
   puts() { :; }; puts-err() { :; }
   claude() { print -r -- "claude $*" >> "$AI_LOG"; }
@@ -598,13 +622,15 @@ HOME="$tmp/ai-home" LEOS_TEST_ROOT="$root" AI_LOG="$tmp/ai-log" PATH="$fakepath"
   ai-checkup
   [[ "$(<$AI_LOG)" == $'"'"'claude update\ncodex update\nopencode upgrade'"'"' ]]
   ! bye --shutdown-wsl --no-exit >/dev/null 2>&1
-' || fail 'native AI updates and contradictory bye options'
+'
 
 mkdir -p "$tmp/updater-profile" "$tmp/fake-bin"
 : > "$tmp/updater-profile/install.sh"
 print -rl -- '#!/bin/sh' 'printf "%s\n" "$*" > "$UPGRADE_LOG"' > "$tmp/fake-bin/bash"
 chmod +x "$tmp/fake-bin/bash"
-HOME="$tmp/updater-home" PATH="$tmp/fake-bin:$PATH" LEOS_TEST_ROOT="$root" LEOS_PROFILES="$tmp/updater-profile" UPGRADE_LOG="$tmp/upgrade-log" zsh -dfc '
+run_block 'configured-upstream reconciliation' \
+  HOME="$tmp/updater-home" PATH="$tmp/fake-bin:$PATH" LEOS_TEST_ROOT="$root" \
+  LEOS_PROFILES="$tmp/updater-profile" UPGRADE_LOG="$tmp/upgrade-log" -- '
   setopt err_return no_unset pipe_fail
   puts() { :; }; puts-err() { :; }
   git() {
@@ -621,6 +647,6 @@ HOME="$tmp/updater-home" PATH="$tmp/fake-bin:$PATH" LEOS_TEST_ROOT="$root" LEOS_
   [[ "$(<$UPGRADE_LOG)" == "$LEOS_PROFILES/install.sh reconcile --yes --full-upgrade" ]]
   DIRTY=1
   ! upgrade-leos-profiles >/dev/null 2>&1
-' || fail 'configured-upstream reconciliation'
+'
 
 print -r -- 'profile tests: PASS'
