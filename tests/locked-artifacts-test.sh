@@ -3,7 +3,6 @@
 # shellcheck disable=SC1091,SC2034
 
 set -Eeuo pipefail
-IFS=$'\n\t'
 
 if [[ ${LEOS_ARTIFACT_TEST_ISOLATED:-} != 1 ]]; then
   exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LEOS_ARTIFACT_TEST_ISOLATED=1 bash "$0"

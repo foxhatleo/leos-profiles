@@ -2,7 +2,6 @@
 # shellcheck disable=SC1091,SC2016,SC2030,SC2031,SC2034,SC2317,SC2329
 
 set -Eeuo pipefail
-IFS=$'\n\t'
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 export LEOS_PROFILES_INSTALL_LIB_ONLY=1

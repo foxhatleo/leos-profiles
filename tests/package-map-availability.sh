@@ -3,7 +3,6 @@
 # shellcheck disable=SC1091,SC2034
 
 set -Eeuo pipefail
-IFS=$'\n\t'
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 [[ $# == 1 ]] || { printf 'Usage: %s <macos|apt|fedora|arch>\n' "$0" >&2; exit 2; }

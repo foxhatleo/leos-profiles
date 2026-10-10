@@ -105,20 +105,21 @@ package_list_for_group() {
   esac
 }
 
+# SELECTED_PACKAGES: every member of the selected groups, in group order, each
+# package once (two groups may share a member, such as python and languages).
 collect_selected_packages() {
-  local group package_list
-  local -a group_packages
-  local old_ifs=$IFS
+  local group package seen=" "
+  local -a groups=() group_packages=()
   SELECTED_PACKAGES=()
-  IFS=,
-  for group in $SELECTED_GROUPS; do
-    package_list=$(package_list_for_group "$group")
-    IFS=' '
-    read -r -a group_packages <<< "$package_list"
-    SELECTED_PACKAGES+=("${group_packages[@]}")
-    IFS=,
+  csv_split groups "$SELECTED_GROUPS"
+  for group in ${groups[@]+"${groups[@]}"}; do
+    IFS=' ' read -r -a group_packages <<< "$(package_list_for_group "$group")"
+    for package in ${group_packages[@]+"${group_packages[@]}"}; do
+      [[ $seen != *" $package "* ]] || continue
+      seen="$seen$package "
+      SELECTED_PACKAGES+=("$package")
+    done
   done
-  IFS=$old_ifs
 }
 
 package_installed() {

@@ -36,18 +36,20 @@ component_handler() {
 
 validate_component_registry() {
   local step dependencies groups installer kind handler item preceding=""
+  local -a items=()
   valid_csv "$CANONICAL_STEPS" "$CANONICAL_STEPS" || die "Duplicate component registration"
   while IFS='|' read -r step dependencies groups installer; do
     for kind in install verify signature; do
       handler=$(component_handler "$step" "$kind")
       declare -F "$handler" >/dev/null || die "$step has no $kind handler: $handler"
     done
-    local IFS=,
-    for item in $dependencies; do
+    csv_split items "$dependencies"
+    for item in ${items[@]+"${items[@]}"}; do
       has_csv_item "$CANONICAL_STEPS" "$item" || die "$step has unknown dependency $item"
       has_csv_item "$preceding" "$item" || die "$item must precede $step in the component registry"
     done
-    for item in $groups; do
+    csv_split items "$groups"
+    for item in ${items[@]+"${items[@]}"}; do
       has_csv_item "$CANONICAL_GROUPS" "$item" || die "$step has unknown package group $item"
     done
     preceding="${preceding:+$preceding,}$step"
@@ -56,15 +58,17 @@ validate_component_registry() {
 
 normalise_dependencies() {
   local previous step dependencies groups installer item
+  local -a items=()
   [[ -z $SELECTED_GROUPS ]] || add_csv_item SELECTED_STEPS packages
   # Fixed point: transitive dependencies must work regardless of table order.
   while :; do
     previous=$SELECTED_STEPS
     while IFS='|' read -r step dependencies groups installer; do
       has_csv_item "$SELECTED_STEPS" "$step" || continue
-      local IFS=,
-      for item in $dependencies; do add_csv_item SELECTED_STEPS "$item"; done
-      for item in $groups; do add_csv_item SELECTED_GROUPS "$item"; done
+      csv_split items "$dependencies"
+      for item in ${items[@]+"${items[@]}"}; do add_csv_item SELECTED_STEPS "$item"; done
+      csv_split items "$groups"
+      for item in ${items[@]+"${items[@]}"}; do add_csv_item SELECTED_GROUPS "$item"; done
     done < <(component_registry)
     [[ $previous != "$SELECTED_STEPS" ]] || break
   done

@@ -210,8 +210,7 @@ platform_asset() {
 install_locked_archive_binary() {
   local tool=$1 extension=$2 destination=$3 url sha temp archive binary asset
   asset=$(platform_asset "$tool")
-  local IFS=$'\t'
-  read -r url sha <<< "$asset"
+  IFS=$'\t' read -r url sha <<< "$asset"
   temp=$(mktemp -d)
   track_temp "$temp"
   archive="$temp/$tool.$extension"
@@ -300,9 +299,8 @@ node_satisfies_engine() {
   [[ $engine == \>=* ]] || die "Unsupported locked Node engine: $engine"
   minimum=${engine#>=}
   local -a actual_parts minimum_parts
-  local IFS=.
-  read -r -a actual_parts <<< "$version"
-  read -r -a minimum_parts <<< "$minimum"
+  IFS=. read -r -a actual_parts <<< "$version"
+  IFS=. read -r -a minimum_parts <<< "$minimum"
   for i in 0 1 2; do
     a=${actual_parts[$i]:-0}; b=${minimum_parts[$i]:-0}
     [[ $a =~ ^[0-9]+$ && $b =~ ^[0-9]+$ ]] || return 1

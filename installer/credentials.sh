@@ -138,8 +138,8 @@ ensure_github_known_hosts() {
   gh api --hostname github.com meta --jq '.ssh_keys[]' > "$approved" || die "Could not obtain GitHub's published SSH host keys"
   ssh-keyscan -T 15 -t rsa,ecdsa,ed25519 github.com > "$scanned" 2>/dev/null ||
     die "Could not scan GitHub SSH host keys"
-  # ssh-keyscan output is space-separated; the global IFS ($'\n\t') has no space,
-  # so this read must set a space-splitting IFS or the whole line lands in $host.
+  # ssh-keyscan output is space-separated; say so explicitly rather than rely
+  # on whatever IFS the caller has.
   while IFS=$' \t' read -r host key_type key _; do
     material="$key_type $key"
     grep -qxF "$material" "$approved" && printf '%s %s %s\n' "$host" "$key_type" "$key" >> "$verified"

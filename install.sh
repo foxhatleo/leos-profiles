@@ -5,7 +5,9 @@
 # The checkout containing this file is the profile being installed.
 
 set -Eeuo pipefail
-IFS=$'\n\t'
+# The default IFS stays in force everywhere. CSV values are split explicitly
+# with csv_split (`IFS=, read -r -a`), and signatures join their lists with
+# printf, so no handler depends on the caller's field separator (CQ-1).
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=installer/lock.sh
@@ -151,21 +153,26 @@ parse_args() {
   done
 }
 
+# csv_split <array-name> <csv>: split a comma-separated value into the named
+# array (empty for an empty value). Only this read sees IFS=,.
+csv_split() {
+  IFS=, read -r -a "$1" <<< "$2"
+}
+
 valid_csv() {
   local value=$1 allowed=$2 item seen=","
+  local -a items=()
   [[ -n $value ]] || return 1
   [[ $value != ,* && $value != *, && $value != *,,* ]] || return 1
-  local old_ifs=$IFS
-  IFS=,
-  for item in $value; do
-    [[ ",$allowed," == *",$item,"* ]] || { IFS=$old_ifs; return 1; }
+  csv_split items "$value"
+  for item in "${items[@]}"; do
+    [[ ",$allowed," == *",$item,"* ]] || return 1
     # Reject repeats: a duplicated group would otherwise double every package in
     # collect_selected_packages and change the step signature, so an equivalent
     # normalized run would be treated as never done and repeat the step.
-    [[ $seen != *",$item,"* ]] || { IFS=$old_ifs; return 1; }
+    [[ $seen != *",$item,"* ]] || return 1
     seen="$seen$item,"
   done
-  IFS=$old_ifs
 }
 
 has_csv_item() {
@@ -180,14 +187,13 @@ add_csv_item() {
 }
 
 order_selected_steps() {
-  local canonical="$CANONICAL_STEPS"
-  local step old_ifs=$IFS ordered=""
-  IFS=,
-  for step in $canonical; do
+  local step ordered=""
+  local -a steps=()
+  csv_split steps "$CANONICAL_STEPS"
+  for step in "${steps[@]}"; do
     has_csv_item "$SELECTED_STEPS" "$step" || continue
     ordered="${ordered:+$ordered,}$step"
   done
-  IFS=$old_ifs
   SELECTED_STEPS=$ordered
 }
 
@@ -362,22 +368,19 @@ inspect_tsv() {
   report_legacy_loaders
   printf 'channel\tai-cli-updates\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
   printf 'group\tinternal\tbootstrap\tselected\n'
-  local canonical="$CANONICAL_STEPS"
-  local old_ifs=$IFS
-  IFS=,
-  for step in $canonical; do
+  local -a items=()
+  csv_split items "$CANONICAL_STEPS"
+  for step in "${items[@]}"; do
     has_csv_item "$SELECTED_STEPS" "$step" || continue
     if has_csv_item "$REQUESTED_STEPS" "$step"; then origin=selected; else origin=implied; fi
     printf 'group\tcomponent\t%s\t%s\n' "$step" "$origin"
   done
-  # IFS is still "," from the step loop above, so the CSV splits directly. Do not
-  # rewrite this as a space-separated list: the global IFS has no space in it.
-  for group in $CANONICAL_GROUPS; do
+  csv_split items "$CANONICAL_GROUPS"
+  for group in "${items[@]}"; do
     has_csv_item "$SELECTED_GROUPS" "$group" || continue
     if has_csv_item "$REQUESTED_GROUPS" "$group"; then origin=selected; else origin=implied; fi
     printf 'group\tpackage\t%s\t%s\n' "$group" "$origin"
   done
-  IFS=$old_ifs
   printf 'group\tcredential\tssh\t%s\n' "$SSH_MODE"
   printf 'group\tcredential\tgpg\t%s\n' "$GPG_MODE"
   collect_selected_packages
@@ -453,13 +456,11 @@ inspect_tsv() {
       printf 'runtime\tnode\t%s\t%s\n' "$RESOLVED_NODE_VERSION" "$NODE_SELECTION"
     else printf 'runtime\tnode\tunresolved\tresolve-during-apply\n'; fi
   fi
-  old_ifs=$IFS
-  IFS=,
-  for step in $SELECTED_STEPS; do
+  csv_split items "$SELECTED_STEPS"
+  for step in ${items[@]+"${items[@]}"}; do
     if verify_step "$step"; then status=verified; else status=needed; fi
     printf 'postcondition\t%s\t%s\n' "$step" "$status"
   done
-  IFS=$old_ifs
 }
 
 main() {
@@ -505,12 +506,12 @@ main() {
   provision_ssh
   provision_gpg
   write_profile
-  local step old_ifs=$IFS
-  IFS=,
-  for step in $SELECTED_STEPS; do
+  local step
+  local -a steps=()
+  csv_split steps "$SELECTED_STEPS"
+  for step in ${steps[@]+"${steps[@]}"}; do
     run_step "$step"
   done
-  IFS=$old_ifs
   if has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" zsh-config; then
     compile_zsh_sources
   fi
