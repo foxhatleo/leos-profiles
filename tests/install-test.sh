@@ -221,6 +221,31 @@ test_package_maps_cover_every_supported_os() {
   assert_contains "$(package_list_for_group dev-tools)" "openssl@3"
 }
 
+# ONB-3: `rbenv install` of Ruby 3 builds openssl, psych (libyaml), readline,
+# zlib and fiddle (libffi) extensions. dev-tools must carry each library's
+# development package, per family. macOS uses the SDK's libffi and zlib, but
+# Homebrew's zlib is listed too.
+test_dev_tools_cover_ruby_build_dependencies() {
+  local family requirement members
+  for family in macos apt fedora arch; do
+    OS_FAMILY=$family
+    members=" $(package_list_for_group dev-tools) "
+    case $family in
+      macos) requirement='openssl@3 readline zlib libyaml' ;;
+      apt) requirement='libssl-dev libreadline-dev zlib1g-dev libyaml-dev libffi-dev build-essential' ;;
+      fedora) requirement='openssl-devel readline-devel zlib-devel libyaml-devel libffi-devel gcc make' ;;
+      arch) requirement='openssl readline zlib libyaml libffi base-devel' ;;
+    esac
+    for requirement in $requirement; do
+      [[ $members == *" $requirement "* ]] || fail "$family dev-tools lacks ruby-build dependency $requirement"
+    done
+    # MI-8: GitHub CLI and jq.
+    for requirement in jq "$( [[ $family == arch ]] && printf github-cli || printf gh)"; do
+      [[ $members == *" $requirement "* ]] || fail "$family dev-tools lacks $requirement"
+    done
+  done
+}
+
 # Version literals live only in lock.sh; restating them here would just make
 # every dependency bump edit two files. Check the shape of the locked data.
 test_default_font_policy_and_npm_artifacts_are_locked() {
@@ -271,7 +296,7 @@ test_macos_install_batches_and_resolves_aliases() {
     local IFS=' '
     printf '%s\n' "$*" >> "$BREW_CALLS_FILE"
     [[ $1 == list && $2 == --formula ]] || return 0
-    printf '%s\n' bat direnv eza fd fzf git openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib pkg-config
+    printf '%s\n' bat direnv eza fd fzf gh git jq libyaml openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib pkg-config
   }
   ensure_brew() { :; }
   out=$(install_os_packages 2>&1)
@@ -1593,6 +1618,7 @@ TESTS=(
   test_inspect_lists_every_selected_registry_artifact
   test_retired_flags_are_rejected_everywhere
   test_heroku_is_an_opt_in_macos_group
+  test_dev_tools_cover_ruby_build_dependencies
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

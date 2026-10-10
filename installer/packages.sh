@@ -100,6 +100,11 @@ bootstrap_tools() {
   pkg_install "${missing[@]}"
 }
 
+# dev-tools carries the GitHub CLI and jq on every family (MI-8), and every
+# build dependency ruby-build's suggested build environment lists for Ruby 3
+# (openssl, readline, zlib, libyaml for psych, libffi), so `rbenv install`
+# works without extra packages (ONB-3); macOS takes libffi from the SDK.
+#
 # macOS names are canonical Homebrew formula names, not aliases: `brew list
 # --formula` prints those, and an alias can move. pkgconf and sqlite are what
 # the pkg-config and sqlite3 aliases resolve to. python is the versioned
@@ -113,7 +118,7 @@ package_list_for_group() {
   case "$OS_FAMILY:$group" in
     macos:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils gnu-indent gnu-sed gnu-tar gnu-which grep gawk gzip less nano' ;;
     macos:shell) printf '%s\n' 'zsh' ;;
-    macos:dev-tools) printf '%s\n' 'bat direnv eza fd fzf git pkgconf openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib zoxide' ;;
+    macos:dev-tools) printf '%s\n' 'bat direnv eza fd fzf gh git jq libyaml pkgconf openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib zoxide' ;;
     macos:languages) printf '%s\n' 'node python@3.15 ruby' ;;
     macos:python) printf '%s\n' 'python@3.15' ;;
     macos:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
@@ -122,7 +127,7 @@ package_list_for_group() {
     macos:system) printf '%s\n' 'smartmontools' ;;
     apt:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     apt:shell) printf '%s\n' 'zsh' ;;
-    apt:dev-tools) printf '%s\n' 'bat build-essential clang direnv fd-find fzf gcc git libbz2-dev libffi-dev liblzma-dev libncurses-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-dev libxmlsec1-dev llvm ripgrep tk-dev vim xz-utils zlib1g-dev zoxide' ;;
+    apt:dev-tools) printf '%s\n' 'bat build-essential clang direnv fd-find fzf gcc gh git jq libbz2-dev libffi-dev liblzma-dev libncurses-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-dev libxmlsec1-dev libyaml-dev llvm ripgrep tk-dev vim xz-utils zlib1g-dev zoxide' ;;
     apt:languages) printf '%s\n' 'nodejs npm python-is-python3 ruby' ;;
     apt:python) printf '%s\n' 'python3' ;;
     apt:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
@@ -130,7 +135,7 @@ package_list_for_group() {
     apt:system) printf '%s\n' 'smartmontools' ;;
     fedora:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     fedora:shell) printf '%s\n' 'zsh' ;;
-    fedora:dev-tools) printf '%s\n' 'bat bzip2 bzip2-devel direnv fd-find fzf gcc gdbm-libs git libffi-devel libnsl2 libuuid-devel make openssl-devel patch readline-devel ripgrep sqlite sqlite-devel tk-devel vim xz-devel zlib-devel zoxide' ;;
+    fedora:dev-tools) printf '%s\n' 'bat bzip2 bzip2-devel direnv fd-find fzf gcc gdbm-libs gh git jq libffi-devel libnsl2 libuuid-devel libyaml-devel make openssl-devel patch readline-devel ripgrep sqlite sqlite-devel tk-devel vim xz-devel zlib-devel zoxide' ;;
     fedora:languages) printf '%s\n' 'nodejs python-unversioned-command ruby' ;;
     fedora:python) printf '%s\n' 'python3' ;;
     fedora:media) printf '%s\n' 'ImageMagick ffmpeg yt-dlp' ;;
@@ -138,7 +143,7 @@ package_list_for_group() {
     fedora:system) printf '%s\n' 'smartmontools' ;;
     arch:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     arch:shell) printf '%s\n' 'zsh' ;;
-    arch:dev-tools) printf '%s\n' 'base-devel bat direnv eza fd fzf git libffi openssl ripgrep tk vim xz zlib zoxide' ;;
+    arch:dev-tools) printf '%s\n' 'base-devel bat direnv eza fd fzf git github-cli jq libffi libyaml openssl readline ripgrep tk vim xz zlib zoxide' ;;
     arch:languages) printf '%s\n' 'nodejs npm python ruby' ;;
     arch:python) printf '%s\n' 'python' ;;
     arch:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
