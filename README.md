@@ -647,11 +647,10 @@ coverage. The weekly workflow repeats these checks. See the
 [workflow](./.github/workflows/ci.yml) for exact jobs and runner labels, and
 [development guide](./docs/development.md) for scope and reproduction.
 
-## Hosts list and removal
+## Inventory and removal
 
-[`res/adblock-hosts`](./res/adblock-hosts) remains a vendored convenience list.
-It is not automatically applied or updated and its original provenance is not
-recorded; review it before use and keep a backup.
+For a hosts-file blocklist, use a maintained one such as
+[StevenBlack/hosts](https://github.com/StevenBlack/hosts); this profile ships none.
 
 `bash install.sh inventory` lists everything the installer creates or manages,
 with its path and whether it is present: the managed blocks and their
@@ -678,6 +677,7 @@ for explicit review.
 See [docs/development.md](./docs/development.md) for module boundaries, the TSV
 contract, regression tests, dependency updates, real provisioning, and startup
 benchmarking. All machine-owned `local/` data stays ignored. Other local files
-under `docs/` remain ignored; only this development guide is public.
+under `docs/` remain ignored; only the development guide, the audit report and
+the [mise decision record](./docs/mise-migration.md) are public.
 
 The project is GPL-3.0; see [LICENSE](./LICENSE).
