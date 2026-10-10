@@ -46,6 +46,16 @@ HOME="$HOME" LEOS_PROFILES_HOME="$TARGET" TERM=xterm-256color zsh -dfc '
   (( $+functions[_zsh_highlight] ))
   (( $+functions[_zsh_autosuggest_start] ))
   (( $+functions[compdef] ))
+  # ZSH_AUTOSUGGEST_MANUAL_REBIND: the widgets are wrapped once, at the first
+  # prompt (after every other plugin), and the rebind hook then removes itself.
+  [[ $widgets[self-insert] == builtin ]]
+  for hook in $precmd_functions; do "$hook"; done
+  (( ! ${precmd_functions[(Ie)_zsh_autosuggest_start]} ))
+  [[ $widgets[self-insert] == user:_zsh_autosuggest_bound_1_self-insert ]]
+  [[ $widgets[fzf-tab-complete] == user:_zsh_autosuggest_bound_1_fzf-tab-complete ]]
+  [[ $(bindkey "^I") == *fzf-tab-complete ]]
+  for hook in $precmd_functions; do "$hook"; done
+  [[ $widgets[self-insert] == user:_zsh_autosuggest_bound_1_self-insert ]]
 '
 
 printf '%s\n' 'locked plugin integration: PASS'

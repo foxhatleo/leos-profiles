@@ -171,6 +171,17 @@ _leos_plugin fzf-tab/fzf-tab.plugin.zsh
 # running the completion strategy on every keystroke.
 ZSH_AUTOSUGGEST_STRATEGY=(history completion)
 ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE=100
+# The completion strategy runs the real completer in a background pty. These
+# completers start a Node, Ruby or Bash program, or walk every ref of a large
+# repository, for each suggestion (20-55 ms of CPU apiece), so lines that start
+# with them get history suggestions only. Tab completion is unaffected.
+ZSH_AUTOSUGGEST_COMPLETION_IGNORE='(brew|npm|npx|pnpm|yarn|bun|heroku|pyenv|rbenv|gcloud|git (checkout|switch|restore|log|show|diff|rebase|merge|cherry-pick|branch)) *'
+# Wrap the widgets once, at the first prompt, instead of re-wrapping all of
+# them (600+) before every prompt, which cost ~8 ms per Enter. The first prompt
+# comes after everything else here, zsh-syntax-highlighting and
+# local/private-interactive.zsh included, so autosuggestions still wraps
+# outermost. A widget created later needs `_zsh_autosuggest_bind_widgets`.
+ZSH_AUTOSUGGEST_MANUAL_REBIND=1
 _leos_plugin zsh-autosuggestions/zsh-autosuggestions.zsh
 
 # Custom completions (after compinit).
