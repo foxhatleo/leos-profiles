@@ -34,8 +34,8 @@ branch checkout with a configured upstream, then uses `git pull --ff-only`.
 
 ### Why not chezmoi or GNU stow
 
-The dotfile surface here is deliberately tiny — two managed blocks plus a
-`STARSHIP_CONFIG` pointer — so templating and symlink-farm tools solve very
+The dotfile surface here is deliberately tiny — two managed blocks (three on
+macOS) plus a `STARSHIP_CONFIG` pointer — so templating and symlink-farm tools solve very
 little of the actual problem. What `install.sh` mostly does is *machine
 provisioning*: OS packages across four distribution families, SHA-256-pinned
 bun/fnm/starship/yarn/pnpm artifacts, commit-pinned pyenv/rbenv/plugin clones,
@@ -91,7 +91,9 @@ The entire ignored `local/` directory is machine-owned:
 - `local/install-state.tsv` records verified step signatures, timestamps, and
   resolved moving versions such as Node LTS.
 - `local/private.zsh` contains private machine overrides and loads after public
-  commands but before the interactive layer.
+  commands but before the interactive layer; `local/private-interactive.zsh`
+  loads last, after completion, plugins and the prompt, for `compdef` and ZLE
+  overrides.
 - `local/flags/` stores GNU preference, Homebrew mirror, and optional-tool
   warning choices.
 
@@ -152,38 +154,76 @@ already created; do not expect reconciliation to create the pending key.
 
 ## Zsh runtime
 
-The installer adds managed, replaceable blocks to `~/.zshrc` and `~/.zshenv`.
-The first changed version is preserved beside the file as
-`.leos-profiles.bak`; symlink targets are updated without replacing the link.
-The profile remains relocatable via `LEOS_PROFILES_HOME`.
+The installer adds managed, replaceable blocks to `.zshrc` and `.zshenv`, and
+on macOS a third one to `.zprofile`. Those files are found the way zsh finds
+them: in `ZDOTDIR` when the installer's environment sets it, otherwise in the
+directory zsh reports after reading `~/.zshenv` (XDG-style setups usually set
+`ZDOTDIR` there, in which case `.zshenv` itself stays in HOME). `inspect`
+lists the resolved paths as `file` records. The first changed version of each
+file is preserved beside it as `.leos-profiles.bak`; symlink targets are
+updated without replacing the link. The profile remains relocatable via
+`LEOS_PROFILES_HOME`.
 
-The `~/.zshrc` block is interactive-only and the `~/.zshenv` block is silent, so
-`scp`, `rsync` and non-interactive `ssh` cannot break on startup output. The
-trade-off: a **non-interactive** shell (`ssh host cmd`, cron, scripts) sees only
-`~/.local/bin` and `~/.local/npm/bin` on PATH — no Homebrew, fnm, pyenv, rbenv or
-Go — so remote one-liners that need those tools should use absolute paths or
-activate just the required tool explicitly. A non-interactive login shell
-alone does not source the interactive profile. For example, after fnm setup:
+Machines set up with the old pre-installer instructions carry an unmarked
+`source …/zsh/start.zsh` loader in `.zshrc` and a `# leos-profiles zshenv`
+snippet in `.zshenv`. `inspect` reports them as `migration` records, and the
+`zsh-config` step (or `remove-blocks`) removes them; verification fails while
+one remains. `start.zsh` also loads only once per shell, so a leftover loader
+cannot double startup time in the meantime.
+
+The `.zshrc` block is interactive-only and the `.zshenv` and `.zprofile`
+blocks are silent, so `scp`, `rsync` and non-interactive `ssh` cannot break on
+startup output. The `.zshenv` block also sets `skip_global_compinit=1`, which
+stops Debian and Ubuntu's global `compinit` from building a completion dump
+before the profile has its full `fpath`. The trade-off: a **non-interactive**
+shell (`ssh host cmd`, cron, scripts) sees only `~/.local/bin` and
+`~/.local/npm/bin` in front of the system PATH — no Homebrew, fnm, pyenv, rbenv
+or Go — so remote one-liners that need those tools should use absolute paths or
+activate just the required tool explicitly. On macOS, a login shell's
+`/etc/zprofile` runs `path_helper`, which would push those two directories
+behind the system and Homebrew paths; the managed `.zprofile` block puts them
+back in front, so `zsh -l -c` sees the same order. A non-interactive login
+shell alone does not source the interactive profile. For example, after fnm
+setup:
 
 ```bash
 "$HOME/.local/bin/fnm" exec --using=default -- node --version
 ```
 
-Starship and custom completions initialize before zsh-syntax-highlighting,
-which is the final interactive plugin action.
+`start.zsh` loads, in order: the PATH and environment layer (`entries.zsh`:
+tool paths, `env.zsh`, `commands.zsh`), `local/private.zsh`, the interactive
+layer (`interactive.zsh`: key bindings, `compinit`, completion-registering
+tools, fzf-tab, zsh-autosuggestions, custom completions,
+zsh-syntax-highlighting as the last plugin, then the Starship prompt) and
+finally `local/private-interactive.zsh`. Both private files are sourced at the
+top level of `start.zsh`, so plain `typeset`, `local` and `typeset -A`
+declarations in them stay global, and both get a warning when they are
+readable by anyone but their owner. With `TERM=dumb` (Emacs TRAMP and similar)
+the shell stops after `local/private.zsh`: PATH and environment are set, but
+there is no line editor, plugin or themed prompt, just `$ `. A root shell that
+kept another user's HOME (`sudo -s`) does not load the profile at all, so it
+cannot leave root-owned files in that HOME.
 
 Deterministic initialization scripts for pyenv/rbenv, direnv, zoxide, fzf,
 Starship, and npm/pnpm/Bun completions are cached under
 `${XDG_CACHE_HOME:-~/.cache}/leos-profiles/init`. Cache identities hash the
 resolved binary path, arguments, HOME, and version-manager roots with distinct
-field boundaries. Newly created directories are private; ownership, permissions,
-ancestors, and symlinks are checked before cached code or compiled siblings are
-used. Unsafe storage falls back to fresh initialization without trusting its
-contents. Failed generators' partial output is not evaluated.
+field boundaries; zoxide's identity also covers `_ZO_ECHO` and
+`_ZO_RESOLVE_SYMLINKS`, which change its generated code. Newly created
+directories are private; ownership, permissions, ancestors, and symlinks are
+checked before cached code or compiled siblings are used. Unsafe storage falls
+back to fresh initialization without trusting its contents. Failed generators'
+partial output is not evaluated. The completion dump lives beside that cache
+as `zcompdump-<zsh version>` (falling back to `${ZDOTDIR:-~}/.zcompdump` if
+the cache root is unsafe); `.zcompdump*` files earlier versions left in the
+home directory are removed once.
 
 Homebrew runs `brew shellenv zsh` directly in each shell because its output
 depends on the current environment; empty successful output is valid. `fnm env`
-also runs per shell because it creates a unique `FNM_MULTISHELL_PATH`.
+also runs per shell because it creates a unique `FNM_MULTISHELL_PATH`; a nested
+shell drops the multishell directory it inherited first, and once a day a
+background job deletes multishell links older than a day whose shell has
+exited (fnm itself never removes them).
 Cache freshness follows launcher mtimes. After an update changes only a separate
 implementation file, run `leos-refresh-init-cache`; `brew-checkup` does this
 automatically. pyenv/rbenv use `--no-rehash` and refresh their shims in the
@@ -194,12 +234,75 @@ Startup latency depends on the host and installed tools. See the reproducible
 startup-time guarantee is claimed.
 
 PATH precedence is deliberate: version-manager shims come first, then
-`~/.local/bin`, then Homebrew — so a stale binary in `~/.local/bin` cannot shadow
-the Node/Python/Ruby a project selected. Locale fallback validates
-`C.UTF-8`, then `en_US.UTF-8`, and otherwise uses `C`. fnm alone constructs its
-runtime PATH. Set `LEOS_PLAIN_PROMPT=1` for the ASCII prompt,
-`LEOS_DISABLE_ALIASES=1` to disable command aliases, or
-`LEOS_WARN_OPTIONAL_TOOLS=1` for optional pyenv/rbenv warnings.
+`~/.local/bin`, then Go workspace bins, then Homebrew — so a stale binary in
+`~/.local/bin` or `$GOPATH/bin` cannot shadow the Node/Python/Ruby a project
+selected. Locale fallback validates `C.UTF-8`, then `en_US.UTF-8`, and
+otherwise uses `C`. `LS_COLORS`, `LSCOLORS`, `MANPAGER` and `MANROFFOPT` are
+only set when the environment does not already define them. fnm alone
+constructs its runtime PATH.
+
+Command wrappers stay compatible with the commands they replace:
+
+- `ls` runs eza (with `--group-directories-first`) only when every argument
+  means the same to eza as to ls: operands, `-1 -l -a -A -d -R` in any
+  combination, and long options that only eza has (`--git`, `--tree`,
+  `--icons`, …) or that GNU ls spells the same way. Anything else, such as
+  `ls -ltr`, `ls -lh` or `ls --sort=time`, runs the real `ls` with the
+  platform's colour flag. The full routing table is in `zsh/env.zsh`.
+- `cat` runs `bat --style=plain --paging=never` only when its output is a
+  terminal and it has no options; `cat -v`, `cat -n` and every pipe or
+  redirection get the real `cat`.
+- `grep`, `egrep` and `fgrep` add `--color=auto` (the latter two as
+  `grep -E`/`grep -F`, since GNU grep warns that egrep/fgrep are obsolescent).
+- With bat installed and no `MANPAGER` of your own, man pages use bat.
+
+Set `LEOS_DISABLE_ALIASES=1` to disable all of these, or `unfunction ls` (or
+`cat`) in `local/private.zsh` to drop one. `EXTENDED_GLOB` is on, but its `^`
+negation is disabled so `git reset HEAD^` works; `~` still excludes. Set
+`LEOS_PLAIN_PROMPT=1` for the ASCII prompt, or `LEOS_WARN_OPTIONAL_TOOLS=1` for
+optional pyenv/rbenv warnings. Both prompts show `user@host` over SSH and just
+the user name locally.
+
+Interactive conveniences: the keymap is always emacs (even when `EDITOR` is
+vim); Home, End, Delete and Ctrl-Left/Right work; Up/Down search history for
+lines starting with what is already typed. When fd (or Debian's `fdfind`) is
+installed, fzf's Ctrl-T, Alt-C and `**<Tab>` use it, so they honour
+`.gitignore`; with bat, Ctrl-T previews files. Existing `FZF_*` settings win.
+fzf-tab's `cd` preview uses eza, or `ls` where eza is not packaged.
+
+### Optional integrations
+
+The profile no longer wires up tools the installer does not provide. Add the
+ones you use to `local/private.zsh` (or, for completions, to
+`local/private-interactive.zsh`, which loads after `compinit`):
+
+```zsh
+# Flutter SDK on PATH
+[[ -d $HOME/.flutter/bin ]] && path=("$HOME/.flutter/bin" $path)
+
+# thefuck, initialised lazily on first use (it starts Python)
+if (( $+commands[thefuck] )); then
+  fuck() { unfunction fuck; eval "$(thefuck --alias)"; eval "fuck ${(j: :)${(q)@}}"; }
+fi
+
+# Google Cloud SDK PATH (Homebrew cask on macOS; the Linux packages put gcloud
+# on PATH already)
+if [[ -r ${HOMEBREW_PREFIX:-/opt/homebrew}/share/google-cloud-sdk/path.zsh.inc ]]; then
+  source "${HOMEBREW_PREFIX:-/opt/homebrew}/share/google-cloud-sdk/path.zsh.inc"
+fi
+```
+
+```zsh
+# local/private-interactive.zsh: Google Cloud SDK completions. The script only
+# runs its own compinit when compdef is missing, which it is not here.
+for gcloud_completion in \
+    "${HOMEBREW_PREFIX:-/opt/homebrew}/share/google-cloud-sdk/completion.zsh.inc" \
+    /usr/share/google-cloud-sdk/completion.zsh.inc \
+    /usr/lib/google-cloud-sdk/completion.zsh.inc; do
+  if [[ -r $gcloud_completion ]]; then source "$gcloud_completion"; break; fi
+done
+unset gcloud_completion
+```
 
 ## Updating and maintenance
 
@@ -291,8 +394,9 @@ It is not automatically applied or updated and its original provenance is not
 recorded; review it before use and keep a backup.
 
 To stop loading the profile, run `bash install.sh remove-blocks` (add
-`--dry-run` to preview). It deletes only the two managed blocks from `~/.zshrc`
-and `~/.zshenv` and leaves the rest of those files untouched, which is safer than
+`--dry-run` to preview). It deletes only the managed blocks from `.zshrc`,
+`.zshenv` and (macOS) `.zprofile`, plus any legacy unmarked loader, and leaves
+the rest of those files untouched, which is safer than
 restoring `*.leos-profiles.bak`: that backup is written only the first time a
 block is installed, so any later edits are not in it. Then start a fresh shell,
 and delete the profile directory if desired. Package uninstall remains
