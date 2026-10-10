@@ -17,6 +17,7 @@ root=$tmp/runtime
 mkdir -p "$root/zsh" "$root/util" "$root/local/flags"
 cp "$source_root"/zsh/*.zsh "$source_root"/zsh/*.toml "$root/zsh/"
 cp -R "$source_root/zsh/path" "$root/zsh/path"
+cp -R "$source_root/zsh/completions" "$root/zsh/completions"
 # Include the actual installed plugin code, but never the repository's private
 # overrides. Plugin availability remains optional for clean-checkout testing.
 [[ ! -d $source_root/zsh/plugins ]] || cp -R "$source_root/zsh/plugins" "$root/zsh/plugins"

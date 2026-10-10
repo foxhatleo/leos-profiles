@@ -427,6 +427,42 @@ source "$root/zsh/path/pyenv.zsh"
 source "$root/zsh/path/rbenv.zsh"
 [[ $PYENV_ROOT == $tmp/custom-python && $RBENV_ROOT == $tmp/custom-ruby ]] || fail 'version-manager roots overwritten'
 
+# pyenv init: no bash PATH rewrite (--no-push-path), no compctl completion, and
+# the shims still end up first on PATH, once, even when already present. The
+# fake emits what pyenv's guarded prepend and completion line look like.
+mkdir -p "$tmp/pyenv-root/bin" "$tmp/pyenv-root/shims" "$tmp/pyenv-root/completions"
+print -rl -- 'typeset -g PYENV_COMPCTL_LOADED=yes' > "$tmp/pyenv-root/completions/pyenv.zsh"
+cat > "$tmp/pyenv-root/bin/pyenv" <<'PYENV'
+#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/pyenv-calls"
+cat <<EOS
+if [[ ":\$PATH:" != *':$PYENV_ROOT/shims:'* ]]; then
+export PATH="$PYENV_ROOT/shims:\${PATH}"
+fi
+export PYENV_SHELL=zsh
+source '$PYENV_ROOT/completions/pyenv.zsh'
+pyenv() { command pyenv "\$@"; }
+EOS
+PYENV
+chmod +x "$tmp/pyenv-root/bin/pyenv"
+(
+  export PYENV_ROOT=$tmp/pyenv-root
+  rm -f -- "$HOME/pyenv-calls"
+  path=(/usr/bin "$PYENV_ROOT/shims" /bin)
+  for round in fresh cached; do
+    unset PYENV_COMPCTL_LOADED PYENV_SHELL
+    source "$root/zsh/path/pyenv.zsh"
+    [[ $PYENV_SHELL == zsh && -z ${PYENV_COMPCTL_LOADED-} ]] || fail "pyenv init ($round): compctl completion still sourced"
+    [[ $path[1] == $PYENV_ROOT/shims && ${#${(M)path:#$PYENV_ROOT/shims}} == 1 ]] ||
+      fail "pyenv shims not first exactly once ($round): $path"
+    (( $+functions[pyenv] )) || fail "pyenv shell function missing ($round)"
+  done
+  [[ $(<$HOME/pyenv-calls) == 'init --no-rehash --no-push-path - zsh' ]] ||
+    fail "pyenv init arguments or cache reuse: $(<$HOME/pyenv-calls)"
+  [[ -r $root/zsh/completions/_pyenv && $(head -n 1 "$root/zsh/completions/_pyenv") == '#compdef pyenv' ]] ||
+    fail 'compsys completion for pyenv missing'
+)
+
 # Bun selects a dialect from SHELL even when the running interpreter is Zsh.
 # A parent Bash/Fish shell must not cause Bash/Fish code to enter the cache.
 cat > "$tmp/bin/bun" <<'BUN'

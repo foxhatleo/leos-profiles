@@ -221,7 +221,8 @@ __leos_init_cache_identity() {
   emulate -L zsh
   local key=$1 real=$2
   shift 2
-  local -a fields=(v1 "$key" "$real" "$HOME" "${PYENV_ROOT:-}" "${RBENV_ROOT:-}" "$@")
+  local -a fields=(v1 "$key" "$real" "$HOME" "${PYENV_ROOT:-}" "${RBENV_ROOT:-}"
+                   "${__leos_init_filter-}" "$@")
   REPLY="# leos-id: ${(j: :)${(@q+)fields}}"
 }
 
@@ -256,6 +257,9 @@ __leos_init_cache_name() {
 }
 
 # __leos_init_cache <key> <bin> [args...]
+# A caller may name a filter function for the generated text with a prefix
+# assignment: `__leos_init_filter=fn leos-source-cached ...`. Bump the key when
+# the filter's behaviour changes; its name alone is part of the identity.
 # 0: REPLY is a verified script path; 1: REPLY is fresh text to eval;
 # 2: fresh empty/failed generation; 3: a previously recorded empty generation.
 __leos_init_cache() {
@@ -317,6 +321,14 @@ __leos_init_cache() {
   # Failed generators may print diagnostics or partial code on stdout. Never
   # execute or persist that output, and allow the next shell to retry.
   (( rc == 0 )) || return 2
+  # An optional filter function, named in the caller's __leos_init_filter (and
+  # part of the identity), edits the output in REPLY before it is used or kept.
+  if [[ -n ${__leos_init_filter-} ]]; then
+    (( $+functions[$__leos_init_filter] )) || return 2
+    REPLY=$generated
+    "$__leos_init_filter" || return 2
+    generated=$REPLY
+  fi
   if (( ! usable )); then
     [[ -n $generated ]] || return 2
     REPLY=$generated

@@ -57,9 +57,13 @@ zle -N down-line-or-beginning-search
   done
 }
 
-# zsh-completions must extend fpath BEFORE compinit.
+# zsh-completions must extend fpath BEFORE compinit. So must the profile's own
+# completions (zsh/completions: compsys replacements for tools that ship only
+# compctl ones), which come first.
 [[ -d $LEOS_PROFILES_ZSH/plugins/zsh-completions/src ]] && \
   fpath=("$LEOS_PROFILES_ZSH/plugins/zsh-completions/src" $fpath)
+[[ -d $LEOS_PROFILES_ZSH/completions ]] && \
+  fpath=("$LEOS_PROFILES_ZSH/completions" $fpath)
 
 # compinit — rebuild and audit at most once a day, else the fast path.
 #
