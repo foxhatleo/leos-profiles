@@ -32,21 +32,43 @@ prepare_local_dir() { mkdir -p "$LOCAL_DIR"; }
 write_profile() { printf '%s\t%s\n%s\t%s\n' "$SSH_MODE" "$SSH_KEY_PATH" "$GPG_MODE" "$GPG_KEY_ID" > "$PROFILE_FILE"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 api_keys='' api_gpg='' ordinary_login=tester selected_login=tester auth_ok=yes api_ok=yes signing_ok=yes
+# Toggles for the refusal and manual-action branches (CI-9): the login the
+# API reports, the verified emails, and a failure of one endpoint, which gh
+# reports on stderr with exit status 1:
+#   404   a missing OAuth scope (gh adds the scope hint)
+#   403   a fine-grained token without the permission
+#   rate  a 403 rate limit (no scope involved)
+#   500   a server error
+#   net   no connection
+api_login=tester verified_emails=test@example.com gh_fail_endpoint='' gh_fail_kind=''
 ssh_keygen_calls="$fixture/keygen-calls"
 gh() {
   local IFS=' '
   printf '%s\n' "$*" >> "$fixture/gh-calls"
   [[ $api_ok == yes || $1 != api ]] || return 1
+  if [[ -n $gh_fail_endpoint && " $* " == *" $gh_fail_endpoint "* ]]; then
+    case $gh_fail_kind in
+      404) printf '%s\n' 'gh: Not Found (HTTP 404)' \
+        'This API operation needs the "admin:public_key" scope. To request it, run:  gh auth refresh -h github.com -s admin:public_key' >&2 ;;
+      403) printf '%s\n' 'gh: Resource not accessible by personal access token (HTTP 403)' >&2 ;;
+      rate) printf '%s\n' 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2 ;;
+      500) printf '%s\n' 'gh: Server Error (HTTP 502)' >&2 ;;
+      net) printf '%s\n' 'error connecting to api.github.com' 'check your internet connection or https://githubstatus.com' >&2 ;;
+    esac
+    return 1
+  fi
   case "$*" in
     'auth status --hostname github.com') [[ $auth_ok == yes ]] ;;
-    'api --hostname github.com user --jq .login') echo tester ;;
+    'api --hostname github.com user --jq .login') printf '%s\n' "$api_login" ;;
     'api --hostname github.com --paginate user/keys --jq .[].key') printf '%s' "$api_keys" ;;
     'api --hostname github.com --paginate user/gpg_keys --jq .[].key_id') printf '%s' "$api_gpg" ;;
-    'api --hostname github.com user/emails --jq '*) echo test@example.com ;;
+    'api --hostname github.com --paginate user/ssh_signing_keys --jq .[].key') printf '%s' "$api_signing_keys" ;;
+    'api --hostname github.com --paginate user/emails --jq .[] | select(.verified == true) | .email') printf '%s\n' "$verified_emails" ;;
     'api --hostname github.com meta --jq .ssh_keys[]') echo 'ssh-ed25519 AAAATEST' ;;
     *) fail "unexpected gh mutation or request: $*" ;;
   esac
 }
+api_signing_keys=''
 ssh-keygen() {
   printf '%s\n' "$*" >> "$ssh_keygen_calls"
   if [[ $1 == -y ]]; then echo 'ssh-ed25519 AAAATEST'; return; fi
@@ -72,13 +94,24 @@ ssh() {
   printf "Hi %s! You've successfully authenticated, but GitHub does not provide shell access.\n" "$login"
   return 1
 }
+# GPG toggles: the fingerprint the keyring reports (empty: no such secret
+# key, as gpg exits 2), the user ID, and an export that wrongly contains
+# private material.
+gpg_listed_fingerprint=same gpg_uid='Test User <test@example.com>' gpg_export_private=no
 gpg() {
   local IFS=' '
   printf '%s\n' "$*" >> "$fixture/gpg-calls"
   case "$*" in
-    *--list-secret-keys*) printf 'fpr:::::::::%s:\n' "$GPG_KEY_ID" ;;
-    *--list-keys*) printf 'uid:::::::::Test User <test@example.com>:\n' ;;
-    '--armor --export '*) printf '%s\n' '-----BEGIN PGP PUBLIC KEY BLOCK-----' 'PUBLIC FIXTURE' '-----END PGP PUBLIC KEY BLOCK-----' ;;
+    *--list-secret-keys*)
+      case $gpg_listed_fingerprint in
+        same) printf 'fpr:::::::::%s:\n' "$GPG_KEY_ID" ;;
+        '') return 2 ;;
+        *) printf 'fpr:::::::::%s:\n' "$gpg_listed_fingerprint" ;;
+      esac ;;
+    *--list-keys*) printf 'uid:::::::::%s:\n' "$gpg_uid" ;;
+    '--armor --export '*)
+      printf '%s\n' '-----BEGIN PGP PUBLIC KEY BLOCK-----' 'PUBLIC FIXTURE' '-----END PGP PUBLIC KEY BLOCK-----'
+      [[ $gpg_export_private == no ]] || printf '%s\n' '-----BEGIN PGP PRIVATE KEY BLOCK-----' ;;
     *--quick-generate-key*) printf '[GNUPG:] KEY_CREATED P %s\n' "$GPG_KEY_ID" ;;
     *) fail "unexpected gpg call: $*" ;;
   esac
@@ -173,6 +206,88 @@ expect_exit 3 provision_ssh
 grep -q 'original approved choices' "$fixture/error" || fail 'combined generation resume guidance missing'
 grep -q -- "--ssh reuse --ssh-key '$SSH_KEY_PATH'" "$fixture/error" || fail 'already generated SSH reuse guidance missing'
 GPG_MODE=reuse
+
+# --- Refusal and manual-action branches (CI-9; the gh scope part of CI-11) ---
+# expect_action <action> [destination]: the last run printed that record.
+expect_action() {
+  local record
+  record=$(grep $'^manual-action\t'"$1"$'\t' "$fixture/output" || true)
+  [[ -n $record ]] || fail "no $1 manual action: $(cat "$fixture/output" "$fixture/error")"
+  [[ $# -lt 2 || $record == *$'\t'"$2" ]] || fail "$1 destination: $record"
+}
+expect_no_action() {
+  ! grep -q '^manual-action' "$fixture/output" || fail "an error became a manual action: $(cat "$fixture/output")"
+}
+COMMAND=apply SSH_MODE=reuse SSH_KEY_PATH="$fixture/custom-key" GPG_MODE=skip SIGNING_MODE=skip
+api_keys='ssh-ed25519 AAAATEST' api_gpg=89ABCDEF01234567
+# A key list the token may not read is a typed manual action naming only the
+# scopes the selected modes need; anything else stays an error (ONB-2).
+for gh_fail_kind in 404 403; do
+  gh_fail_endpoint=user/keys
+  expect_exit 3 provision_ssh
+  expect_action github-key-scope 'gh auth refresh -h github.com -s read:public_key'
+done
+for gh_fail_kind in rate 500 net; do
+  expect_exit 1 provision_ssh
+  expect_no_action
+  grep -q 'refusing to guess' "$fixture/error" || fail "$gh_fail_kind: no refusal: $(cat "$fixture/error")"
+done
+GPG_MODE=reuse
+for gh_fail_kind in 404 403; do
+  gh_fail_endpoint=user/gpg_keys
+  expect_exit 3 provision_gpg
+  expect_action github-key-scope 'gh auth refresh -h github.com -s read:public_key,read:gpg_key'
+done
+gh_fail_kind=net
+expect_exit 1 provision_gpg
+expect_no_action
+# The email list: a missing scope is github-email-scope, a network failure an error.
+gh_fail_endpoint=user/emails gh_fail_kind=404
+expect_exit 3 provision_gpg
+expect_action github-email-scope https://github.com/settings/emails
+gh_fail_kind=net
+expect_exit 1 provision_gpg
+expect_no_action
+gh_fail_endpoint='' gh_fail_kind=''
+# An unverified Git email.
+verified_emails=someone-else@example.com
+expect_exit 1 provision_gpg
+grep -q 'not verified' "$fixture/error" || fail 'unverified email accepted'
+verified_emails=test@example.com
+# An invalid account login.
+api_login='bad login!'
+expect_exit 1 provision_ssh
+grep -q 'invalid account login' "$fixture/error" || fail 'invalid login accepted'
+api_login=tester
+# The keyring returns another key, or none (CQ-2: a clear message, not a silent exit).
+gpg_listed_fingerprint=FEDCBA9876543210FEDCBA9876543210FEDCBA98
+expect_exit 1 provision_gpg
+grep -q 'different key' "$fixture/error" || fail "fingerprint mismatch accepted: $(cat "$fixture/error")"
+gpg_listed_fingerprint=''
+expect_exit 1 provision_gpg
+grep -q 'was not found' "$fixture/error" || fail "missing key not reported: $(cat "$fixture/error")"
+gpg_listed_fingerprint=same
+# The key has no user ID for the Git email.
+gpg_uid='Test User <other@example.com>'
+expect_exit 1 provision_gpg
+grep -q 'no user ID' "$fixture/error" || fail 'key without the email UID accepted'
+gpg_uid='Test User <test@example.com>'
+# An export containing private material is refused and never saved.
+api_gpg='' gpg_export_private=yes
+rm -f "$LOCAL_DIR/gpg-public-$GPG_KEY_ID.asc"
+expect_exit 1 provision_gpg
+expect_no_action
+grep -q 'private key material' "$fixture/error" || fail 'private export not refused'
+[[ ! -e $LOCAL_DIR/gpg-public-$GPG_KEY_ID.asc ]] || fail 'private export was saved'
+! grep -q 'PRIVATE KEY' "$fixture/output" "$fixture/error" || fail 'private material printed'
+# The manual action's own check refuses a file with private material too.
+printf '%s\n' '-----BEGIN PGP PUBLIC KEY BLOCK-----' '-----BEGIN PGP PRIVATE KEY BLOCK-----' \
+  '-----END PGP PUBLIC KEY BLOCK-----' > "$fixture/bad-export.asc"
+expect_exit 1 credential_manual_action register-gpg-key "$fixture/bad-export.asc" https://github.com/settings/gpg/new explanation
+grep -q 'Invalid public GPG export' "$fixture/error" || fail 'manual action accepted private material'
+expect_no_action
+gpg_export_private=no api_gpg=89ABCDEF01234567
+
 # Credential prerequisite installation requests only missing packages.
 # The overrides below are invoked indirectly by the code under test.
 # shellcheck disable=SC2317

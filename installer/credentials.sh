@@ -88,12 +88,67 @@ ssh_public_material() {
   awk 'NF >= 2 { print $1 " " $2; exit }' "$1"
 }
 
+# github_list <endpoint> <jq filter>: every page of a read-only GitHub API
+# list, one jq result per line. Status 0 on success; 2 when the token lacks
+# the scope the endpoint needs; 1 for anything else. gh exits 1 for every
+# failure, so the two are told apart by its message: a missing OAuth scope is
+# an HTTP 404 (or 403) that names the scope ("This API operation needs the
+# "admin:public_key" scope", from the X-Accepted-OAuth-Scopes header), and a
+# fine-grained token without the permission is a 403 "Resource not accessible
+# by ... token". A network error, a 5xx, or a 403 rate limit names neither,
+# and stays an error: it is never evidence that a key is missing (ONB-2).
+github_list() {
+  local endpoint=$1 filter=$2 errors output status=0
+  errors=$(mktemp "${TMPDIR:-/tmp}/leos-gh.XXXXXX")
+  output=$(gh api --hostname github.com --paginate "$endpoint" --jq "$filter" 2> "$errors") || status=$?
+  if (( status == 0 )); then
+    rm -f -- "$errors"
+    [[ -z $output ]] || printf '%s\n' "$output"
+    return 0
+  fi
+  sed 's/^/  gh: /' "$errors" >&2
+  if grep -Eq 'HTTP 40[34]' "$errors" && grep -Eqi 'scope|resource not accessible' "$errors"; then
+    status=2
+  else
+    status=1
+  fi
+  rm -f -- "$errors"
+  return "$status"
+}
+
+# The read scopes the selected credential modes need for listing keys.
+github_key_scopes() {
+  local scopes=""
+  [[ ${SSH_MODE:-skip} == skip ]] || scopes+=",read:public_key"
+  [[ ${GPG_MODE:-skip} == skip ]] || scopes+=",read:gpg_key"
+  [[ ${SIGNING_MODE:-skip} != ssh ]] || scopes+=",read:ssh_signing_key"
+  printf '%s' "${scopes#,}"
+}
+
+# github_list_failed <status> <endpoint> <description>: a scope problem is a
+# manual action (exit 3); any other failure is an error.
+github_list_failed() {
+  local status=$1 endpoint=$2 description=$3 scopes refresh
+  if [[ $status == 2 ]]; then
+    scopes=$(github_key_scopes)
+    case $endpoint in
+      user/keys) [[ ,$scopes, == *,read:public_key,* ]] || scopes+=",read:public_key" ;;
+      user/gpg_keys) [[ ,$scopes, == *,read:gpg_key,* ]] || scopes+=",read:gpg_key" ;;
+      user/ssh_signing_keys) [[ ,$scopes, == *,read:ssh_signing_key,* ]] || scopes+=",read:ssh_signing_key" ;;
+    esac
+    refresh="gh auth refresh -h github.com -s ${scopes#,}"
+    credential_manual_action github-key-scope '' "$refresh" \
+      "GitHub CLI's token may not read your $description ($endpoint answered HTTP 403/404 for a missing scope). Grant read-only access yourself with: $refresh (a GITHUB_TOKEN in the environment needs the same read permissions), then rerun. Nothing was uploaded."
+  fi
+  die "Could not list GitHub $description; refusing to guess (check network and gh auth)"
+}
+
 github_ssh_key_present() {
-  local public_key=$1 material remote_keys
+  local public_key=$1 material remote_keys status=0
   material=$(ssh_public_material "$public_key")
   [[ -n $material ]] || return 1
-  remote_keys=$(gh api --hostname github.com --paginate user/keys --jq '.[].key') \
-    || die "Could not list GitHub SSH keys; refusing to guess (check network and gh auth)"
+  remote_keys=$(github_list user/keys '.[].key') || status=$?
+  (( status == 0 )) || github_list_failed "$status" user/keys "SSH keys"
   awk 'NF >= 2 { print $1 " " $2 }' <<< "$remote_keys" | grep -qxF "$material"
 }
 
@@ -167,11 +222,13 @@ verify_github_api() {
 }
 
 github_email_is_verified() {
-  local email=$1 verified
-  if ! verified=$(gh api --hostname github.com user/emails --jq '.[] | select(.verified == true) | .email' 2>/dev/null); then
+  local email=$1 verified status=0
+  verified=$(github_list user/emails '.[] | select(.verified == true) | .email') || status=$?
+  if [[ $status == 2 ]]; then
     credential_manual_action github-email-scope '' https://github.com/settings/emails \
       "Grant GitHub CLI email-read access yourself with gh auth refresh --hostname github.com -s user:email, then rerun."
   fi
+  (( status == 0 )) || die "Could not read the GitHub account's email addresses; refusing to guess (check network and gh auth)"
   grep -qxiF "$email" <<< "$verified"
 }
 
@@ -282,9 +339,9 @@ gpg_key_has_email() {
 }
 
 github_gpg_key_present() {
-  local fingerprint=$1 remote_ids
-  remote_ids=$(gh api --hostname github.com --paginate user/gpg_keys --jq '.[].key_id') \
-    || die "Could not list GitHub GPG keys; refusing to guess (check network and gh auth)"
+  local fingerprint=$1 remote_ids status=0
+  remote_ids=$(github_list user/gpg_keys '.[].key_id') || status=$?
+  (( status == 0 )) || github_list_failed "$status" user/gpg_keys "GPG keys"
   awk -v fingerprint="$fingerprint" '
     BEGIN { fingerprint=toupper(fingerprint) }
     {
@@ -310,17 +367,19 @@ provision_gpg() {
   command -v gh >/dev/null 2>&1 || die "GPG provisioning requires gh; install/authenticate it first"
   ensure_github_auth
   verify_github_api
+  # ensure_git_identity leaves the effective global identity in
+  # GIT_NAME/GIT_EMAIL, so it is not read again here (CQ-2).
   ensure_git_identity
-  local name email keyid="" creation_output exported_key
-  name=$(git config --global user.name || true)
-  email=$(git config --global user.email || true)
+  local name=$GIT_NAME email=$GIT_EMAIL keyid="" creation_output exported_key
   [[ -n $name && -n $email ]] || die "Set global git user.name and user.email before GPG provisioning"
   github_email_is_verified "$email" || die "Git email is not verified on the authenticated GitHub account: $email"
   if [[ $GPG_MODE == reuse ]]; then
     [[ $GPG_KEY_ID =~ ^[A-Fa-f0-9]{40}$ || $GPG_KEY_ID =~ ^[A-Fa-f0-9]{64}$ ]] || die "Select a full GPG fingerprint"
-    keyid=$(gpg_secret_fingerprint "$GPG_KEY_ID")
-    [[ $(printf '%s' "$keyid" | tr '[:lower:]' '[:upper:]') == "$(printf '%s' "$GPG_KEY_ID" | tr '[:lower:]' '[:upper:]')" ]] || die "GPG returned a different key from the selected fingerprint"
-    [[ -n $keyid ]] || die "The selected GPG secret key was not found: $GPG_KEY_ID"
+    # gpg exits non-zero for an unknown key; that is the "not found" case
+    # below, not a silent errexit.
+    keyid=$(gpg_secret_fingerprint "$GPG_KEY_ID" || true)
+    [[ -n $keyid ]] || die "The selected GPG secret key was not found in the keyring (${GNUPGHOME:-~/.gnupg}): $GPG_KEY_ID"
+    [[ $(printf '%s' "$keyid" | tr '[:lower:]' '[:upper:]') == "$(printf '%s' "$GPG_KEY_ID" | tr '[:lower:]' '[:upper:]')" ]] || die "GPG returned a different key ($keyid) from the selected fingerprint $GPG_KEY_ID"
   else
     if [[ $GPG_PASSPHRASE_MODE == prompt ]]; then
       creation_output=$(gpg --status-fd 1 --quick-generate-key "$name <$email>" ed25519 sign never)
@@ -359,6 +418,8 @@ provision_gpg() {
     track_temp "$export_tmp"
     gpg --armor --export "$keyid" > "$export_tmp"
     [[ -s $export_tmp ]] || die "GPG did not export public key material"
+    # Never leave secret material at the path a manual action shows.
+    ! grep -q -- 'PRIVATE KEY' "$export_tmp" || die "GPG export contained private key material; refusing to save it"
     chmod 600 "$export_tmp"
     mv -f "$export_tmp" "$exported_key"
     credential_manual_action register-gpg-key "$exported_key" https://github.com/settings/gpg/new \
