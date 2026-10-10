@@ -1,10 +1,11 @@
 # Leo's Profiles
 
 Leo's Profiles is a portable, Zsh-centered workstation setup for macOS and
-Linux. The intended setup experience is AI-first: the AI inspects the machine,
-presents controlled selection boxes, resolves dependencies, explains the whole
-plan, gets approval, and delegates execution to the repository's deterministic
-shell engine.
+Linux. Setup is a deterministic shell engine with an interactive wizard:
+`install.sh setup` inspects the machine, asks what to install, resolves
+dependencies, shows the whole plan, and applies it after you approve, in your
+own terminal. An AI assistant is optional: it can explain the same plan and
+hand you the command ([`QUICK-INSTALL.md`](./QUICK-INSTALL.md)).
 
 Recommended is intentionally broad. A first installation installs the full
 default workstation selection and performs a full package-manager/host upgrade.
@@ -16,20 +17,65 @@ policy are Auto.
 
 ## Start here
 
-- **Claude Code:** give it [`QUICK-INSTALL.md`](./QUICK-INSTALL.md) in a
-  session with its single-select/multi-select question-box UI.
-- **Codex:** enter **Plan mode first**, then submit
-  [`QUICK-INSTALL.md`](./QUICK-INSTALL.md). The question UI used by this setup
-  is currently available there.
+Clone the profile to `~/.leos-profiles` and run the setup wizard in your own
+terminal:
 
-If the UI is unavailable, restart in the correct mode. The setup deliberately
-does not fall back to a typed questionnaire, and users should not need to learn
-installer flags.
+```bash
+git clone https://github.com/foxhatleo/leos-profiles.git ~/.leos-profiles
+~/.leos-profiles/install.sh setup
+```
 
-The default installation directory is `~/.leos-profiles`. A new setup clones
-the current GitHub default branch there and runs that checkout in place. The
-local checkout is authoritative: local edits take effect immediately and the
-installer does not enforce a particular release, commit, origin, owner, or
+The wizard first checks the machine (read-only) and lists what is in the way
+or already there. Then choose **Recommended** or **Customize** (numbered
+lists: type numbers to toggle, Enter to accept, `q` to quit). It shows the
+complete plan, from the engine's own inspection: selected and implied groups,
+the exact OS packages, locked downloads, files and managed blocks, what runs
+as root, what cannot be undone, side effects, and the manual steps to expect.
+Nothing changes until you confirm. Then it runs `install.sh apply` with
+exactly those choices: sudo asks for your password once, at the start, and a
+new key's passphrase or `chsh` may ask too. When a step needs you (registering
+a key on GitHub, granting GitHub CLI a scope), the run pauses with a numbered
+list of what to do and resumes when you press Enter. With a saved setup, the
+wizard offers to reconcile it (repair and install what is missing) or to
+change the selection.
+
+`install.sh setup --print-command` asks the same questions but prints the
+equivalent `bash install.sh apply --yes …` command instead of running it, to
+review it or to reproduce the setup on another machine. `--dry-run` runs the
+plan as a dry run. The wizard needs a terminal and works in 80 columns; set
+`NO_COLOR` for plain output. To have an AI assistant explain the machine's
+findings and your choices first, give it
+[`QUICK-INSTALL.md`](./QUICK-INSTALL.md): it inspects, explains, and hands you
+the command to run here.
+
+Without Git, install it first with the OS's own tools (macOS: run
+`xcode-select --install` and complete the Command Line Tools installation;
+Debian/Ubuntu: `sudo apt-get update && sudo apt-get install -y git curl
+ca-certificates`; Fedora: `sudo dnf install -y git curl ca-certificates`;
+Arch: `sudo pacman -Syu --needed git curl ca-certificates`).
+`bash ~/.leos-profiles/install.sh setup` is equivalent to the second command.
+
+### Non-interactive use and automation
+
+The wizard is a front end; everything it does is available directly:
+
+- `bash install.sh inspect [options]` prints the plan for those options as
+  typed TSV records and changes nothing (`inspect --saved` for the saved
+  selection). The record types are listed in
+  [docs/development.md](./docs/development.md#state-and-tsv-contract).
+- `bash install.sh apply --yes [options]` runs an approved plan, with the
+  same options (`bash install.sh --help`). Pass `--node-version` with the
+  version inspect's `runtime` record resolved.
+- `bash install.sh reconcile --yes [--full-upgrade]` repairs the saved setup.
+- Exit status 3 means a manual step is needed (`manual-action` records); 2
+  means the Node version changed since it was inspected (`--node-version`),
+  so inspect again. Without a
+  terminal, a run that would need a password stops before changing anything
+  with a `run-in-terminal` action carrying the command to run yourself.
+
+The default installation directory is `~/.leos-profiles`, and the checkout
+runs in place. The local checkout is authoritative: local edits take effect
+immediately and the installer does not enforce a particular release, commit, origin, owner, or
 signature. The updater is stricter only about pulling: it requires a clean
 branch checkout with a configured upstream, then uses `git pull --ff-only`.
 
@@ -44,10 +90,12 @@ local SSH/GPG preparation and read-only GitHub verification, a verified Nerd
 Fonts release archive, and `chsh`. chezmoi covers that only through `run_once_` escape hatches, which
 would leave the same amount of shell to maintain plus a second tool to learn.
 
-The engine also exists to serve the AI-first flow: `inspect` emits typed TSV for
-an agent to turn into selection boxes, and `apply` is a non-interactive executor
-with per-step signatures and postcondition verification. That contract is the
-product, not an accident of not knowing chezmoi exists.
+The engine's contract is also the product: `inspect` emits a typed TSV plan
+and `apply` is a non-interactive executor with per-step signatures and
+postcondition verification. The `setup` wizard is a thin front end over that
+contract (it presents the inspected plan and calls apply), and so is an
+optional AI assistant or your own script. That is a deliberate design, not an
+accident of not knowing chezmoi exists.
 
 The cost is honest: a bespoke idempotency/state/locking engine to keep correct,
 which is why it carries a test suite and a per-OS CI matrix. If the dotfile
@@ -70,8 +118,9 @@ configuration, and default-shell setup imply `shell`. Bun, fnm, Yarn, pnpm and
 uv imply no OS runtimes: they are self-contained, and Yarn/pnpm run on fnm's
 Node, so selecting them never installs a system Node, Python or Ruby that
 non-interactive shells would then pick up. Yarn and pnpm imply fnm, which runs
-before their installation. The AI shows all selected and implied groups plus
-exact OS package membership before asking for approval.
+before their installation. The wizard marks implied groups as you choose and
+shows all selected and implied groups plus exact OS package membership before
+asking for approval.
 
 `languages` (system node, python and ruby) stays its own group. `heroku` is
 macOS-only and opt-in: the Heroku CLI comes from Heroku's third-party Homebrew
@@ -79,7 +128,7 @@ tap, which is added (and shown in the plan) only when this group is selected.
 
 Recommended selects every component except `bins`, and every package group
 except `python` and `heroku`. Customize allows whole-group selection. The initial package pass keeps
-the broad full-upgrade default, but the AI offers a no-full-upgrade choice.
+the broad full-upgrade default, but Customize offers a no-full-upgrade choice.
 With `--no-full-upgrade`, only missing selected packages are requested from the
 package manager. Dependency resolution can still install or upgrade dependencies;
 this does not freeze the host package set.
@@ -88,8 +137,9 @@ this does not freeze the host package set.
 
 `install.sh` derives the profile root only from its own physical directory.
 It provides a typed TSV inspection stream, an explicit approved apply,
-reconciliation from the saved local profile, and managed-block removal. It is not a
-second wizard and never asks setup questions.
+reconciliation from the saved local profile, managed-block removal, an
+inventory, and the `setup` wizard. Only `setup` asks questions; it then runs
+apply or reconcile, which never do.
 
 The entire ignored `local/` directory is machine-owned:
 
@@ -116,7 +166,7 @@ secret-key material there. User-managed `private.zsh` may contain secrets.
 Public GPG exports awaiting manual registration are also kept under `local/`. The directory uses mode 700 and files mode 600 as ordinary local
 hygiene. On first use, legacy XDG installer state, `zsh/_private.zsh`, and the
 old home-directory markers are migrated. Conflicting old/new values stop with
-both paths for the AI to resolve.
+both paths for you to resolve.
 
 Apply/reconcile uses an atomic `local/.install.lock`, secure temporary paths,
 cleanup traps, atomic profile/state/config writes, and first-write managed-block
@@ -259,7 +309,9 @@ ssh-key add` / `gh gpg-key add` yourself needs the `admin:` scopes instead.
 Missing registration produces a `manual-action` TSV record and exits with
 status **3**, including the public-key file and destination URL. The selected
 reference is saved first, and a public GPG export remains available after
-cleanup. Register it yourself, then run the guided reconciliation again.
+cleanup. Register it yourself, then resume: the wizard resumes when you
+press Enter (reusing any key it already generated); otherwise rerun the same
+apply with `reuse` for keys already created, or `reconcile --yes`.
 Missing login or ordinary SSH configuration similarly produces manual
 guidance. A network/API failure (or a rate limit) remains an error, not
 evidence that a key is missing.
@@ -523,8 +575,9 @@ upgrade such as `do-release-upgrade` or `dnf system-upgrade`. Arch is rolling,
 so `pacman -Syu` is inherently in-release.
 
 `bye` remains the full maintenance-and-exit command. By default it runs package
-maintenance, uses native `claude update`/`codex update` only for detected
-installed AI CLIs, safely clears known history files, performs the intended
+maintenance, runs `ai-checkup` (native `claude update`/`codex update`, and
+`opencode upgrade` for an opencode that Homebrew does not manage, only for the
+AI CLIs it detects), safely clears known history files, performs the intended
 system-wide macOS metadata scan, restarts Finder/Dock/SystemUIServer, and exits
 the current shell.
 

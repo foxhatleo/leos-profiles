@@ -1,150 +1,53 @@
-# Leo's Profiles master setup prompt
+# Leo's Profiles: AI-assisted setup (optional)
 
-Copy this entire file into your AI coding tool.
+You do not need an AI to install Leo's Profiles. The supported path is the
+setup wizard in your own terminal (see the README's "Start here"):
 
-- **Claude Code:** submit it in a session that can display single-select and
-  multi-select question boxes.
-- **Codex:** enter **Plan mode before submitting this prompt**. The setup uses
-  Plan mode's question UI.
-- If the current session cannot display select boxes, stop. Explain how to
-  restart in the correct mode and do not replace the UI with typed questions
-  or make the user operate `install.sh` directly.
+```bash
+git clone https://github.com/foxhatleo/leos-profiles.git ~/.leos-profiles
+~/.leos-profiles/install.sh setup
+```
 
-Prerequisites are a supported macOS/Linux host, network access, an interactive
-AI terminal session, and permission to use the host package manager (`sudo` on
-Linux and for privileged maintenance). Git is preferred but can be bootstrapped
-with the OS-native commands below. GitHub credential setup additionally needs
-an account that can authenticate through GitHub CLI.
-
-`apply` and `reconcile` never ask *setup* questions, but they are not unattended:
-depending on the selection they can still pause for the Homebrew installer's own
-confirmation and `sudo` prompt, `sudo` authentication and re-prompts on Linux,
-`chsh` asking for the user's password on Linux, and an
-`ssh-keygen`/`gpg` passphrase prompt when passphrase mode is `prompt`. Tell the
-user this before invoking apply so they know to stay at the keyboard. Before
-changing anything, apply checks for these: run without a terminal, a plan that
-needs any of them (sudo without a cached or passwordless login included) stops
-with a `run-in-terminal` manual action and exit 3, and the user runs the
-command it carries in their own terminal.
+If you would like an assistant (Claude Code, Codex, or any agent that can run
+shell commands) to look at the machine first, explain the choices and the
+plan in plain language, and then give you the exact command, give it this
+file. The assistant never runs the installation itself: sudo, Homebrew's
+installer, `chsh` and key passphrases need your terminal.
 
 ---
 
-You are setting up Leo's Profiles. You own the guided experience; the shell
-installer is only your deterministic execution engine.
+## Instructions for the assistant
 
-## Rules
+You are helping the user set up Leo's Profiles. The shell installer in the
+checkout is a deterministic engine; you inspect, explain and advise, and the
+user runs every command that changes the machine in their own terminal.
 
-1. Inspect the host and any existing checkout before asking questions. Use
-   select-box UI only, in stages containing at most three questions.
-2. First ask one single-select question: **Recommended full setup** (default)
-   or **Customize**.
-3. Recommended selects every current default component and package group,
-   except optional `bins`/rpatool and the opt-in `python` and `heroku`
-   package groups. Credentials default to Skip, fonts to Auto, default shell
-   to Auto, and the initial package pass performs a full host upgrade.
-4. For Customize, ask two multi-select questions together:
-   - Components: `bins`, `packages`, `pyenv`, `rbenv`, `bun`, `yarn`, `pnpm`,
-     `fnm`, `uv`, `plugins`, `fonts`, `zsh-config`, `default-shell`.
-   - Package groups: `core-utils`, `shell`, `dev-tools`, `languages`,
-     `python`, `media`, `network`, `heroku` (macOS only), `system`.
-5. A selected group means every member. Preserve dependency closure: rpatool
-   implies `packages` plus `python`; Bun, fnm, Yarn, pnpm and uv imply only
-   `packages`; pyenv/rbenv imply `packages` plus `dev-tools`; plugins, Zsh
-   config, and default shell imply `packages` plus `shell`. Yarn and pnpm also
-   imply fnm; install fnm before either npm tool.
-6. Ask conditional choices in later stages of no more than three questions:
-   fonts; full initial host upgrade; default-shell policy; SSH; GPG; commit
-   signing; missing Git identity; and exact key selection. SSH, GPG and
-   signing must have **Skip** preselected. Reuse must select one specifically
-   discovered key (`--ssh reuse --ssh-key <path>`, `--gpg reuse --gpg-key
-   <fingerprint>`); a key held only by the user's SSH agent (1Password,
-   Secretive) is `--ssh agent --ssh-key <SHA256 fingerprint or comment from
-   ssh-add -L>`. Never pick a key for the user. For generation, explain both
-   passphrase policies and recommend `prompt`: `empty` (the default) leaves
-   the key unencrypted. New GPG keys expire after `--gpg-expiry` (default
-   `2y`; `0`/`never` only if the user asks). The default new SSH path is
-   `~/.ssh/id_ed25519`; a different unused absolute path can be chosen.
-   Never replace or silently reuse an existing key.
-   Signing: `--signing ssh` (recommended when signing: uses the SSH key, no
-   GPG needed), `--signing gpg`, or `skip` (leaves signing settings alone).
-   `--ssh-config yes` (recommended on macOS with a `prompt` passphrase) adds
-   a managed `Host github.com` block to `~/.ssh/config` (AddKeysToAgent,
-   UseKeychain on macOS, IdentityFile); without it SSH configuration is
-   never changed.
-7. GitHub CLI's default login cannot read keys. The checks need these read
-   scopes: `read:public_key` (SSH), `read:gpg_key` (GPG),
-   `read:ssh_signing_key` (`--signing ssh`), and `user:email` (GPG or SSH
-   signing, to confirm the Git email is verified), for example `gh auth
-   refresh -h github.com -s read:public_key,read:ssh_signing_key,user:email`.
-   A missing one is a `github-key-scope` (or `github-email-scope`) manual
-   action whose destination is the command to run. Missing login or scope is a
-   manual step: show the engine's guidance and let the user authenticate or
-   grant scope. Do not execute login, key uploads, or SSH identity/protocol
-   changes for the user.
-8. Run the checkout's `bash install.sh inspect ...` with the explicit choices.
-   Parse its typed TSV; do not expose the CLI as a second questionnaire. Use
-   the engine's internal `none` value for an empty component/package
-   multi-select.
-9. Before approval, present one complete resolved plan showing:
-   - selected and implied component, package, bootstrap, SSH, and GPG groups;
-   - every package member and the full-upgrade effect; explain that
-     `--no-full-upgrade` requests only missing selected packages but dependency
-     resolution may still upgrade dependencies;
-   - external repositories/taps and locked direct artifacts;
-   - the preserved fnm default, adopted existing Node version, or resolved LTS
-     fallback, with its compatibility against selected tools;
-   - credential actions, selected references, and manual GitHub registration
-     or SSH configuration steps;
-   - any schema-1 to schema-2 profile migration reported by inspection;
-   - files and managed blocks, global Git settings, shell changes, and every
-     irreversible (`irreversible`) or root (`privileged`) action and side
-     effect (`behaviour`);
-   - `warning`, `conflict`, `existing` and `shadow` records: an unsupported
-     Mac, an existing `~/.pyenv`/`~/.rbenv` (offer to keep it with
-     `--skip-existing-version-managers`), shell setups the profile will sit
-     next to, and Homebrew tools the pinned copies will shadow.
-10. Obtain one explicit approval. Then invoke `bash install.sh apply --yes ...`
-    with the same normalized choices, plus `--node-version <the runtime
-    record's version>` when inspect resolved one (exit 2 then means the plan
-    changed: inspect again and re-approve). Do not reimplement provisioning
-    commands. If apply exits 3 with a `run-in-terminal` manual action, nothing
-    was changed: give the user that exact command to run in their own
-    terminal (it needs their sudo password or a prompt), wait, then continue
-    from its output.
-11. The checkout containing `install.sh` is authoritative and is installed in
-    place. Local edits are valid. Do not add release, ref, origin, commit,
-    ownership, or signature checks for that checkout.
-12. Exit 3 means manual action is required, not successful completion. Parse
-    `manual-action` records, show the public-key path and destination, and wait
-    for the user to complete that action. Never upload keys or configure SSH
-    identities automatically. Resume with `reconcile --yes` after completion;
-    saved references are reused. If another initially selected generation had
-    not yet run, resume the originally approved apply choices, changing already
-    created keys to reuse their saved references. Obtain new approval only if
-    the requested choices change. Reconciliation never creates keys. For
-    failure exits, report the actual failure; do not guess registration.
-13. On success, summarize verified outcomes, saved local state, any skips, and
-    that a new login is needed if the default shell changed.
+### Rules
 
-## Obtaining the checkout
+1. You may run read-only commands: `bash ~/.leos-profiles/install.sh inspect
+   …` (with or without options), `inspect --saved`, `inventory`, `--help`, and
+   `git clone` of the checkout (ask first). Never run `apply`, `reconcile`,
+   `setup` or `remove-blocks` yourself: without a terminal they cannot ask for
+   passwords or passphrases (apply stops with a `run-in-terminal` manual
+   action and exit 3, having changed nothing).
+2. Ask for the user's choices in whatever interface you have: select boxes,
+   a numbered list, or plain questions. Use the engine's flag values; `none`
+   means an empty component or package-group selection.
+3. Never pick an SSH or GPG key for the user, never upload keys, log in to
+   GitHub, or change SSH settings on their behalf.
+4. Hand over one exact command (below), then help interpret its output.
 
-Use `~/.leos-profiles` unless the user already requested another directory.
-If that path is an existing Leo's Profiles checkout, use it in place and do
-not pull during setup. If it is absent, install the minimum Git bootstrap for
-the detected OS, then clone the current GitHub default branch directly there:
+### 1. Get the checkout
+
+Use `~/.leos-profiles`; an existing checkout there is used in place (do not
+pull during setup). Stop on an unrecognised existing directory. If Git is
+missing, install it with the OS's own tools first:
 
 ```bash
-git clone https://github.com/foxhatleo/leos-profiles.git "$HOME/.leos-profiles"
-```
-
-If both Git and curl are absent, these OS-native commands avoid a curl/Git
-deadlock:
-
-```bash
-# macOS: complete the displayed Command Line Tools installation, then retry Git
+# macOS: complete the Command Line Tools installation it opens, then retry
 xcode-select --install
 
-# Ubuntu or Debian
+# Debian or Ubuntu
 sudo apt-get update && sudo apt-get install -y git curl ca-certificates
 
 # Fedora
@@ -154,26 +57,98 @@ sudo dnf install -y git curl ca-certificates
 sudo pacman -Syu --needed --noconfirm git curl ca-certificates
 ```
 
-Stop on an unrecognized existing target instead of overwriting it. After the
-clone, execute only the `install.sh` inside that checkout. The engine saves the
-approved normalized profile before provisioning, so rerunning or reconciling
-can safely repair a partial failure.
+These need the user's password: give them to the user to run.
 
-## Inspection and resume contract
+### 2. Inspect and explain
 
-The inspection stream starts with `meta<TAB>schema<TAB>1`; this identifies the
-inspection format, not the saved profile schema. Saved profiles use schema 2.
-Read records by their type and preserve empty fields:
+Run `bash ~/.leos-profiles/install.sh inspect` (the Recommended plan), or
+`inspect --saved` when `~/.leos-profiles/local/install-profile.tsv` exists
+(a saved setup: suggest reconciling it). The output is tab-separated
+records. Read them by their first column and keep empty columns; never treat
+other output as records. Every record type is listed in
+[docs/development.md](./docs/development.md#state-and-tsv-contract). Explain
+in plain language, in particular:
 
-- `policy<TAB>node<TAB>preserve-compatible` describes runtime selection.
-- `runtime<TAB>node<TAB>VERSION<TAB>ORIGIN` identifies `preserved-fnm`,
-  `adopted-existing`, or `current-lts`; an unresolved preview is labeled as such.
-- `migration<TAB>profile-schema<TAB>1<TAB>2` announces automatic migration on
-  the next approved execution; inspection does not migrate files.
-- `manual-action<TAB>ACTION<TAB>PUBLIC_PATH<TAB>DESTINATION` accompanies exit 3.
-  Some actions, such as login, have no public-key path.
+- `warning`: an unsupported Mac (Intel, or macOS before 15) builds from
+  source or fails; a missing locked build for this platform.
+- `conflict`: an existing `~/.pyenv` or `~/.rbenv` that is not the pinned
+  checkout. Apply stops on it unless the user keeps it with
+  `--skip-existing-version-managers` (that component is then skipped).
+  `homebrew-install` is informational.
+- `existing` (oh-my-zsh, powerlevel10k, nvm, conda, asdf, mise) and
+  `shadow` (Homebrew copies the pinned tools will shadow): what coexists and
+  how; the README's "Existing setups" has the details.
+- `group` (selected and implied), `package`, `artifact`, `file`, `global`,
+  `action`, `privileged` (runs as root), `irreversible`, `behaviour`,
+  `migration`, `runtime` (the Node version) and `postcondition` (already
+  verified or still needed).
 
-Preserve a compatible fnm default, otherwise adopt the exact compatible Node
-version found on PATH, otherwise resolve current LTS. Compatibility is based on
-locked Yarn/pnpm engine metadata, not simply the newest available runtime.
-Read [docs/development.md](./docs/development.md) for the full engine contract.
+### 3. Ask the choices
+
+Recommended (the default) selects every component except `bins` (rpatool),
+every package group except `python` and `heroku`, a full in-release host
+upgrade, no SSH/GPG keys or signing, and fonts and default shell on `auto`.
+Customize covers:
+
+- Components (`--groups`): `packages`, `bins`, `pyenv`, `rbenv`, `bun`,
+  `fnm`, `yarn`, `pnpm`, `uv`, `plugins`, `fonts`, `zsh-config`,
+  `default-shell`. Package groups (`--package-groups`): `core-utils`,
+  `shell`, `dev-tools`, `languages`, `python`, `media`, `network`, `heroku`
+  (macOS only), `system`. The engine adds what a choice needs; inspect shows
+  those groups as `implied`.
+- SSH (`--ssh skip|generate|reuse|agent`, with `--ssh-key`): reuse needs the
+  user's chosen private-key path; agent needs the key's `SHA256:`
+  fingerprint from `ssh-add -l`. Generate defaults to `~/.ssh/id_ed25519`
+  and never replaces a file. Recommend `--ssh-passphrase prompt`.
+  `--ssh-config yes` adds a managed `Host github.com` block.
+- GPG (`--gpg skip|generate|reuse`, `--gpg-key <fingerprint>`): recommend
+  `--gpg-passphrase prompt`; `--gpg-expiry` defaults to `2y`.
+- Signing (`--signing skip|ssh|gpg`): SSH signing is the simpler choice when
+  an SSH key is selected. GPG or SSH signing needs a global Git identity:
+  `--git-name` and `--git-email` when Git has none.
+- `--fonts auto|yes|no` (`--font <Nerd Font name>` for yes),
+  `--default-shell auto|yes|no`, `--full-upgrade` or `--no-full-upgrade`,
+  and on macOS `--brew-mirror china|none`.
+
+GitHub CLI's default login cannot read keys. Tell the user which read scopes
+their choices need (`read:public_key` for SSH, `read:gpg_key` for GPG,
+`read:ssh_signing_key` for SSH signing, `user:email` for GPG or SSH signing),
+granted with `gh auth refresh -h github.com -s <scopes>`.
+
+Run `inspect` again with the chosen flags and present the whole plan from its
+records before handing over the command.
+
+### 4. Hand over the command
+
+Give the user one of these to run in their own terminal:
+
+- `~/.leos-profiles/install.sh setup`: the wizard asks the same questions
+  again, shows the same plan, and pauses and resumes for manual steps. Best
+  when they would rather click through it themselves.
+- The exact `apply` command for the inspected plan, with `--yes` and the
+  `--node-version` from the `runtime` record, for example:
+
+```bash
+bash ~/.leos-profiles/install.sh apply --yes --groups packages,fnm,pnpm,plugins,zsh-config --package-groups core-utils,shell,dev-tools --ssh skip --gpg skip --signing skip --fonts auto --default-shell auto --no-full-upgrade --node-version v24.11.1 2>&1 | tee ~/leos-setup.log
+```
+
+`tee` keeps a log you can read back. Tell the user what may prompt: sudo
+once at the start, Homebrew's own installer on a Mac without Homebrew, `chsh`
+on Linux, and a new key's passphrase.
+
+### 5. Read the result
+
+- Exit 0: summarise what was verified, any skipped component, and that a new
+  login is needed if the default shell changed.
+- Exit 3: manual action. Each `manual-action` record is `action`, public
+  file (may be empty) and destination, with an explanation printed below it.
+  Walk the user through each (register a key at the URL, or run the given
+  `gh auth refresh` command), then have them resume: the same apply again,
+  with `--ssh reuse --ssh-key <path>` or `--gpg reuse --gpg-key
+  <fingerprint>` for any key the first run created (the saved profile has
+  them), or `bash ~/.leos-profiles/install.sh reconcile --yes`. Reconcile
+  never generates keys.
+- Exit 2: the plan changed since inspection (for example a new Node LTS):
+  inspect again and hand over a new command.
+- Anything else: report the actual error. Never guess that a registration is
+  missing after a network or API failure.
