@@ -38,26 +38,33 @@ channel. Schema-1 profiles remain readable and are migrated by an approved
 apply/reconcile. Inspection and dry-run must not write the migration.
 
 The parser must preserve empty TSV columns and dispatch by record type; it must
-not treat prose progress output during apply as inspection records. Relevant
-records include:
+not treat prose progress output during apply as inspection records. Every
+record type the installer emits is listed below; "Columns" counts the record
+type itself, so `meta` has three tab-separated fields. `tests/readonly-test.sh`
+reads this table and fails on an undocumented type or a different count, so
+update it together with the emitter in `install.sh`.
 
-| Record | Remaining columns | Meaning |
-| --- | --- | --- |
-| `meta` | `schema`, `1` | Inspection format version |
-| `platform` | `family`, value | Selected OS package family |
-| `profile` | `root`, path | Authoritative local checkout |
-| `group` | category, name, status | Selected, implied or internal group |
-| `package` | OS family, name | Exact OS package member |
-| `artifact` | source kind, name, URL/repository, digest/commit | Locked executable dependency |
-| `policy` | `node`, `preserve-compatible` | Node selection policy |
-| `runtime` | `node`, version, origin | `preserved-fnm`, `adopted-existing`, or `current-lts` |
-| `migration` | `profile-schema`, `1`, `2` | Pending profile migration |
-| `postcondition` | component, status | Current `verified` or `needed` result |
-| `manual-action` | action, public path, destination | Manual intervention required; process exits 3 |
+| Record | Columns | Remaining columns | Meaning |
+| --- | --- | --- | --- |
+| `meta` | 3 | `schema`, `1` | Inspection format version |
+| `platform` | 3 | `family`, value | Selected OS package family |
+| `profile` | 3 | `root`, path | Authoritative local checkout |
+| `policy` | 3 | `node` or `full-upgrade`, value | Node selection policy; `yes`/`no` host upgrade |
+| `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
+| `migration` | 4 | `profile-schema`, `1`, `2` | Pending profile migration |
+| `group` | 4 | category, name, status | Selected, implied or internal group |
+| `package` | 3 | OS family, name | Exact OS package member |
+| `action` | 3 | step, description | Planned effect of a step or bootstrap |
+| `artifact` | 5 | source kind, name, URL/repository, digest/commit | Locked executable dependency |
+| `external` | 3 | service, description or URL | External service the plan contacts |
+| `file` | 3 | name, path | File the plan reads or writes |
+| `global` | 3 | `git`, keys | Global Git settings the plan configures |
+| `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone |
+| `runtime` | 4 | `node`, version, origin | `preserved-fnm`, `adopted-existing`, or `current-lts` |
+| `postcondition` | 3 | component, status | Current `verified` or `needed` result |
+| `manual-action` | 4 | action, public path, destination | Manual intervention required; process exits 3 |
 
-Other `channel`, `external`, `action`, `file`, and `global` records describe the
-plan's sources and effects. Read the emitter in `install.sh` when extending the
-contract. A runtime preview may report `unresolved` / `resolve-during-apply`.
+A runtime preview may report `unresolved` / `resolve-during-apply`.
 
 Manual-action names cover registration, login, email-read scope, key selection,
 and SSH identity configuration. An empty public-path field is valid for actions
