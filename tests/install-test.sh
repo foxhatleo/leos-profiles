@@ -261,6 +261,26 @@ test_font_verifier_accepts_renamed_families() (
   if font_is_installed; then
     fail "verifier accepted a different installed Nerd Font family"
   fi
+  # Linux follows the upstream installer's XDG_DATA_HOME font directory.
+  OS_FAMILY=apt FONT_NAME=JetBrainsMono XDG_DATA_HOME="$temp/xdg-data"
+  mkdir -p "$XDG_DATA_HOME/fonts/NerdFonts"
+  : > "$XDG_DATA_HOME/fonts/NerdFonts/JetBrainsMonoNerdFont-Regular.ttf"
+  font_is_installed || fail "Linux verifier ignored XDG_DATA_HOME"
+  rm -rf "$temp"
+)
+
+test_nerd_fonts_installer_ignores_xdg_data_home_on_macos() (
+  local temp seen
+  temp=$(mktemp -d)
+  printf '#!/bin/sh\nprintf "%%s" "${XDG_DATA_HOME-unset}" > "$1"\n' > "$temp/fake-install"
+  chmod +x "$temp/fake-install"
+  export XDG_DATA_HOME="$temp/xdg-data"
+  OS_FAMILY=macos nerd_fonts_installer "$temp/fake-install" "$temp/seen"
+  seen=$(cat "$temp/seen")
+  [[ $seen == unset ]] || fail "macOS Nerd Fonts install saw XDG_DATA_HOME=$seen"
+  OS_FAMILY=apt nerd_fonts_installer "$temp/fake-install" "$temp/seen"
+  seen=$(cat "$temp/seen")
+  [[ $seen == "$temp/xdg-data" ]] || fail "Linux Nerd Fonts install lost XDG_DATA_HOME"
   rm -rf "$temp"
 )
 
@@ -871,6 +891,7 @@ test_package_maps_cover_every_supported_os
 test_default_font_policy_and_npm_versions_are_locked
 test_macos_package_verification_batches_brew_calls
 test_font_verifier_accepts_renamed_families
+test_nerd_fonts_installer_ignores_xdg_data_home_on_macos
 test_ssh_public_material_ignores_comments
 test_github_key_checks_fail_closed_on_api_errors
 test_github_key_checks_still_match_present_keys

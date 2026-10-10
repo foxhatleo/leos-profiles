@@ -34,7 +34,8 @@ collect_artifacts() {
 on_exit() {
   local rc=$?
   (( rc == 0 )) || collect_artifacts
-  rm -rf -- "$FIXTURE"
+  # Background shim rehashes started by the smoke shells can still be writing.
+  rm -rf -- "$FIXTURE" 2>/dev/null || { sleep 3; rm -rf -- "$FIXTURE"; }
   return "$rc"
 }
 trap on_exit EXIT
