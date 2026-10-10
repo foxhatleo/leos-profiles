@@ -2116,7 +2116,17 @@ test_remove_blocks_and_inventory_need_no_supported_platform() {
   printf '#!/bin/sh\n[ "$1" = -s ] && { echo FreeBSD; exit 0; }\nexec /usr/bin/uname "$@"\n' > "$temp/bin/uname"
   chmod +x "$temp/bin/uname"
   printf '%s\n' '# >>> leos-profiles loader >>>' 'x' '# <<< leos-profiles loader <<<' > "$temp/home/.zshrc"
-  PATH="$temp/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  # detect_os also recognises Linux hosts by their package manager, so the
+  # fake host must not see apt-get, dnf or pacman: mirror the system tools
+  # without them.
+  local dir tool
+  for dir in /usr/bin /bin /usr/sbin /sbin; do
+    for tool in "$dir"/*; do
+      case ${tool##*/} in apt-get|dnf|pacman) continue ;; esac
+      [[ -e $temp/bin/${tool##*/} ]] || ln -s "$tool" "$temp/bin/${tool##*/}"
+    done
+  done
+  PATH="$temp/bin"
   out=$(run_cli "$temp/profile" "$temp/home" apply --yes --dry-run 2>&1) || status=$?
   [[ $status -ne 0 ]] || fail "apply ran on an unsupported host"
   assert_contains "$out" "Unsupported platform"
