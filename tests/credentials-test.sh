@@ -9,6 +9,11 @@ source "$ROOT/installer/credentials.sh"
 # pkg_install and the root prefix used by the credential prerequisites.
 # shellcheck source=../installer/packages.sh
 source "$ROOT/installer/packages.sh"
+# Managed blocks and symlink resolution (known_hosts, ~/.ssh/config,
+# gpg-agent.conf); file_mode lives in install.sh.
+# shellcheck source=../installer/config.sh
+source "$ROOT/installer/config.sh"
+file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 fixture=$(mktemp -d /tmp/leos-credentials.XXXXXX)
 trap 'rm -rf -- "$fixture"' EXIT
 export HOME="$fixture/home"
@@ -74,6 +79,11 @@ ssh-keygen() {
   if [[ $1 == -y ]]; then echo 'ssh-ed25519 AAAATEST'; return; fi
   if [[ $1 == -lf ]]; then echo '256 SHA256:TEST public fixture (ED25519)'; return; fi
   if [[ $1 == -F ]]; then awk -v host="$2" '$1 == host { print }' "$4"; return; fi
+  if [[ $1 == -R ]]; then
+    cp "$4" "$4.old"
+    awk -v host="$2" '$1 != host' "$4.old" > "$4"
+    return
+  fi
   local output=''
   while (( $# )); do
     if [[ $1 == -f ]]; then output=$2; shift; fi

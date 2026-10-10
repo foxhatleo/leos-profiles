@@ -236,7 +236,7 @@ github_email_is_verified() {
 }
 
 ensure_github_known_hosts() {
-  local approved scanned verified known_tmp host key_type key material existing
+  local approved scanned verified known_hosts known_tmp mode host key_type key material existing
   approved=$(mktemp)
   scanned=$(mktemp)
   verified=$(mktemp)
@@ -255,16 +255,32 @@ ensure_github_known_hosts() {
   [[ -s $verified ]] || die "GitHub SSH host keys did not match GitHub's published metadata"
   mkdir -p "$HOME/.ssh"
   chmod 700 "$HOME/.ssh"
-  known_tmp=$(mktemp "$HOME/.ssh/.known-hosts.tmp.XXXXXX")
+  # A symlinked known_hosts (dotfiles managers) is updated where it points;
+  # the link stays (SEC-7).
+  known_hosts=$(resolve_config_path "$HOME/.ssh/known_hosts")
+  mkdir -p "$(dirname -- "$known_hosts")"
+  known_tmp=$(mktemp "$(dirname -- "$known_hosts")/.known-hosts.tmp.XXXXXX")
   track_temp "$known_tmp"
-  if [[ -f $HOME/.ssh/known_hosts ]]; then cp "$HOME/.ssh/known_hosts" "$known_tmp"; fi
+  track_temp "$known_tmp.old"
+  mode=600
+  if [[ -f $known_hosts ]]; then
+    cp "$known_hosts" "$known_tmp"
+    mode=$(file_mode "$known_hosts")
+  fi
+  # Drop every github.com entry first, so a rotated or revoked host key (the
+  # RSA key GitHub replaced in 2023) does not stay trusted next to the
+  # verified ones (SEC-7). ssh-keygen -R handles hashed entries too; it
+  # leaves the previous contents in <file>.old.
+  ssh-keygen -R github.com -f "$known_tmp" >/dev/null 2>&1 ||
+    die "Could not remove old github.com entries from a copy of $known_hosts"
+  rm -f -- "$known_tmp.old"
   while IFS=$' \t' read -r host key_type key; do
     material="$key_type $key"
     existing=$(ssh-keygen -F "$host" -f "$known_tmp" 2>/dev/null | awk 'NF >= 3 && $1 !~ /^#/ { print $2 " " $3 }' || true)
     grep -qxF "$material" <<< "$existing" || printf '%s %s %s\n' "$host" "$key_type" "$key" >> "$known_tmp"
   done < "$verified"
-  chmod 600 "$known_tmp"
-  mv -f "$known_tmp" "$HOME/.ssh/known_hosts"
+  chmod "$mode" "$known_tmp"
+  mv -f "$known_tmp" "$known_hosts"
 }
 
 provision_ssh() {

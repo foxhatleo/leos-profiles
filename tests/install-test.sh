@@ -1193,6 +1193,30 @@ test_known_hosts_matches_metadata_and_dedupes() {
   rm -rf "$temp"
 }
 
+# SEC-7: stale github.com keys are dropped (other hosts keep theirs), and a
+# symlinked known_hosts is written through, keeping the link.
+test_known_hosts_drops_stale_keys_and_keeps_a_symlink() {
+  local temp written
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TEMP_PATHS=()
+  mkdir -p "$HOME/.ssh" "$temp/dotfiles"
+  gh() { printf '%s\n' 'ssh-ed25519 AAAAGOOD'; }
+  ssh-keyscan() { printf '%s\n' 'github.com ssh-ed25519 AAAAGOOD'; }
+  printf '%s\n' 'other.example ssh-rsa AAAAOLD' 'github.com ssh-rsa AAAAOLD' 'github.com ssh-ed25519 AAAAGOOD' \
+    > "$temp/dotfiles/known_hosts"
+  chmod 644 "$temp/dotfiles/known_hosts"
+  ln -s ../../dotfiles/known_hosts "$HOME/.ssh/known_hosts"
+  ensure_github_known_hosts
+  [[ -L $HOME/.ssh/known_hosts ]] || fail "the known_hosts symlink was replaced by a file"
+  written=$(cat "$temp/dotfiles/known_hosts")
+  assert_equals "$written" $'other.example ssh-rsa AAAAOLD\ngithub.com ssh-ed25519 AAAAGOOD'
+  assert_equals "$(file_mode "$temp/dotfiles/known_hosts")" 644
+  [[ -z $(find "$HOME/.ssh" "$temp/dotfiles" -name '*.old' -o -name '.known-hosts.tmp.*' | grep -v '^$' || true) ]] ||
+    fail "temporary known_hosts copies were left behind"
+  rm -rf "$temp"
+}
+
 # inspect_tsv for a zsh-config-only selection.
 inspect_zsh_config_only() {
   SELECTED_STEPS=zsh-config
@@ -2284,6 +2308,7 @@ TESTS=(
   test_set_default_shell_uses_unprivileged_chsh_on_linux
   test_set_default_shell_uses_sudo_chsh_on_macos
   test_known_hosts_matches_metadata_and_dedupes
+  test_known_hosts_drops_stale_keys_and_keeps_a_symlink
   test_package_signature_is_ifs_independent
   test_empty_package_selection_signs_and_runs
   test_pkg_install_uses_one_command_per_family
