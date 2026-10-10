@@ -26,7 +26,8 @@ cp -R "$ROOT/install.sh" "$ROOT/installer" "$ROOT/zsh" "$ROOT/util" "$FIXTURE/pr
 rm -rf -- "$FIXTURE/profile/zsh/plugins" "$FIXTURE/profile/zsh/_private.zsh"
 
 # The interpreter running this test also runs the installer (macOS CI runs both
-# under the system Bash 3.2).
+# under the system Bash 3.2). A developer's ZDOTDIR must not steer the plan.
+unset ZDOTDIR
 out=$(HOME="$FIXTURE/home" XDG_STATE_HOME="$FIXTURE/home/.local/state" \
   XDG_CONFIG_HOME="$FIXTURE/home/.config" XDG_CACHE_HOME="$FIXTURE/home/.cache" \
   XDG_DATA_HOME="$FIXTURE/home/.local/share" \

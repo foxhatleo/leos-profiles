@@ -51,13 +51,13 @@ update it together with the emitter in `install.sh`.
 | `profile` | 3 | `root`, path | Authoritative local checkout |
 | `policy` | 3 | `node` or `full-upgrade`, value | Node selection policy; `yes`/`no` host upgrade |
 | `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
-| `migration` | 4 | `profile-schema`, `1`, `2` | Pending profile migration |
+| `migration` | 4 | `profile-schema`, `1`, `2`; or `legacy-loader` / `legacy-environment`, file path, managed marker | Pending profile migration; or a legacy unmarked loader (`.zshrc`) or zshenv snippet (`.zshenv`) that `zsh-config` and `remove-blocks` remove |
 | `group` | 4 | category, name, status | Selected, implied or internal group |
 | `package` | 3 | OS family, name | Exact OS package member |
 | `action` | 3 | step, description | Planned effect of a step or bootstrap |
 | `artifact` | 5 | source kind, name, URL/repository, digest/commit | Locked executable dependency |
 | `external` | 3 | service, description or URL | External service the plan contacts |
-| `file` | 3 | name, path | File the plan reads or writes |
+| `file` | 3 | name, path | File the plan reads or writes; `zshrc`, `zshenv` and (macOS) `zprofile` give the resolved zsh startup files |
 | `global` | 3 | `git`, keys | Global Git settings the plan configures |
 | `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone |
 | `runtime` | 4 | `node`, version, origin | `preserved-fnm`, `adopted-existing`, or `current-lts` |

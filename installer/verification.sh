@@ -113,8 +113,13 @@ verify_fonts() {
 
 verify_zsh_config() {
   local directory
-  managed_block_equals "$HOME/.zshrc" loader "$(zshrc_managed_content)" &&
-    managed_block_equals "$HOME/.zshenv" environment "$(zshenv_managed_content)"
+  resolve_zsh_dotdirs
+  managed_block_equals "$ZSH_RC_DIR/.zshrc" loader "$(zshrc_managed_content)" &&
+    managed_block_equals "$ZSH_ENV_DIR/.zshenv" environment "$(zshenv_managed_content)" &&
+    { [[ $OS_FAMILY != macos ]] ||
+      managed_block_equals "$ZSH_RC_DIR/.zprofile" login-path "$(zprofile_managed_content)"; } &&
+    ! legacy_loader_present "$ZSH_RC_DIR/.zshrc" loader &&
+    ! legacy_loader_present "$ZSH_ENV_DIR/.zshenv" environment
 }
 
 verify_default_shell() {

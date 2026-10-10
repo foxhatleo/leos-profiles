@@ -68,7 +68,8 @@ signature_fonts() {
 
 signature_zsh_config() {
   local material="" asset
-  material+="|loader-v2|$TARGET"
+  resolve_zsh_dotdirs
+  material+="|loader-v3|$TARGET|$OS_FAMILY|$ZSH_RC_DIR|$ZSH_ENV_DIR"
   printf '%s' "$material"
 }
 
