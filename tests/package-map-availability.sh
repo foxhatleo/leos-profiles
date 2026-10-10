@@ -18,7 +18,9 @@ OS_FAMILY=$PACKAGE_MAP_FAMILY
   exit 2
 }
 
-SELECTED_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
+# Every package group, including the opt-in ones; heroku has members only on
+# macOS (CI taps heroku/brew before this check).
+SELECTED_GROUPS=$CANONICAL_GROUPS
 collect_selected_packages
 
 failures=0

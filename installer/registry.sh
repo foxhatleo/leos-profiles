@@ -2,16 +2,21 @@
 # shellcheck disable=SC2034  # ARTIFACT_* are read by the sourcing modules
 # Ordered component registry. Columns: name | component dependencies | package
 # groups | install handler. Verification and signature handlers use name->_.
+#
+# A package group is implied only when the component needs its members:
+# rpatool runs on python3, pyenv/rbenv compile against dev-tools, and the
+# shell components need zsh. Bun, fnm, Yarn and pnpm are self-contained
+# (Yarn/pnpm run on fnm's Node), so they imply no OS runtimes (MI-4).
 component_registry() {
   cat <<'ROWS'
 packages|||install_os_packages
-bins|packages|languages|install_local_bins
+bins|packages|python|install_local_bins
 pyenv|packages|dev-tools|install_pyenv
 rbenv|packages|dev-tools|install_rbenv
-bun|packages|languages|install_bun
-fnm|packages|languages|install_fnm
-yarn|fnm,packages|languages|install_yarn
-pnpm|fnm,packages|languages|install_pnpm
+bun|packages||install_bun
+fnm|packages||install_fnm
+yarn|fnm,packages||install_yarn
+pnpm|fnm,packages||install_pnpm
 plugins|packages|shell|install_prompt_plugins
 fonts|||install_fonts
 zsh-config|packages|shell|install_zsh_config

@@ -198,10 +198,15 @@ test_package_maps_cover_every_supported_os() {
   local family group packages
   for family in macos apt fedora arch; do
     OS_FAMILY=$family
-    for group in core-utils shell dev-tools languages media network system; do
+    for group in core-utils shell dev-tools languages python media network system; do
       packages=$(package_list_for_group "$group")
       [[ -n $packages ]] || fail "missing package mapping for $family/$group"
     done
+    if [[ $family == macos ]]; then
+      assert_equals "$(package_list_for_group heroku)" heroku
+    else
+      assert_equals "$(package_list_for_group heroku)" ""
+    fi
   done
   OS_FAMILY=apt
   assert_contains "$(package_list_for_group dev-tools)" "libssl-dev"
@@ -797,11 +802,40 @@ test_equivalent_github_origins() {
 test_recommended_and_whole_group_closure() {
   [[ $SELECTED_STEPS == 'packages,pyenv,rbenv,bun,fnm,yarn,pnpm,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
   [[ $SELECTED_GROUPS == 'core-utils,shell,dev-tools,languages,media,network,system' ]] || fail "Recommended package groups changed"
-  SELECTED_STEPS=bun
-  SELECTED_GROUPS=core-utils
+  # MI-4: the Node and Bun tools bring no OS runtimes.
+  SELECTED_STEPS=bun,yarn,pnpm
+  SELECTED_GROUPS=""
   normalise_dependencies
-  assert_contains "$SELECTED_STEPS" packages
-  assert_contains "$SELECTED_GROUPS" languages
+  assert_equals "$SELECTED_STEPS" bun,yarn,pnpm,packages,fnm
+  assert_equals "$SELECTED_GROUPS" ""
+  # rpatool needs python3 and nothing else from languages.
+  SELECTED_STEPS=bins
+  normalise_dependencies
+  assert_equals "$SELECTED_GROUPS" python
+}
+
+test_heroku_is_an_opt_in_macos_group() {
+  local out
+  OS_FAMILY=macos
+  DRY_RUN=1
+  FULL_UPGRADE=0
+  ensure_brew() { :; }
+  package_installed() { return 1; }
+  ensure_sudo() { :; }
+  SELECTED_GROUPS=network
+  out=$(install_os_packages)
+  [[ $out != *heroku* ]] || fail "the network group still taps or installs heroku: $out"
+  SELECTED_GROUPS=network,heroku
+  out=$(install_os_packages)
+  assert_contains "$out" "+ brew tap heroku/brew"
+  assert_contains "$out" "heroku"
+  SELECTED_STEPS=packages
+  REQUESTED_STEPS=packages
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  verify_step() { return 1; }
+  assert_contains "$(inspect_tsv)" $'action\trepository\tHomebrew heroku/brew tap'
+  SELECTED_GROUPS=network
+  [[ $(inspect_tsv) != *heroku* ]] || fail "inspect discloses the heroku tap without the heroku group"
 }
 
 test_node_lts_is_resolved_once_per_run() {
@@ -858,8 +892,9 @@ test_inspection_schema_and_membership() {
   assert_contains "$output" $'meta\tschema\t1'
   assert_contains "$output" $'group\tcomponent\tbun\tselected'
   assert_contains "$output" $'group\tcomponent\tpackages\timplied'
-  assert_contains "$output" $'group\tpackage\tlanguages\timplied'
-  assert_contains "$output" $'package\tmacos\tnode'
+  assert_contains "$output" $'group\tpackage\tcore-utils\tselected'
+  [[ $output != *$'group\tpackage\tlanguages'* ]] || fail "bun implied the languages group"
+  assert_contains "$output" $'package\tmacos\tcoreutils'
   assert_contains "$output" $'artifact\tdirect\tbun\t'
 }
 
@@ -1557,6 +1592,7 @@ TESTS=(
   test_artifact_verification_checks_version_and_digest
   test_inspect_lists_every_selected_registry_artifact
   test_retired_flags_are_rejected_everywhere
+  test_heroku_is_an_opt_in_macos_group
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

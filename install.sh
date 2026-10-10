@@ -23,11 +23,15 @@ LEGACY_STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/leos-profiles/install-s
 COMMAND=""
 # shellcheck source=installer/registry.sh
 source "$SCRIPT_DIR/installer/registry.sh"
-readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
+# Every package group, in install order. Recommended selects all but the
+# opt-in ones: python (rpatool's interpreter; languages already has one) and
+# heroku (a third-party tap, macOS only).
+readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,languages,python,media,network,heroku,system"
+readonly RECOMMENDED_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
 # rpatool remains available as the explicit `bins` step, but is not a default
 # because its upstream does not publish a stable release.
 SELECTED_STEPS="${CANONICAL_STEPS/,bins/}"
-SELECTED_GROUPS="$CANONICAL_GROUPS"
+SELECTED_GROUPS="$RECOMMENDED_GROUPS"
 SSH_MODE="skip"
 SSH_PASSPHRASE_MODE="empty"
 GPG_MODE="skip"
@@ -409,7 +413,7 @@ inspect_tsv() {
   if has_csv_item "$SELECTED_STEPS" packages; then
     printf 'action\tpackages\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf 'full host upgrade and selected package installation' || printf 'install missing selected packages without full host upgrade')"
     if [[ $FULL_UPGRADE -eq 1 ]]; then printf 'irreversible\thost-upgrade\tin-release package-manager upgrades (never an OS release upgrade) are not automatically reversible\n'; fi
-    if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" network; then
+    if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
       printf 'action\trepository\tHomebrew heroku/brew tap\n'
     fi
     if [[ $OS_FAMILY == fedora ]] && has_csv_item "$SELECTED_GROUPS" media; then
@@ -485,6 +489,9 @@ main() {
   normalise_dependencies
   order_selected_steps
   detect_os
+  if [[ $OS_FAMILY != macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
+    die "The heroku package group is macOS-only (Heroku's Homebrew tap); remove it from --package-groups"
+  fi
   if [[ $COMMAND == inspect ]]; then
     inspect_tsv
     return 0

@@ -26,7 +26,8 @@ SELECTED_GROUPS=""
 normalise_dependencies
 order_selected_steps
 equal "$SELECTED_STEPS" packages,fnm,pnpm
-equal "$SELECTED_GROUPS" languages
+# pnpm runs on fnm's Node: no OS runtime group is implied (MI-4).
+equal "$SELECTED_GROUPS" ""
 validate_component_registry
 (
   unset -f signature_pnpm
