@@ -733,29 +733,106 @@ run_block 'native AI updates and contradictory bye options' \
   ! bye --shutdown-wsl --no-exit >/dev/null 2>&1
 '
 
-mkdir -p "$tmp/updater-profile" "$tmp/fake-bin"
+mkdir -p "$tmp/updater-profile/local" "$tmp/fake-bin" "$tmp/bare-profile"
 : > "$tmp/updater-profile/install.sh"
+: > "$tmp/updater-profile/local/install-profile.tsv"
 print -rl -- '#!/bin/sh' 'printf "%s\n" "$*" > "$UPGRADE_LOG"' > "$tmp/fake-bin/bash"
 chmod +x "$tmp/fake-bin/bash"
-run_block 'configured-upstream reconciliation' \
-  HOME="$tmp/updater-home" PATH="$tmp/fake-bin:$PATH" LEOS_TEST_ROOT="$root" \
-  LEOS_PROFILES="$tmp/updater-profile" UPGRADE_LOG="$tmp/upgrade-log" -- '
-  setopt err_return no_unset pipe_fail
-  puts() { :; }; puts-err() { :; }
+# The git stub records every call; INCOMING is what `log HEAD..@{upstream}`
+# shows, DIRTY makes the checkout dirty and SIGNERS sets allowedSignersFile.
+updater_git='
   git() {
+    print -r -- "$*" >> "$GIT_LOG"
     case "$*" in
       *"symbolic-ref --quiet --short HEAD"*) print -r -- feature ;;
       *"rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) print -r -- fork/feature ;;
       *"status --porcelain"*) [[ -z ${DIRTY:-} ]] || print -r -- " M local-edit"; return 0 ;;
-      *"pull --ff-only"*) return 0 ;;
+      *"config --get gpg.ssh.allowedSignersFile"*) [[ -n ${SIGNERS:-} ]] && print -r -- "$SIGNERS"; return 0 ;;
+      *"fetch --quiet"*) return 0 ;;
+      *"log --oneline HEAD..@{upstream}"*) [[ -z ${INCOMING:-} ]] || print -r -- "$INCOMING"; return 0 ;;
+      *"merge --ff-only"*) return 0 ;;
       *) return 1 ;;
     esac
   }
+'
+run_block 'configured-upstream reconciliation' \
+  HOME="$tmp/updater-home" PATH="$tmp/fake-bin:$PATH" LEOS_TEST_ROOT="$root" \
+  LEOS_PROFILES="$tmp/updater-profile" UPGRADE_LOG="$tmp/upgrade-log" GIT_LOG="$tmp/git-log" \
+  UPDATER_GIT="$updater_git" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  eval "$UPDATER_GIT"
+  whence() { [[ $* == "-p gpg" ]] && return 1; builtin whence "$@"; }
   source "$LEOS_TEST_ROOT/zsh/commands.zsh"
+  # Up to date: no merge, still reconciles.
+  : > "$GIT_LOG"
   upgrade-leos-profiles --full-upgrade
   [[ "$(<$UPGRADE_LOG)" == "$LEOS_PROFILES/install.sh reconcile --yes --full-upgrade" ]]
+  [[ "$(<$GIT_LOG)" != *merge* ]]
+  # Incoming commits without a terminal: shown, refused without --yes.
+  INCOMING="abc1234 change"
+  : > "$GIT_LOG"; : > "$UPGRADE_LOG"
+  ! upgrade-leos-profiles </dev/null
+  [[ "$(<$GIT_LOG)" == *"log --oneline HEAD..@{upstream}"* && "$(<$GIT_LOG)" != *merge* ]]
+  [[ ! -s $UPGRADE_LOG ]]
+  # --yes fast-forwards and reconciles.
+  : > "$GIT_LOG"
+  upgrade-leos-profiles --yes
+  [[ "$(<$GIT_LOG)" == *"merge --ff-only @{upstream}"* ]]
+  [[ "$(<$UPGRADE_LOG)" == "$LEOS_PROFILES/install.sh reconcile --yes" ]]
+  # --verify-signatures needs something to verify with, then reaches merge.
+  : > "$GIT_LOG"
+  ! upgrade-leos-profiles --yes --verify-signatures
+  [[ "$(<$GIT_LOG)" != *fetch* ]]
+  SIGNERS=/fixture/allowed_signers
+  upgrade-leos-profiles --yes --verify-signatures
+  [[ "$(<$GIT_LOG)" == *"merge --ff-only --verify-signatures @{upstream}"* ]]
+  # A dirty checkout is refused before fetching.
   DIRTY=1
-  ! upgrade-leos-profiles >/dev/null 2>&1
+  : > "$GIT_LOG"
+  ! upgrade-leos-profiles --yes >/dev/null 2>&1
+  [[ "$(<$GIT_LOG)" != *fetch* ]]
+'
+
+# MI-12: without a saved setup, fail before touching the checkout.
+run_block 'upgrade-leos-profiles needs a saved setup before pulling' \
+  HOME="$tmp/updater-home" PATH="$tmp/fake-bin:$PATH" LEOS_TEST_ROOT="$root" \
+  LEOS_PROFILES="$tmp/bare-profile" UPGRADE_LOG="$tmp/upgrade-log-bare" GIT_LOG="$tmp/git-log-bare" \
+  UPDATER_GIT="$updater_git" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }
+  typeset -g ERR=
+  puts-err() { ERR+="$*"; }
+  eval "$UPDATER_GIT"
+  : > "$GIT_LOG"
+  source "$LEOS_TEST_ROOT/zsh/commands.zsh"
+  ! upgrade-leos-profiles --yes
+  [[ $ERR == *"No saved setup"* ]]
+  [[ ! -s $GIT_LOG && ! -e $UPGRADE_LOG ]]
+'
+
+# leos-doctor runs `install.sh inspect --saved` (here a stub) and summarises it.
+mkdir -p "$tmp/doctor-profile"
+print -rl -- \
+  "printf 'meta\\tschema\\t1\\n'" \
+  "printf 'warning\\tunsupported-platform\\tIntel Mac\\n'" \
+  "printf 'conflict\\tpyenv\\t/home/u/.pyenv\\tnot-a-git-checkout\\n'" \
+  "printf 'postcondition\\tpackages\\tverified\\n'" \
+  "printf 'postcondition\\tplugins\\t%s\\n' \"\${DOCTOR_PLUGINS:-needed}\"" \
+  'printf "%s\n" "$*" > "$DOCTOR_LOG"' > "$tmp/doctor-profile/install.sh"
+run_block 'leos-doctor summarises inspect --saved' \
+  HOME="$tmp/updater-home" LEOS_TEST_ROOT="$root" LEOS_PROFILES="$tmp/doctor-profile" DOCTOR_LOG="$tmp/doctor-log" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { print -r -- "$*"; }; puts-err() { print -r -- "$*"; }
+  source "$LEOS_TEST_ROOT/zsh/commands.zsh"
+  out=$(leos-doctor) && exit 1
+  [[ "$(<$DOCTOR_LOG)" == "inspect --saved" ]]
+  [[ $out == *"ok       packages"* && $out == *"NEEDED   plugins"* ]]
+  [[ $out == *"warning  unsupported-platform: Intel Mac"* ]]
+  [[ $out == *"conflict pyenv: /home/u/.pyenv (not-a-git-checkout)"* ]]
+  [[ $out == *"Repair with:"* ]]
+  out=$(DOCTOR_PLUGINS=verified leos-doctor)
+  [[ $out == *"Everything the saved setup installs is in place."* ]]
 '
 
 # Interactive shells on a real pseudo-terminal, loading the fixture profile
