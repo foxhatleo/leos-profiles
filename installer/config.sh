@@ -295,6 +295,32 @@ remove_managed_blocks() {
   say "Packages, plugins and credentials are left untouched; remove those manually if wanted."
 }
 
+# Compile the profile and plugin sources to .zwc beside them (see
+# __leos_zcompile_profile in zsh/cache.zsh), about 7 ms off every startup.
+# main() runs this after the plugins or zsh-config step on every apply and
+# reconcile, including when those steps were already verified: a pull changes
+# the sources without changing any step's signature. Best effort: Zsh ignores
+# a missing, older or other-version .zwc, so a failure only costs that time.
+# The login shell's Zsh compiles when it is one, so its version matches.
+compile_zsh_sources() {
+  local shell_bin=""
+  [[ -f $TARGET/zsh/cache.zsh ]] || return 0
+  if [[ ${SHELL:-} == */zsh && -x ${SHELL:-} ]]; then
+    shell_bin=$SHELL
+  else
+    shell_bin=$(command -v zsh 2>/dev/null) || return 0
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would compile the profile's Zsh sources with $shell_bin"
+    return 0
+  fi
+  # shellcheck disable=SC2016  # expanded by zsh, not here
+  "$shell_bin" -df -c 'source "$1/zsh/cache.zsh" && __leos_zcompile_profile "$1/zsh" && print -r -- "$REPLY"' \
+    zsh "$TARGET" >/dev/null 2>&1 ||
+    warn "Could not compile the profile's Zsh sources; startup is a few milliseconds slower."
+  return 0
+}
+
 install_zsh_config() {
   local zshrc_content zshenv_content zprofile_content
   resolve_zsh_dotdirs

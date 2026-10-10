@@ -430,11 +430,15 @@ leos-source-cached-warn() {
 # Drop every cached init script, forcing regeneration on the next shell. Needed
 # after an upgrade that rewrites a tool's init logic without touching the
 # launcher binary the cache is keyed on (see __leos_init_cache).
+#
+# It also recompiles the profile's own sources (see __leos_zcompile_profile),
+# with this shell's Zsh: a .zwc from another Zsh version is ignored.
 leos-refresh-init-cache() {
   # No sourcing happens here, so localizing options is safe and makes the globs
   # below behave regardless of the ambient option set.
   emulate -L zsh
   local dir=${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init
+  [[ -z ${LEOS_PROFILES_ZSH-} ]] || __leos_zcompile_profile "$LEOS_PROFILES_ZSH" || true
   if [[ ! -d $dir ]]; then
     puts "No init cache to clear."
     return 0
@@ -455,6 +459,65 @@ leos-refresh-init-cache() {
   else
     puts "Init cache in $dir is already empty."
   fi
+  return 0
+}
+
+# __leos_zcompile_profile <zsh-dir>
+# Compile the profile's startup files, and the plugin files they source, to a
+# .zwc beside each one, so a shell maps bytecode instead of parsing ~300 KB of
+# Zsh on every start (about 7 ms). Zsh reads file.zwc only when it is at least
+# as new as file and was made by the same Zsh version, so a pulled or edited
+# source is never shadowed by an older compilation; this only refreshes them.
+# Run by the installer and by leos-refresh-init-cache, never at startup.
+#
+# A .zwc is written only into a directory this user owns that nobody else can
+# write, through a private temporary directory, and only for regular files
+# this user owns. Plugin checkouts get `*.zwc` in .git/info/exclude first, so
+# they stay clean for the installer's pinned-checkout verification; a plugin
+# whose exclude file cannot be updated is left uncompiled.
+__leos_zcompile_profile() {
+  emulate -L zsh
+  setopt extended_glob
+  zmodload -F zsh/stat b:zstat || return 1
+  zmodload -F zsh/files b:zf_mkdir b:zf_mv b:zf_rm 2>/dev/null || return 1
+  local zdir=${1:-} plugin src dir work exclude
+  local -a sources plugin_files
+  local -A info
+  integer compiled=0
+  [[ -n $zdir && -d $zdir ]] || return 1
+  sources=($zdir/*.zsh(N.) $zdir/path/*.zsh(N.))
+  for plugin in fzf-tab zsh-autosuggestions zsh-syntax-highlighting; do
+    case $plugin in
+      fzf-tab) plugin_files=($zdir/plugins/fzf-tab/fzf-tab(|.plugin).zsh(N.)) ;;
+      zsh-autosuggestions) plugin_files=($zdir/plugins/$plugin/$plugin.zsh(N.)) ;;
+      zsh-syntax-highlighting)
+        plugin_files=($zdir/plugins/$plugin/$plugin.zsh(N.)
+                      $zdir/plugins/$plugin/highlighters/*/*-highlighter.zsh(N.)) ;;
+    esac
+    (( $#plugin_files )) || continue
+    if [[ -d $zdir/plugins/$plugin/.git ]]; then
+      exclude=$zdir/plugins/$plugin/.git/info/exclude
+      if [[ ! -f $exclude ]] || (( ! ${${(f)"$(<$exclude)"}[(Ie)*.zwc]} )); then
+        [[ -d ${exclude:h} ]] || zf_mkdir -p -- "${exclude:h}" 2>/dev/null || continue
+        print -r -- $'\n*.zwc' >> "$exclude" 2>/dev/null || continue
+      fi
+    fi
+    sources+=($plugin_files)
+  done
+  for src in $sources; do
+    dir=${src:h}
+    [[ -O $src && ! -L $src ]] || continue
+    zstat -H info -- "$dir" 2>/dev/null || continue
+    (( info[uid] == EUID && !(info[mode] & 8#22) )) || continue
+    work=$dir/.compile-$$-$RANDOM.zwc   # matches the ignore patterns too
+    zf_mkdir -m 700 -- "$work" 2>/dev/null || continue
+    if zcompile -R "$work/out.zwc" "$src" 2>/dev/null &&
+        zf_mv -f -- "$work/out.zwc" "$src.zwc" 2>/dev/null; then
+      (( ++compiled ))
+    fi
+    zf_rm -rf -- "$work" 2>/dev/null
+  done
+  REPLY=$compiled
   return 0
 }
 

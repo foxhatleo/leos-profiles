@@ -511,6 +511,9 @@ main() {
     run_step "$step"
   done
   IFS=$old_ifs
+  if has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" zsh-config; then
+    compile_zsh_sources
+  fi
   if [[ $COMMAND == reconcile ]]; then
     say "Profile reconciliation complete. Restart the terminal; default-shell changes apply at next login."
   else

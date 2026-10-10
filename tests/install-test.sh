@@ -265,6 +265,28 @@ test_macos_install_batches_and_resolves_aliases() {
   rm -rf "$BREW_CALLS_FILE" "$HOMEBREW_PREFIX"
 }
 
+test_compile_zsh_sources_is_best_effort() {
+  local temp out
+  command -v zsh >/dev/null 2>&1 || return 0
+  temp=$(mktemp -d)
+  TARGET="$temp/profile"
+  mkdir -p "$TARGET/zsh/path"
+  chmod 700 "$TARGET/zsh" "$TARGET/zsh/path"
+  cp "$ROOT"/zsh/*.zsh "$TARGET/zsh/"
+  cp "$ROOT"/zsh/path/*.zsh "$TARGET/zsh/path/"
+  DRY_RUN=1
+  out=$(compile_zsh_sources)
+  assert_contains "$out" "Would compile"
+  [[ ! -e $TARGET/zsh/start.zsh.zwc ]] || fail "dry run compiled the profile"
+  DRY_RUN=0
+  compile_zsh_sources
+  [[ -s $TARGET/zsh/start.zsh.zwc && -s $TARGET/zsh/path/brew.zsh.zwc ]] || fail "profile sources were not compiled"
+  # A profile without the runtime is skipped, not an error.
+  rm -f "$TARGET/zsh/cache.zsh"
+  compile_zsh_sources || fail "missing runtime was not skipped"
+  rm -rf "$temp"
+}
+
 test_font_verifier_accepts_renamed_families() {
   local temp pair font filename
   temp=$(mktemp -d)
@@ -1264,6 +1286,7 @@ TESTS=(
   test_default_font_policy_and_npm_artifacts_are_locked
   test_macos_package_verification_batches_brew_calls
   test_macos_install_batches_and_resolves_aliases
+  test_compile_zsh_sources_is_best_effort
   test_font_verifier_accepts_renamed_families
   test_nerd_fonts_installer_ignores_xdg_data_home_on_macos
   test_ssh_public_material_ignores_comments

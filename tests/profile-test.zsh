@@ -410,6 +410,50 @@ run_block 'leos-refresh-init-cache clears init scripts and keeps rehash stamps' 
   [[ -e $d/pyenv-rehash ]]
 '
 
+# Compiled profile sources: every startup file and the plugin files they
+# source get a .zwc, plugin checkouts stay clean through .git/info/exclude,
+# directories others can write get none, and Zsh still prefers a newer source.
+mkdir -p "$tmp/zc/zsh/path" "$tmp/zc/zsh/plugins/zsh-autosuggestions" "$tmp/zc/shared"
+cp "$root"/zsh/*.zsh "$tmp/zc/zsh/"
+cp "$root"/zsh/path/*.zsh "$tmp/zc/zsh/path/"
+print -r -- 'typeset -g ZC_SOURCE=compiled' > "$tmp/zc/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh"
+print -r -- 'typeset -g ZC_SOURCE=shared' > "$tmp/zc/shared/x.zsh"
+chmod 700 "$tmp/zc/zsh" "$tmp/zc/zsh/path" "$tmp/zc/zsh/plugins/zsh-autosuggestions"
+chmod 777 "$tmp/zc/shared"
+run_block 'zcompile of profile and plugin sources' \
+  HOME="$tmp/zc" LEOS_TEST_ROOT="$root" ZC="$tmp/zc" PATH="$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/cache.zsh"
+  plugin=$ZC/zsh/plugins/zsh-autosuggestions
+  git -C "$plugin" init -q
+  git -C "$plugin" -c user.name=t -c user.email=t@example.invalid add -A
+  git -C "$plugin" -c user.name=t -c user.email=t@example.invalid commit -qm fixture
+  __leos_zcompile_profile "$ZC/zsh"
+  (( REPLY > 0 ))
+  for f in $ZC/zsh/*.zsh $ZC/zsh/path/*.zsh $plugin/zsh-autosuggestions.zsh; do
+    [[ -s $f.zwc ]] || { print -u2 -r -- "not compiled: $f"; exit 1; }
+  done
+  [[ -z $(git -C "$plugin" status --porcelain) ]] || { print -u2 -r -- "plugin checkout dirty"; exit 1; }
+  leftovers=($ZC/zsh/.compile-*(N) $plugin/.compile-*(N))
+  (( ! $#leftovers ))
+  # Not a profile path, and its directory is world-writable: never compiled.
+  cp "$ZC/shared/x.zsh" "$ZC/zsh/path/zz-shared.zsh"
+  chmod 777 "$ZC/zsh/path"
+  __leos_zcompile_profile "$ZC/zsh"
+  [[ ! -e $ZC/zsh/path/zz-shared.zsh.zwc ]]
+  chmod 700 "$ZC/zsh/path"
+  # Zsh reads the .zwc when the text is not newer, and the text when it is.
+  print -r -- "typeset -g ZC_SOURCE=edited" > "$plugin/zsh-autosuggestions.zsh"
+  touch -t 202001010000 "$plugin/zsh-autosuggestions.zsh"
+  source "$plugin/zsh-autosuggestions.zsh"
+  [[ $ZC_SOURCE == compiled ]]
+  touch "$plugin/zsh-autosuggestions.zsh"
+  touch -t 202001010000 "$plugin/zsh-autosuggestions.zsh.zwc"
+  source "$plugin/zsh-autosuggestions.zsh"
+  [[ $ZC_SOURCE == edited ]]
+'
+
 # brew-checkup gained a `|| return 1` and a cache-refresh call: it must still
 # report success on a clean run, fail when brew fails, and only clear the cache
 # when the upgrade actually succeeded.
