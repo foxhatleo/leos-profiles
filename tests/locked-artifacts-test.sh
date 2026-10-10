@@ -82,7 +82,7 @@ eval "$("$HOME/.local/bin/fnm" env --shell bash)"
 "$HOME/.local/bin/fnm" install "$RESOLVED_NODE_VERSION"
 "$HOME/.local/bin/fnm" default "$RESOLVED_NODE_VERSION"
 "$HOME/.local/bin/fnm" use "$RESOLVED_NODE_VERSION"
-fnm_exec npm install --global --prefix "$HOME/.local/npm" "$TEST_HOME/yarn.tgz" "$TEST_HOME/pnpm.tgz"
+fnm_exec npm install --global --ignore-scripts --prefix "$HOME/.local/npm" "$TEST_HOME/yarn.tgz" "$TEST_HOME/pnpm.tgz"
 verify_yarn
 verify_pnpm
 fnm_exec npm completion > "$TEST_HOME/npm-completion.zsh"
