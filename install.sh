@@ -460,7 +460,10 @@ inspect_tsv() {
     printf 'artifact\tgit\tfzf-tab\t%s\t%s\n' "$FZF_TAB_REPOSITORY" "$FZF_TAB_COMMIT"
   fi
   if has_csv_item "$SELECTED_STEPS" fonts && font_should_install; then
-    printf 'artifact\tgit\tnerd-fonts\t%s\t%s\n' "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT"
+    # The archive's digest comes from the pinned checksum list at apply time.
+    printf 'artifact\tdirect\tnerd-fonts-checksums\t%s\t%s\n' "$NERD_FONTS_RELEASE_URL/SHA-256.txt" "$NERD_FONTS_CHECKSUMS_SHA256"
+    printf 'artifact\tdirect\tnerd-font\t%s\t%s\n' "$NERD_FONTS_RELEASE_URL/${FONT_NAME:-JetBrainsMono}.tar.xz" SHA-256.txt
+    printf 'file\tfonts\t%s\n' "$(nerd_font_directory)"
   fi
   if has_csv_item "$SELECTED_STEPS" fnm; then
     if resolve_node_version; then

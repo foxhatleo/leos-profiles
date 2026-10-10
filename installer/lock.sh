@@ -3,8 +3,8 @@
 # Pinned, executable third-party sources used by install.sh.
 #
 # Update a value only as part of a reviewed dependency update.  Every Git
-# source is checked out at the exact commit below; the Homebrew installer and
-# rpatool downloads are additionally verified by SHA-256 before execution.
+# source is checked out at the exact commit below; every downloaded file is
+# verified by SHA-256 before it is used.
 
 readonly PYENV_REPOSITORY="https://github.com/pyenv/pyenv.git"
 readonly PYENV_COMMIT="e4c462dc70951c8714d069522448c9583a38c913"
@@ -21,8 +21,14 @@ readonly ZSH_COMPLETIONS_REPOSITORY="https://github.com/zsh-users/zsh-completion
 readonly ZSH_COMPLETIONS_COMMIT="f63d0e642261e40dfaadfcef478ef338e1aa315f"
 readonly FZF_TAB_REPOSITORY="https://github.com/Aloxaf/fzf-tab.git"
 readonly FZF_TAB_COMMIT="24105b15714bfec37989ed5c5b6e60f572253019"
-readonly NERD_FONTS_REPOSITORY="https://github.com/ryanoasis/nerd-fonts.git"
-readonly NERD_FONTS_COMMIT="4f133076f3c1ec224745850bdf433d4368bca07e"
+
+# Nerd Fonts: one font's release archive, <Font>.tar.xz, from this release.
+# Its digest is read from the release's SHA-256.txt, whose own digest is
+# pinned here (GitHub's release-asset SHA-256 for that file), so the list is
+# verified before it vouches for an archive or a font name (ONB-9).
+readonly NERD_FONTS_VERSION="v3.5.1"
+readonly NERD_FONTS_RELEASE_URL="https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1"
+readonly NERD_FONTS_CHECKSUMS_SHA256="e03d7ad54547d83f1620719cbc89b5684bc0c6fb028160640aa322b5035a63fb"
 
 readonly HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/feb6351d0d1a766a281d9691d4269cb026ff8f70/install.sh"
 readonly HOMEBREW_INSTALL_SHA256="99287f194a8b3c9e6b0203a11a5fa54518be57209343e6bb954dec4635796d9d"

@@ -50,6 +50,12 @@ if [[ ${LEOS_ARTIFACT_ALL_PLATFORMS:-0} == 1 ]]; then
   detect_os
 fi
 
+# Nerd Fonts: the pinned checksum list, a real font archive verified against
+# it, and an unknown name rejected before any archive download.
+install_nerd_font JetBrainsMono
+FONT_NAME=JetBrainsMono INSTALL_FONTS=yes verify_fonts
+if (install_nerd_font NoSuchNerdFont) 2>/dev/null; then die "an unknown Nerd Font name was accepted"; fi
+
 "$TEST_HOME/bin/rpatool" --help >/dev/null
 [[ $("$TEST_HOME/bin/bun" --version) == "$BUN_VERSION" ]]
 [[ $("$TEST_HOME/bin/fnm" --version) == "fnm $FNM_VERSION" ]]

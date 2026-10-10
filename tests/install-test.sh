@@ -414,26 +414,11 @@ test_font_verifier_accepts_renamed_families() {
   if font_is_installed; then
     fail "verifier accepted a different installed Nerd Font family"
   fi
-  # Linux follows the upstream installer's XDG_DATA_HOME font directory.
+  # Linux uses the XDG_DATA_HOME font directory the installer writes to.
   OS_FAMILY=apt FONT_NAME=JetBrainsMono XDG_DATA_HOME="$temp/xdg-data"
   mkdir -p "$XDG_DATA_HOME/fonts/NerdFonts"
   : > "$XDG_DATA_HOME/fonts/NerdFonts/JetBrainsMonoNerdFont-Regular.ttf"
   font_is_installed || fail "Linux verifier ignored XDG_DATA_HOME"
-  rm -rf "$temp"
-}
-
-test_nerd_fonts_installer_ignores_xdg_data_home_on_macos() {
-  local temp seen
-  temp=$(mktemp -d)
-  printf '#!/bin/sh\nprintf "%%s" "${XDG_DATA_HOME-unset}" > "$1"\n' > "$temp/fake-install"
-  chmod +x "$temp/fake-install"
-  export XDG_DATA_HOME="$temp/xdg-data"
-  OS_FAMILY=macos nerd_fonts_installer "$temp/fake-install" "$temp/seen"
-  seen=$(cat "$temp/seen")
-  [[ $seen == unset ]] || fail "macOS Nerd Fonts install saw XDG_DATA_HOME=$seen"
-  OS_FAMILY=apt nerd_fonts_installer "$temp/fake-install" "$temp/seen"
-  seen=$(cat "$temp/seen")
-  [[ $seen == "$temp/xdg-data" ]] || fail "Linux Nerd Fonts install lost XDG_DATA_HOME"
   rm -rf "$temp"
 }
 
@@ -1073,27 +1058,6 @@ test_stale_lock_fails_closed_with_guidance() {
   rm -rf "$temp"
 }
 
-test_sparse_font_checkout_is_blobless_and_scoped() {
-  local temp log
-  temp=$(mktemp -d)
-  log="$temp/git-args"
-  : > "$log"
-  DRY_RUN=0
-  git() {
-    local IFS=' '
-    printf '%s\n' "$*" >> "$log"
-    case "$*" in
-      *"rev-parse HEAD"*) printf '%s\n' DEADBEEFCOMMIT ;;
-    esac
-    return 0
-  }
-  sparse_checkout_pinned "https://example.invalid/nerd-fonts.git" DEADBEEFCOMMIT "$temp/nf" nerd-fonts \
-    install.sh bin patched-fonts/JetBrainsMono || fail "sparse checkout returned nonzero on a healthy path"
-  assert_contains "$(cat "$log")" "sparse-checkout set install.sh bin patched-fonts/JetBrainsMono"
-  assert_contains "$(cat "$log")" "fetch --depth 1 --filter=blob:none origin DEADBEEFCOMMIT"
-  rm -rf "$temp"
-}
-
 test_no_os_release_upgrade_tooling() {
   # Full-upgrade / checkup paths must stay in-release. Strip comments first so
   # the intentional mentions in guard comments don't count as usage.
@@ -1640,6 +1604,99 @@ test_version_manager_extension_compile_is_best_effort() {
   rm -rf "$temp"
 }
 
+# A fixture Nerd Fonts release: <dir>/Fixture.tar.xz holding two fonts and a
+# README, and <dir>/SHA-256.txt listing it with the given digest (default:
+# the real one). A fake curl serves files from <dir> by name and logs each URL.
+make_font_release() {
+  local dir=$1 digest=${2:-}
+  mkdir -p "$dir/src"
+  : > "$dir/src/FixtureNerdFont-Regular.ttf"
+  : > "$dir/src/FixtureNerdFontMono-Bold.otf"
+  : > "$dir/src/README.md"
+  tar -cJf "$dir/Fixture.tar.xz" -C "$dir/src" . 2>/dev/null || return 1
+  [[ -n $digest ]] || digest=$(sha256 "$dir/Fixture.tar.xz")
+  printf '%s  %s\n' "$digest" Fixture.tar.xz "$(printf other | hash_text)" Other.zip > "$dir/SHA-256.txt"
+  NERD_FONTS_TEST_RELEASE_URL=https://example.invalid/release
+  NERD_FONTS_TEST_CHECKSUMS_SHA256=$(sha256 "$dir/SHA-256.txt")
+  FONT_RELEASE_DIR=$dir
+  curl() {
+    [[ ${1:-} == --help ]] && return 0
+    local out="" want=0 a url=""
+    for a in "$@"; do
+      [[ $want == 1 ]] && { out=$a; want=0; continue; }
+      [[ $a == --output ]] && want=1
+      url=$a
+    done
+    printf '%s\n' "$url" >> "$FONT_RELEASE_DIR/curl.log"
+    cp "$FONT_RELEASE_DIR/${url##*/}" "$out"
+  }
+}
+
+# ONB-9: a font is one verified release archive, never a repository clone, and
+# an unknown name stops before any font download.
+test_nerd_font_rejects_unknown_names_before_downloading() {
+  local temp err
+  temp=$(mktemp -d)
+  make_font_release "$temp/release" || { rm -rf "$temp"; return 0; }
+  HOME="$temp/home"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  err=$( (install_nerd_font Fixtur) 2>&1 ) && fail "an unknown font name was accepted"
+  assert_contains "$err" "Unknown Nerd Font: Fixtur"
+  assert_equals "$(cat "$temp/release/curl.log")" "https://example.invalid/release/SHA-256.txt"
+  [[ ! -e $HOME/.local/share/fonts ]] || fail "an unknown font created the font directory"
+  rm -rf "$temp"
+}
+
+test_nerd_font_archive_is_verified_and_installed() {
+  local temp fake
+  temp=$(mktemp -d)
+  make_font_release "$temp/release" || { rm -rf "$temp"; return 0; }
+  HOME="$temp/home"
+  DRY_RUN=0
+  FONT_NAME=Fixture
+  INSTALL_FONTS=yes
+  fake="$temp/bin"
+  mkdir -p "$fake"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/fc-cache.log"\n' "$temp" > "$fake/fc-cache"
+  chmod +x "$fake/fc-cache"
+  PATH="$fake:$PATH"
+  # macOS: ~/Library/Fonts/NerdFonts, whatever XDG_DATA_HOME says; no fc-cache.
+  export XDG_DATA_HOME="$temp/xdg"
+  OS_FAMILY=macos
+  install_fonts
+  [[ -f $HOME/Library/Fonts/NerdFonts/FixtureNerdFont-Regular.ttf &&
+     -f $HOME/Library/Fonts/NerdFonts/FixtureNerdFontMono-Bold.otf ]] || fail "macOS fonts were not installed"
+  [[ ! -e $HOME/Library/Fonts/NerdFonts/README.md ]] || fail "a non-font file was installed"
+  [[ ! -e $temp/xdg && ! -e $temp/fc-cache.log ]] || fail "macOS used XDG_DATA_HOME or fc-cache"
+  verify_step fonts || fail "installed macOS fonts did not verify"
+  # Linux: the XDG font directory, then fc-cache.
+  OS_FAMILY=apt
+  install_fonts
+  [[ -f $XDG_DATA_HOME/fonts/NerdFonts/FixtureNerdFont-Regular.ttf ]] || fail "Linux fonts were not installed"
+  assert_equals "$(cat "$temp/fc-cache.log")" "-f $XDG_DATA_HOME/fonts/NerdFonts"
+  verify_step fonts || fail "installed Linux fonts did not verify"
+  rm -rf "$temp"
+}
+
+test_nerd_font_archive_digest_mismatch_fails() {
+  local temp err
+  temp=$(mktemp -d)
+  make_font_release "$temp/release" 0000000000000000000000000000000000000000000000000000000000000000 ||
+    { rm -rf "$temp"; return 0; }
+  HOME="$temp/home"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  err=$( (install_nerd_font Fixture) 2>&1 ) && fail "a font archive with the wrong digest was installed"
+  assert_contains "$err" "Digest mismatch"
+  [[ -z $(find "$HOME" -name '*.ttf' 2>/dev/null) ]] || fail "fonts were installed despite the mismatch"
+  # A checksum list that is not the pinned one is rejected before it is read.
+  NERD_FONTS_TEST_CHECKSUMS_SHA256=$(printf tampered | hash_text)
+  err=$( (install_nerd_font Fixture) 2>&1 ) && fail "an unpinned checksum list was trusted"
+  assert_contains "$err" "Digest mismatch"
+  rm -rf "$temp"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1662,7 +1719,6 @@ TESTS=(
   test_macos_install_batches_and_resolves_aliases
   test_compile_zsh_sources_is_best_effort
   test_font_verifier_accepts_renamed_families
-  test_nerd_fonts_installer_ignores_xdg_data_home_on_macos
   test_ssh_public_material_ignores_comments
   test_github_key_checks_fail_closed_on_api_errors
   test_github_key_checks_still_match_present_keys
@@ -1704,7 +1760,6 @@ TESTS=(
   test_inspect_degrades_when_node_lts_unresolvable
   test_packages_full_upgrade_rerun_has_no_false_warning
   test_stale_lock_fails_closed_with_guidance
-  test_sparse_font_checkout_is_blobless_and_scoped
   test_no_os_release_upgrade_tooling
   test_download_verified_rejects_bad_digest
   test_macos_package_verification_detects_missing
@@ -1729,6 +1784,9 @@ TESTS=(
   test_fedora_media_swaps_only_ffmpeg
   test_arch_installs_with_a_synced_database
   test_version_manager_extension_compile_is_best_effort
+  test_nerd_font_rejects_unknown_names_before_downloading
+  test_nerd_font_archive_is_verified_and_installed
+  test_nerd_font_archive_digest_mismatch_fails
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

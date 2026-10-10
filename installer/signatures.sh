@@ -79,7 +79,7 @@ signature_plugins() {
 
 signature_fonts() {
   local material="" asset
-  material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_COMMIT"
+  material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_VERSION|$NERD_FONTS_CHECKSUMS_SHA256"
   printf '%s' "$material"
 }
 

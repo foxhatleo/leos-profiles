@@ -20,7 +20,7 @@ font_is_installed() {
   fi
   [[ -d $directory ]] || return 1
   # Nerd Fonts renames families whose upstream names are reserved. These
-  # aliases match the filenames in the pinned nerd-fonts commit. Keep the
+  # aliases match the filenames in the pinned Nerd Fonts release. Keep the
   # check family-specific: another installed Nerd Font must not satisfy the
   # requested family's postcondition.
   case $font in

@@ -129,6 +129,10 @@ bootstrap_tools() {
   for executable in unzip tar gzip; do
     command -v "$executable" >/dev/null 2>&1 || missing+=("$executable")
   done
+  # GNU tar runs xz for the Nerd Fonts .tar.xz archives.
+  if ! command -v xz >/dev/null 2>&1; then
+    if [[ $OS_FAMILY == apt ]]; then missing+=(xz-utils); else missing+=(xz); fi
+  fi
   package_installed ca-certificates || missing+=(ca-certificates)
   if (( ${#missing[@]} == 0 )); then
     say "Git, curl, TLS certificates and archive tools are already present; skipping bootstrap"
