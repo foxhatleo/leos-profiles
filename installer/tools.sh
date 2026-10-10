@@ -46,11 +46,7 @@ clone_pinned() {
   [[ $DRY_RUN -eq 1 ]] || [[ $(git -C "$destination" rev-parse HEAD) == "$commit" ]] || die "$label did not resolve pinned commit"
 }
 
-install_local_bins() {
-  local destination="$HOME/.local/bin/rpatool"
-  download_verified "$RPATOOL_URL" "$RPATOOL_SHA256" "$destination"
-  [[ $DRY_RUN -eq 1 ]] || chmod 700 "$destination"
-}
+install_local_bins() { artifact_install rpatool; }
 
 install_pyenv() {
   clone_pinned "$PYENV_REPOSITORY" "$PYENV_COMMIT" "$HOME/.pyenv" pyenv
@@ -188,27 +184,18 @@ machine_arch() {
   esac
 }
 
+# platform_asset <artifact>: "<url><TAB><sha256>" for this platform, from the
+# artifact registry's lock lookup; dies when the lock has none.
 platform_asset() {
-  local tool=$1 arch
-  arch=$(machine_arch)
-  case "$tool:$OS_FAMILY:$arch" in
-    bun:macos:aarch64) printf '%s\t%s\n' "$BUN_DARWIN_AARCH64_URL" "$BUN_DARWIN_AARCH64_SHA256" ;;
-    bun:macos:x64) printf '%s\t%s\n' "$BUN_DARWIN_X64_URL" "$BUN_DARWIN_X64_SHA256" ;;
-    bun:apt:aarch64|bun:fedora:aarch64|bun:arch:aarch64) printf '%s\t%s\n' "$BUN_LINUX_AARCH64_URL" "$BUN_LINUX_AARCH64_SHA256" ;;
-    bun:apt:x64|bun:fedora:x64|bun:arch:x64) printf '%s\t%s\n' "$BUN_LINUX_X64_URL" "$BUN_LINUX_X64_SHA256" ;;
-    fnm:macos:aarch64|fnm:macos:x64) printf '%s\t%s\n' "$FNM_MACOS_URL" "$FNM_MACOS_SHA256" ;;
-    fnm:apt:aarch64|fnm:fedora:aarch64|fnm:arch:aarch64) printf '%s\t%s\n' "$FNM_LINUX_AARCH64_URL" "$FNM_LINUX_AARCH64_SHA256" ;;
-    fnm:apt:x64|fnm:fedora:x64|fnm:arch:x64) printf '%s\t%s\n' "$FNM_LINUX_X64_URL" "$FNM_LINUX_X64_SHA256" ;;
-    starship:macos:aarch64) printf '%s\t%s\n' "$STARSHIP_DARWIN_AARCH64_URL" "$STARSHIP_DARWIN_AARCH64_SHA256" ;;
-    starship:macos:x64) printf '%s\t%s\n' "$STARSHIP_DARWIN_X64_URL" "$STARSHIP_DARWIN_X64_SHA256" ;;
-    starship:apt:aarch64|starship:fedora:aarch64|starship:arch:aarch64) printf '%s\t%s\n' "$STARSHIP_LINUX_AARCH64_URL" "$STARSHIP_LINUX_AARCH64_SHA256" ;;
-    starship:apt:x64|starship:fedora:x64|starship:arch:x64) printf '%s\t%s\n' "$STARSHIP_LINUX_X64_URL" "$STARSHIP_LINUX_X64_SHA256" ;;
-    *) die "No locked $tool artifact for $OS_FAMILY/$arch" ;;
-  esac
+  artifact_asset "$1" || die "No locked $1 artifact for $OS_FAMILY/$(uname -m)"
 }
 
+# install_locked_archive_binary <tool> <zip|tar.gz> <destination> [extra...]:
+# download the verified archive and install its <tool> executable at
+# <destination>, and each extra executable beside it.
 install_locked_archive_binary() {
-  local tool=$1 extension=$2 destination=$3 url sha temp archive binary asset
+  local tool=$1 extension=$2 destination=$3 url sha temp archive binary asset extra
+  shift 3
   asset=$(platform_asset "$tool")
   IFS=$'\t' read -r url sha <<< "$asset"
   temp=$(mktemp -d)
@@ -230,17 +217,68 @@ install_locked_archive_binary() {
   [[ -n $binary ]] || die "Verified $tool archive did not contain its executable"
   mkdir -p "$(dirname -- "$destination")"
   install -m 755 "$binary" "$destination"
+  for extra in ${1+"$@"}; do
+    binary=$(find "$temp/extract" -type f -name "$extra" -print | sed -n '1p')
+    [[ -n $binary ]] || die "Verified $tool archive did not contain $extra"
+    install -m 755 "$binary" "$(dirname -- "$destination")/$extra"
+  done
   rm -rf "$temp"
 }
 
-install_bun() {
-  install_locked_archive_binary bun zip "$HOME/.local/bin/bun"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/bun" --version | grep -qx "$BUN_VERSION" || die "Bun version verification failed"
+# artifact_version_ok <name> <executable>: the executable reports the locked
+# version on the first line of --version (the registry's expected line,
+# optionally followed by build details after a space).
+artifact_version_ok() {
+  local name=$1 executable=$2 expected first
+  artifact_row "$name"
+  # shellcheck disable=SC2059  # the registry column is the format
+  printf -v expected "$ARTIFACT_VERSION_LINE" "$(artifact_version "$name")"
+  first=$("$executable" --version 2>/dev/null | sed -n '1p') || return 1
+  [[ $first == "$expected" || $first == "$expected "* ]]
 }
 
+# artifact_install <name> [directory]: install a registry artifact into
+# ~/.local/bin (or the directory) and check the installed version.
+artifact_install() {
+  local name=$1 directory=${2:-$HOME/.local/bin} url sha main
+  local -a executables=()
+  artifact_row "$name"
+  IFS=' ' read -r -a executables <<< "$ARTIFACT_EXECUTABLES"
+  main=${executables[0]}
+  if [[ $ARTIFACT_ARCHIVE == file ]]; then
+    IFS=$'\t' read -r url sha <<< "$(platform_asset "$name")"
+    download_verified "$url" "$sha" "$directory/$main"
+    [[ $DRY_RUN -eq 1 ]] || chmod 700 "$directory/$main"
+    return 0
+  fi
+  install_locked_archive_binary "$main" "$ARTIFACT_ARCHIVE" "$directory/$main" ${executables[1]+"${executables[@]:1}"}
+  [[ $DRY_RUN -eq 1 ]] || artifact_version_ok "$name" "$directory/$main" || die "$name version verification failed"
+}
+
+# artifact_verify <name>: the installed copy in ~/.local/bin is the locked one:
+# the same digest for a single file, or every executable present with the
+# main one reporting the locked version.
+artifact_verify() {
+  local name=$1 directory="$HOME/.local/bin" executable asset url sha
+  local -a executables=()
+  artifact_row "$name"
+  IFS=' ' read -r -a executables <<< "$ARTIFACT_EXECUTABLES"
+  for executable in "${executables[@]}"; do
+    [[ -x $directory/$executable ]] || return 1
+  done
+  if [[ $ARTIFACT_ARCHIVE == file ]]; then
+    asset=$(artifact_asset "$name") || return 1
+    IFS=$'\t' read -r url sha <<< "$asset"
+    [[ $(sha256 "$directory/${executables[0]}") == "$sha" ]]
+  else
+    artifact_version_ok "$name" "$directory/${executables[0]}"
+  fi
+}
+
+install_bun() { artifact_install bun; }
+
 install_fnm() {
-  install_locked_archive_binary fnm zip "$HOME/.local/bin/fnm"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/fnm" --version | grep -qx "fnm $FNM_VERSION" || die "fnm version verification failed"
+  artifact_install fnm
   if [[ $DRY_RUN -eq 1 ]]; then
     say "Would adopt a compatible existing Node into fnm, or install current LTS, and make it default"
     return 0
@@ -286,10 +324,7 @@ resolve_node_lts() {
   NODE_SELECTION=current-lts
 }
 
-install_starship() {
-  install_locked_archive_binary starship tar.gz "$HOME/.local/bin/starship"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/starship" --version | grep -q "starship $STARSHIP_VERSION" || die "Starship version verification failed"
-}
+install_starship() { artifact_install starship; }
 
 
 # The locked packages currently declare simple lower bounds. Refuse a new range

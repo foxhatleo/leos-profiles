@@ -354,8 +354,19 @@ run_step() {
   mark_done "$step"
 }
 
+# One `artifact direct` record per registry artifact a selected component owns.
+inspect_artifacts() {
+  local name url digest
+  while IFS= read -r name; do
+    artifact_row "$name"
+    has_csv_item "$SELECTED_STEPS" "$ARTIFACT_COMPONENT" || continue
+    IFS=$'\t' read -r url digest <<< "$(platform_asset "$name")"
+    printf 'artifact\tdirect\t%s\t%s\t%s\n' "$name" "$url" "$digest"
+  done < <(artifact_names)
+}
+
 inspect_tsv() {
-  local step group package status origin asset url digest
+  local step group package status origin
   printf 'meta\tschema\t1\n'
   printf 'platform\tfamily\t%s\n' "$OS_FAMILY"
   printf 'profile\troot\t%s\n' "$TARGET"
@@ -422,26 +433,18 @@ inspect_tsv() {
   if [[ $SSH_MODE != skip ]]; then printf 'file\tssh-reference\t%s\n' "${SSH_KEY_PATH:-generated path under ~/.ssh}"; fi
   if [[ $GPG_MODE != skip ]]; then printf 'global\tgit\tuser.signingkey,gpg.format,commit.gpgsign\n'; fi
   if has_csv_item "$SELECTED_STEPS" default-shell && [[ $CHANGE_DEFAULT_SHELL != no ]]; then printf 'irreversible\tlogin-shell\tchsh may require a new login\n'; fi
-  if has_csv_item "$SELECTED_STEPS" bins; then printf 'artifact\tdirect\trpatool\t%s\t%s\n' "$RPATOOL_URL" "$RPATOOL_SHA256"; fi
+  inspect_artifacts
   if has_csv_item "$SELECTED_STEPS" pyenv; then printf 'artifact\tgit\tpyenv\t%s\t%s\n' "$PYENV_REPOSITORY" "$PYENV_COMMIT"; fi
   if has_csv_item "$SELECTED_STEPS" rbenv; then
     printf 'artifact\tgit\trbenv\t%s\t%s\n' "$RBENV_REPOSITORY" "$RBENV_COMMIT"
     printf 'artifact\tgit\truby-build\t%s\t%s\n' "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT"
   fi
-  if has_csv_item "$SELECTED_STEPS" bun; then
-    asset=$(platform_asset bun); IFS=$'\t' read -r url digest <<< "$asset"
-    printf 'artifact\tdirect\tbun\t%s\t%s\n' "$url" "$digest"
-  fi
   if has_csv_item "$SELECTED_STEPS" yarn; then printf 'artifact\tdirect\tyarn\t%s\t%s\n' "$YARN_URL" "$YARN_SHA256"; fi
   if has_csv_item "$SELECTED_STEPS" pnpm; then printf 'artifact\tdirect\tpnpm\t%s\t%s\n' "$PNPM_URL" "$PNPM_SHA256"; fi
   if has_csv_item "$SELECTED_STEPS" fnm; then
-    asset=$(platform_asset fnm); IFS=$'\t' read -r url digest <<< "$asset"
-    printf 'artifact\tdirect\tfnm\t%s\t%s\n' "$url" "$digest"
     printf 'external\tnode-lts-index\thttps://nodejs.org/dist/index.tab\n'
   fi
   if has_csv_item "$SELECTED_STEPS" plugins; then
-    asset=$(platform_asset starship); IFS=$'\t' read -r url digest <<< "$asset"
-    printf 'artifact\tdirect\tstarship\t%s\t%s\n' "$url" "$digest"
     printf 'artifact\tgit\tzsh-autosuggestions\t%s\t%s\n' "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT"
     printf 'artifact\tgit\tzsh-syntax-highlighting\t%s\t%s\n' "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT"
     printf 'artifact\tgit\tzsh-completions\t%s\t%s\n' "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT"

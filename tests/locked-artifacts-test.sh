@@ -22,12 +22,14 @@ DRY_RUN=0
 detect_os
 
 download_verified "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256" "$TEST_HOME/homebrew-install.sh"
-download_verified "$RPATOOL_URL" "$RPATOOL_SHA256" "$TEST_HOME/bin/rpatool"
 download_verified "$YARN_URL" "$YARN_SHA256" "$TEST_HOME/yarn.tgz"
 download_verified "$PNPM_URL" "$PNPM_SHA256" "$TEST_HOME/pnpm.tgz"
-install_locked_archive_binary bun zip "$TEST_HOME/bin/bun"
-install_locked_archive_binary fnm zip "$TEST_HOME/bin/fnm"
-install_locked_archive_binary starship tar.gz "$TEST_HOME/bin/starship"
+# Every direct artifact in the registry: download, verify the digest, install
+# and check the reported version (artifact_install dies on a mismatch).
+while IFS= read -r artifact; do
+  artifact_install "$artifact" "$TEST_HOME/bin"
+  printf 'verified %s\n' "$artifact"
+done < <(artifact_names)
 
 "$TEST_HOME/bin/rpatool" --help >/dev/null
 [[ $("$TEST_HOME/bin/bun" --version) == "$BUN_VERSION" ]]

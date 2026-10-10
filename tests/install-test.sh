@@ -1369,6 +1369,98 @@ test_login_shell_lookup_ignores_unset_user() {
   assert_equals "$(current_login_shell)" /usr/bin/zsh
 }
 
+# The per-tool lookup the artifact registry replaced (CQ-8), kept here as the
+# reference the registry must reproduce exactly.
+legacy_platform_asset() {
+  local tool=$1 arch=$2
+  case "$tool:$OS_FAMILY:$arch" in
+    bun:macos:aarch64) printf '%s\t%s\n' "$BUN_DARWIN_AARCH64_URL" "$BUN_DARWIN_AARCH64_SHA256" ;;
+    bun:macos:x64) printf '%s\t%s\n' "$BUN_DARWIN_X64_URL" "$BUN_DARWIN_X64_SHA256" ;;
+    bun:*:aarch64) printf '%s\t%s\n' "$BUN_LINUX_AARCH64_URL" "$BUN_LINUX_AARCH64_SHA256" ;;
+    bun:*:x64) printf '%s\t%s\n' "$BUN_LINUX_X64_URL" "$BUN_LINUX_X64_SHA256" ;;
+    fnm:macos:*) printf '%s\t%s\n' "$FNM_DARWIN_URL" "$FNM_DARWIN_SHA256" ;;
+    fnm:*:aarch64) printf '%s\t%s\n' "$FNM_LINUX_AARCH64_URL" "$FNM_LINUX_AARCH64_SHA256" ;;
+    fnm:*:x64) printf '%s\t%s\n' "$FNM_LINUX_X64_URL" "$FNM_LINUX_X64_SHA256" ;;
+    starship:macos:aarch64) printf '%s\t%s\n' "$STARSHIP_DARWIN_AARCH64_URL" "$STARSHIP_DARWIN_AARCH64_SHA256" ;;
+    starship:macos:x64) printf '%s\t%s\n' "$STARSHIP_DARWIN_X64_URL" "$STARSHIP_DARWIN_X64_SHA256" ;;
+    starship:*:aarch64) printf '%s\t%s\n' "$STARSHIP_LINUX_AARCH64_URL" "$STARSHIP_LINUX_AARCH64_SHA256" ;;
+    starship:*:x64) printf '%s\t%s\n' "$STARSHIP_LINUX_X64_URL" "$STARSHIP_LINUX_X64_SHA256" ;;
+    rpatool:*) printf '%s\t%s\n' "$RPATOOL_URL" "$RPATOOL_SHA256" ;;
+  esac
+}
+
+# Same assets, and byte-identical signatures, for every family and CPU, so
+# recorded state stays valid across the refactor.
+test_artifact_registry_matches_legacy_lookup() {
+  local family machine arch tool expected
+  TARGET=/fixture/profile
+  NODE_POLICY=preserve-compatible
+  RESOLVED_NODE_VERSION=""
+  uname() { if [[ ${1:-} == -m ]]; then printf '%s\n' "$FAKE_MACHINE"; else command uname "$@"; fi; }
+  for family in macos apt fedora arch; do
+    OS_FAMILY=$family
+    for machine in arm64 x86_64; do
+      FAKE_MACHINE=$machine
+      if [[ $machine == arm64 ]]; then arch=aarch64; else arch=x64; fi
+      for tool in rpatool bun fnm starship; do
+        assert_equals "$(platform_asset "$tool")" "$(legacy_platform_asset "$tool" "$arch")"
+      done
+      assert_equals "$(signature_bins)" "|$RPATOOL_URL|$RPATOOL_SHA256"
+      assert_equals "$(signature_bun)" "|$BUN_VERSION|$(legacy_platform_asset bun "$arch")"
+      assert_equals "$(signature_fnm)" "|$FNM_VERSION|$(legacy_platform_asset fnm "$arch")|preserve-compatible|unresolved"
+      expected="|$TARGET|$STARSHIP_VERSION|$(legacy_platform_asset starship "$arch")"
+      expected+="|$ZSH_AUTOSUGGESTIONS_COMMIT|$ZSH_SYNTAX_HIGHLIGHTING_COMMIT|$ZSH_COMPLETIONS_COMMIT|$FZF_TAB_COMMIT"
+      assert_equals "$(signature_plugins)" "$expected"
+    done
+  done
+  FAKE_MACHINE=riscv64
+  ! artifact_asset bun >/dev/null || fail "an unsupported CPU resolved a locked asset"
+}
+
+# Verification checks the version line (archives) or the digest (files), and
+# every executable the registry lists.
+test_artifact_verification_checks_version_and_digest() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp"
+  OS_FAMILY=apt
+  mkdir -p "$HOME/.local/bin"
+  fake_tool() { printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$2" > "$HOME/.local/bin/$1"; chmod +x "$HOME/.local/bin/$1"; }
+  fake_tool bun "$BUN_VERSION"
+  artifact_verify bun || fail "the locked bun version was rejected"
+  verify_step bun || fail "verify_bun disagrees with the registry"
+  fake_tool bun 0.0.1
+  ! artifact_verify bun || fail "a wrong bun version was accepted"
+  fake_tool starship "starship $STARSHIP_VERSION"
+  artifact_verify starship || fail "the locked starship version was rejected"
+  fake_tool starship "starship ${STARSHIP_VERSION}9"
+  ! artifact_verify starship || fail "a longer version string was accepted as the locked one"
+  fake_tool fnm "fnm $FNM_VERSION"
+  artifact_verify fnm || fail "the locked fnm version was rejected"
+  printf 'rpatool body' > "$HOME/.local/bin/rpatool"
+  chmod 700 "$HOME/.local/bin/rpatool"
+  ! artifact_verify rpatool || fail "rpatool with the wrong digest was accepted"
+  artifact_asset() { printf '%s\t%s\n' https://example.invalid/rpatool "$(printf 'rpatool body' | hash_text)"; }
+  artifact_verify rpatool || fail "rpatool with the locked digest was rejected"
+  rm -rf "$temp"
+}
+
+test_inspect_lists_every_selected_registry_artifact() {
+  local output name url digest
+  OS_FAMILY=macos
+  SELECTED_STEPS=bins,bun,plugins
+  SELECTED_GROUPS=""
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=""
+  verify_step() { return 1; }
+  output=$(inspect_tsv)
+  for name in rpatool bun starship; do
+    IFS=$'\t' read -r url digest <<< "$(platform_asset "$name")"
+    assert_contains "$output" $'artifact\tdirect\t'"$name"$'\t'"$url"$'\t'"$digest"
+  done
+  [[ $output != *$'artifact\tdirect\tfnm\t'* ]] || fail "an unselected artifact was listed"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1446,6 +1538,9 @@ TESTS=(
   test_pkg_install_uses_one_command_per_family
   test_root_runs_privileged_commands_without_sudo
   test_login_shell_lookup_ignores_unset_user
+  test_artifact_registry_matches_legacy_lookup
+  test_artifact_verification_checks_version_and_digest
+  test_inspect_lists_every_selected_registry_artifact
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

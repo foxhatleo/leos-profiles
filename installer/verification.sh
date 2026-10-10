@@ -48,10 +48,7 @@ font_is_installed() {
   find "$directory" -type f -iname "*${installed_family}*NerdFont*" -print -quit | grep -q .
 }
 
-verify_bins() {
-  local directory
-  [[ -x $HOME/.local/bin/rpatool ]] && [[ $(sha256 "$HOME/.local/bin/rpatool") == "$RPATOOL_SHA256" ]]
-}
+verify_bins() { artifact_verify rpatool; }
 
 verify_packages() {
   local directory
@@ -70,10 +67,7 @@ verify_rbenv() {
     git_checkout_at "$HOME/.rbenv/plugins/ruby-build" "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT"
 }
 
-verify_bun() {
-  local directory
-  [[ -x $HOME/.local/bin/bun ]] && "$HOME/.local/bin/bun" --version 2>/dev/null | grep -qx "$BUN_VERSION"
-}
+verify_bun() { artifact_verify bun; }
 
 verify_yarn() {
   local directory
@@ -89,17 +83,14 @@ verify_fnm() {
   local directory
   [[ -n $RESOLVED_NODE_VERSION ]] || resolve_node_version || return 1
   node_version_compatible "$RESOLVED_NODE_VERSION" || return 1
-  [[ -x $HOME/.local/bin/fnm ]] &&
-    "$HOME/.local/bin/fnm" --version 2>/dev/null | grep -qx "fnm $FNM_VERSION" &&
+  artifact_verify fnm &&
     [[ $("$HOME/.local/bin/fnm" default 2>/dev/null) == "$RESOLVED_NODE_VERSION" ]] &&
     [[ $("$HOME/.local/bin/fnm" exec --using="$RESOLVED_NODE_VERSION" -- node --version 2>/dev/null) == "$RESOLVED_NODE_VERSION" ]]
 }
 
 verify_plugins() {
-  local directory
-  [[ -x $HOME/.local/bin/starship ]] &&
-    "$HOME/.local/bin/starship" --version 2>/dev/null | sed -n '1p' | grep -qx "starship $STARSHIP_VERSION" &&
-    directory="$TARGET/zsh/plugins" &&
+  local directory="$TARGET/zsh/plugins"
+  artifact_verify starship &&
     git_checkout_at "$directory/zsh-autosuggestions" "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT" &&
     git_checkout_at "$directory/zsh-syntax-highlighting" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT" &&
     git_checkout_at "$directory/zsh-completions" "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT" &&

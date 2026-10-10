@@ -44,8 +44,8 @@ readonly BUN_LINUX_X64_URL="https://github.com/oven-sh/bun/releases/download/bun
 readonly BUN_LINUX_X64_SHA256="8611ba935af886f05a6f38740a15160326c15e5d5d07adef966130b4493607ed"
 
 readonly FNM_VERSION="1.39.0"
-readonly FNM_MACOS_URL="https://github.com/Schniz/fnm/releases/download/v1.39.0/fnm-macos.zip"
-readonly FNM_MACOS_SHA256="f046483e85c53b3278efe49a3620c8680f22efa58a8dabfd03eafc6b59b31a25"
+readonly FNM_DARWIN_URL="https://github.com/Schniz/fnm/releases/download/v1.39.0/fnm-macos.zip"
+readonly FNM_DARWIN_SHA256="f046483e85c53b3278efe49a3620c8680f22efa58a8dabfd03eafc6b59b31a25"
 readonly FNM_LINUX_X64_URL="https://github.com/Schniz/fnm/releases/download/v1.39.0/fnm-linux.zip"
 readonly FNM_LINUX_X64_SHA256="7807664f39d39fc518da1c35ba0181e4b3267603c4b1dedeb4b5fc6ae440a224"
 readonly FNM_LINUX_AARCH64_URL="https://github.com/Schniz/fnm/releases/download/v1.39.0/fnm-arm64.zip"
