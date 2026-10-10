@@ -1,7 +1,8 @@
 # GPG
 if [[ -o interactive ]]; then
   # $TTY is zsh's own record of the terminal, so this needs no `tty` fork.
-  # Leave GPG_TTY unset when there is no terminal.
+  # Without a terminal, drop an inherited GPG_TTY: it names another session's
+  # terminal, and a curses pinentry would prompt there.
   if [[ -n ${TTY:-} ]]; then
     export GPG_TTY=$TTY
   else

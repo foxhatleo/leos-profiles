@@ -14,12 +14,13 @@ typeset -gU fpath
 entry "path/brew"
 entry "path/gnu"
 # add-path prepends, so PATH order is the reverse of load order. The resulting
-# precedence is: version-manager shims, then ~/.local/bin, then Go workspace
-# bins, then Homebrew and the system.
+# precedence is: version-manager shims (fnm, rbenv, pyenv), the Yarn and Bun
+# global bins, ~/.local/bin, Go workspace bins, the GNU tools (macOS), then
+# Homebrew and the system.
 #
-# Go loads right after Homebrew (which usually provides the go binary): a
-# GOPATH bin is a user-local install location like ~/.local/bin, and must not
-# shadow the runtimes the version managers below select.
+# Go loads right after Homebrew (which usually provides the go binary) and the
+# GNU tools: a GOPATH bin is a user-local install location like ~/.local/bin,
+# and must not shadow the runtimes the version managers below select.
 entry "path/go"
 # User-local bins load BEFORE the version managers below, so their shims end up
 # in front. Otherwise a stale node/python/ruby left in ~/.local/bin permanently

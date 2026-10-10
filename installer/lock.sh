@@ -2,9 +2,15 @@
 # shellcheck disable=SC2034
 # Pinned, executable third-party sources used by install.sh.
 #
-# Update a value only as part of a reviewed dependency update.  Every Git
-# source is checked out at the exact commit below; every downloaded file is
-# verified by SHA-256 before it is used.
+# Update a value only as part of a reviewed dependency update; tools/update-locks.sh
+# proposes one from upstream release metadata and checks it against upstream
+# integrity data (docs/development.md, "Updating pinned artifacts"). Every Git
+# source is checked out at the exact commit below. Every other download is
+# verified by SHA-256 before it is used: directly by the digest here, or, for a
+# Nerd Font archive, by the release's SHA-256.txt, whose own digest is pinned.
+#
+# Not locked here: OS and Homebrew packages, the Node runtimes fnm installs, and
+# the AI CLIs' own updaters. Those follow their channels (see README).
 
 readonly PYENV_REPOSITORY="https://github.com/pyenv/pyenv.git"
 readonly PYENV_COMMIT="e4c462dc70951c8714d069522448c9583a38c913"
@@ -72,7 +78,7 @@ readonly PNPM_SHA256="85ef2eff216a1ae90804c00c8dfbfa6685353644650d10906a893c05ae
 # distribution with no glibc-version floor. uv still detects the host's libc
 # at run time, so the Pythons it downloads match the host. macOS is
 # Apple-silicon only (Intel Macs are unsupported). Digests are GitHub's
-# release-asset SHA-256 values for tag 0.13.0.
+# release-asset SHA-256 values, checked against uv's own .sha256 files.
 readonly UV_VERSION="0.13.0"
 readonly UV_DARWIN_AARCH64_URL="https://github.com/astral-sh/uv/releases/download/0.13.0/uv-aarch64-apple-darwin.tar.gz"
 readonly UV_DARWIN_AARCH64_SHA256="a9c1b29002cf3c83f07fa9cd8a887a3be0107d90e23189721221e7257db8e3d6"
