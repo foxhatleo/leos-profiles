@@ -16,6 +16,25 @@ fail() { printf '%s\n' "FAIL [${CURRENT_TEST:-?}]: $*" >&2; exit 1; }
 assert_equals() { [[ $1 == "$2" ]] || fail "expected '$2', got '$1'"; }
 assert_contains() { [[ $1 == *"$2"* ]] || fail "expected '$1' to contain '$2'"; }
 
+# A copy of the public checkout, so CLI tests never read or write the
+# developer's local/ state.
+make_fixture_checkout() {
+  mkdir -p "$1"
+  cp -R "$ROOT/install.sh" "$ROOT/installer" "$ROOT/zsh" "$ROOT/util" "$1/"
+  rm -rf -- "$1/zsh/plugins" "$1/zsh/_private.zsh"
+}
+
+# run_cli <checkout> <home> <args...>: the real entrypoint, with this suite's
+# interpreter (the system Bash 3.2 on macOS CI) and a fixture HOME.
+run_cli() {
+  local checkout=$1 home=$2
+  shift 2
+  mkdir -p "$home"
+  env LEOS_PROFILES_INSTALL_LIB_ONLY=0 HOME="$home" XDG_STATE_HOME="$home/.local/state" \
+    XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" XDG_DATA_HOME="$home/.local/share" \
+    "$BASH" "$checkout/install.sh" "$@"
+}
+
 test_dependency_normalisation() {
   SELECTED_STEPS="zsh-config"
   SELECTED_GROUPS="core-utils"
@@ -1265,6 +1284,39 @@ test_macos_login_path_block() {
   rm -rf "$temp"
 }
 
+test_package_signature_is_ifs_independent() {
+  local expected
+  OS_FAMILY=apt
+  SELECTED_GROUPS=shell,system
+  # Newline-joined, as recorded by earlier versions, whatever IFS the caller has.
+  expected=$'|shell,system|zsh\nsmartmontools'
+  assert_equals "$(signature_packages)" "$expected"
+  assert_equals "$(IFS=,; signature_packages)" "$expected"
+  assert_equals "$(IFS=$'\n\t'; signature_packages)" "$expected"
+  assert_equals "$(IFS=' '; step_signature packages)" "$(step_signature packages)"
+}
+
+# ONB-14: an empty package selection crashed Bash 3.2 under set -u when the
+# packages step computed its signature.
+test_empty_package_selection_signs_and_runs() {
+  local temp out
+  temp=$(mktemp -d)
+  OS_FAMILY=apt
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=""
+  assert_equals "$(signature_packages)" "||"
+  LOCAL_DIR="$temp/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
+  DRY_RUN=0
+  mark_done packages
+  state_done packages || fail "an empty package selection was not recorded"
+  make_fixture_checkout "$temp/profile"
+  out=$(run_cli "$temp/profile" "$temp/home" apply --yes --dry-run --groups packages --package-groups none 2>&1) ||
+    fail "apply --groups packages --package-groups none failed: $out"
+  assert_contains "$out" "Profile apply complete"
+  rm -rf "$temp"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1337,6 +1389,8 @@ TESTS=(
   test_set_default_shell_uses_unprivileged_chsh_on_linux
   test_set_default_shell_uses_sudo_chsh_on_macos
   test_known_hosts_matches_metadata_and_dedupes
+  test_package_signature_is_ifs_independent
+  test_empty_package_selection_signs_and_runs
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

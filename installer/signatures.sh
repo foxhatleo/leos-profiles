@@ -8,11 +8,24 @@ signature_bins() {
   printf '%s' "$material"
 }
 
+# join_lines <items...>: the items separated by newlines, with no trailing
+# newline. Explicit, so a signature never depends on the caller's IFS, and
+# byte-identical to the signatures recorded while the installer ran with
+# IFS=$'\n\t' (whose "${array[*]}" joined with a newline).
+join_lines() {
+  (( $# )) || return 0
+  printf '%s' "$1"
+  shift
+  (( $# )) || return 0
+  printf '\n%s' "$@"
+}
+
 signature_packages() {
-  local material="" asset
   collect_selected_packages
-  material+="|$SELECTED_GROUPS|${SELECTED_PACKAGES[*]}"
-  printf '%s' "$material"
+  printf '|%s|' "$SELECTED_GROUPS"
+  # An empty selection (--package-groups none) must not trip `set -u` under
+  # Bash 3.2, which treats an empty array as unset (ONB-14).
+  join_lines ${SELECTED_PACKAGES[@]+"${SELECTED_PACKAGES[@]}"}
 }
 
 signature_pyenv() {
