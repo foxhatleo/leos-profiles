@@ -76,6 +76,9 @@ case "$name" in
   pacman)
     case "$1" in -Q*) exit 1 ;; esac ;;
   curl|wget|fnm|node) exit 7 ;;
+  # The preflight's credential probe changes nothing; answer as a host where
+  # sudo needs a password.
+  sudo) [ "$*" = '-n true' ] && exit 1 ;;
 esac
 printf 'MUTATION %s %s\n' "$name" "$*" >> "$LEOS_READONLY_CALLS"
 exit 97
