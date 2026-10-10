@@ -361,10 +361,15 @@ install_zsh_config() {
   fi
 }
 
+# The account name from the process credentials, not $USER: a root shell in a
+# container or a minimal environment may not set USER at all (ONB-12).
+login_user() { id -un; }
+
 current_login_shell() {
-  local current_shell
-  current_shell=$(getent passwd "$USER" 2>/dev/null | awk -F: '{print $7}' || true)
-  [[ -n $current_shell ]] || current_shell=$(dscl . -read /Users/"$USER" UserShell 2>/dev/null | awk '{print $2}' || true)
+  local current_shell user
+  user=$(login_user)
+  current_shell=$(getent passwd "$user" 2>/dev/null | awk -F: '{print $7}' || true)
+  [[ -n $current_shell ]] || current_shell=$(dscl . -read /Users/"$user" UserShell 2>/dev/null | awk '{print $2}' || true)
   printf '%s\n' "$current_shell"
 }
 
@@ -394,7 +399,7 @@ set_default_shell() {
       'printf "%s\n" "$2" | ${1:+"$1"} tee -a /etc/shells >/dev/null' "$SUDO" "$zsh_path"
   fi
   if [[ $OS_FAMILY == macos ]]; then
-    run_root chsh -s "$zsh_path" "$USER"
+    run_root chsh -s "$zsh_path" "$(login_user)"
   else
     run chsh -s "$zsh_path"
   fi

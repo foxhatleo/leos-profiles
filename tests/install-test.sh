@@ -1361,6 +1361,14 @@ test_root_runs_privileged_commands_without_sudo() {
   rm -rf "$temp"
 }
 
+# ONB-12: the login shell is looked up for `id -un`, with USER unset.
+test_login_shell_lookup_ignores_unset_user() {
+  unset USER
+  getent() { [[ $2 == "$(id -un)" ]] && printf 'u:x:1:1::/home/u:/usr/bin/zsh\n'; }
+  dscl() { [[ $3 == /Users/"$(id -un)" ]] && printf 'UserShell: /usr/bin/zsh\n'; }
+  assert_equals "$(current_login_shell)" /usr/bin/zsh
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1437,6 +1445,7 @@ TESTS=(
   test_empty_package_selection_signs_and_runs
   test_pkg_install_uses_one_command_per_family
   test_root_runs_privileged_commands_without_sudo
+  test_login_shell_lookup_ignores_unset_user
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do
