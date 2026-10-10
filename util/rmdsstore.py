@@ -23,7 +23,6 @@ import stat
 import sys
 from dataclasses import dataclass
 
-
 METADATA_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 RECYCLE_BIN = "$RECYCLE.BIN"
 MACOS_DATA_ROOT = "/System/Volumes/Data"
