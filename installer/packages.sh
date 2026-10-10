@@ -32,9 +32,22 @@ apt_update_once() {
   APT_INDEX_UPDATED=1
 }
 
+# apt_get <arguments...>: apt-get as root, never stopping at a prompt. A
+# changed configuration file keeps the local version unless the package's
+# default is to replace an unmodified one (BP-7), as unattended upgrades do.
+apt_get() {
+  run_root env DEBIAN_FRONTEND=noninteractive apt-get \
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
+}
+
 # pkg_install <packages...>: install packages with the host package manager.
 # The bootstrap, the packages step and the credential prerequisites all use
 # this one definition (CQ-3).
+#
+# Arch never installs against a stale sync database: Arch does not support
+# partial upgrades, and an old database names package versions the mirrors no
+# longer carry. Whenever anything is missing it syncs and upgrades the whole
+# system in the same transaction (BP-8); inspect discloses this.
 pkg_install() {
   (( $# )) || return 0
   case $OS_FAMILY in
@@ -43,11 +56,36 @@ pkg_install() {
       run brew install "$@" ;;
     apt)
       apt_update_once
-      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+      apt_get install -y "$@" ;;
     fedora) run_root dnf install -y "$@" ;;
-    arch) run_root pacman -S --needed --noconfirm "$@" ;;
+    arch) run_root pacman -Syu --needed --noconfirm "$@" ;;
     *) die "Unsupported package family: $OS_FAMILY" ;;
   esac
+}
+
+# Fedora ships ffmpeg-free; the media group's full ffmpeg comes from RPM
+# Fusion. Everything else installs normally. ffmpeg alone then replaces
+# ffmpeg-free with `dnf swap ... --allowerasing`, RPM Fusion's documented
+# method, so package removal is scoped to that swap (SEC-4).
+FEDORA_FFMPEG_SWAP=(dnf swap -y ffmpeg-free ffmpeg --allowerasing)
+fedora_install_media() {
+  local package
+  local -a others=()
+  for package in "$@"; do
+    [[ $package == ffmpeg ]] || others+=("$package")
+  done
+  if ! package_installed rpmfusion-free-release; then
+    run_root dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+  fi
+  pkg_install ${others[@]+"${others[@]}"}
+  # The RPM Fusion package is named ffmpeg; Fedora's is ffmpeg-free.
+  if [[ $DRY_RUN -eq 1 ]] || ! rpm -q ffmpeg >/dev/null 2>&1; then
+    if [[ $DRY_RUN -eq 1 ]] || rpm -q ffmpeg-free >/dev/null 2>&1; then
+      run_root "${FEDORA_FFMPEG_SWAP[@]}"
+    else
+      run_root dnf install -y ffmpeg
+    fi
+  fi
 }
 
 ensure_brew() {
@@ -282,21 +320,19 @@ install_os_packages() {
       BREW_FORMULAE="" ;;
     apt)
       apt_update_once
-      [[ $FULL_UPGRADE -eq 0 ]] || run_root env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+      [[ $FULL_UPGRADE -eq 0 ]] || apt_get upgrade -y
       pkg_install "${requested[@]}"
       apt_compat_links ;;
     fedora)
       [[ $FULL_UPGRADE -eq 0 ]] || run_root dnf upgrade -y
       if has_csv_item "$SELECTED_GROUPS" media; then
-        if ! package_installed rpmfusion-free-release; then
-          run_root dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
-        fi
-        run_root dnf install -y --allowerasing "${requested[@]}"
+        fedora_install_media "${requested[@]}"
       else
         pkg_install "${requested[@]}"
       fi ;;
     arch)
-      [[ $FULL_UPGRADE -eq 0 ]] || run_root pacman -Syu --noconfirm
+      # pkg_install's -Syu is the full upgrade too: with FULL_UPGRADE every
+      # selected package is requested, so there is always something to pass.
       pkg_install "${requested[@]}" ;;
   esac
 }

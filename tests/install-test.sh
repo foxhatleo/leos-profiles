@@ -1428,11 +1428,62 @@ test_pkg_install_uses_one_command_per_family() {
   OS_FAMILY=apt
   out=$(pkg_install jq)
   assert_contains "$out" "+ sudo apt-get update"
-  assert_contains "$out" "+ sudo env DEBIAN_FRONTEND=noninteractive apt-get"
-  assert_contains "$out" "install -y jq"
+  # BP-7: no dpkg configuration-file prompt can stop an unattended run.
+  assert_contains "$out" "+ sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y jq"
   OS_FAMILY=fedora
   assert_equals "$(pkg_install jq)" "+ sudo dnf install -y jq "
+  # BP-8: Arch never installs against a stale database.
+  OS_FAMILY=arch
+  assert_equals "$(pkg_install jq)" "+ sudo pacman -Syu --needed --noconfirm jq "
   assert_equals "$(pkg_install)" ""
+}
+
+test_apt_upgrade_keeps_local_configuration() {
+  local out
+  OS_FAMILY=apt
+  DRY_RUN=1
+  SUDO=sudo
+  FULL_UPGRADE=1
+  SELECTED_GROUPS=shell
+  out=$(install_os_packages)
+  assert_contains "$out" "apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y"
+  assert_contains "$(cat "$ROOT/zsh/path/apt.zsh")" "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y"
+}
+
+# SEC-4: --allowerasing applies only to the ffmpeg swap, never to the whole
+# media install; without media there is no RPM Fusion and no swap.
+test_fedora_media_swaps_only_ffmpeg() {
+  local out
+  OS_FAMILY=fedora
+  DRY_RUN=1
+  SUDO=sudo
+  FULL_UPGRADE=0
+  package_installed() { return 1; }
+  rpm() { [[ $1 == -E ]] && printf '44\n'; return 1; }
+  SELECTED_GROUPS=media
+  out=$(install_os_packages)
+  assert_contains "$out" "+ sudo dnf install -y https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm"
+  assert_contains "$out" "+ sudo dnf install -y ImageMagick yt-dlp "
+  assert_contains "$out" "+ sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing"
+  [[ $(grep -c -- --allowerasing <<< "$out") == 1 ]] || fail "--allowerasing reached another command: $out"
+  SELECTED_GROUPS=core-utils
+  out=$(install_os_packages)
+  [[ $out != *rpmfusion* && $out != *swap* && $out != *allowerasing* ]] || fail "a non-media install touched RPM Fusion: $out"
+}
+
+# BP-8: missing packages on Arch sync and upgrade in one transaction, with or
+# without the full-upgrade policy; there is never a bare -S.
+test_arch_installs_with_a_synced_database() {
+  local out
+  OS_FAMILY=arch
+  DRY_RUN=1
+  SUDO=sudo
+  package_installed() { return 1; }
+  SELECTED_GROUPS=shell
+  for FULL_UPGRADE in 0 1; do
+    out=$(install_os_packages)
+    assert_equals "$out" "+ sudo pacman -Syu --needed --noconfirm zsh "
+  done
 }
 
 # CQ-7: a root installer (a container) runs privileged commands directly,
@@ -1662,6 +1713,9 @@ TESTS=(
   test_dev_tools_cover_ruby_build_dependencies
   test_uv_artifact_installs_uv_and_uvx
   test_linux_artifacts_use_static_musl_builds
+  test_apt_upgrade_keeps_local_configuration
+  test_fedora_media_swaps_only_ffmpeg
+  test_arch_installs_with_a_synced_database
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do
