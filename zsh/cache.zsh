@@ -6,6 +6,11 @@
 # The identity includes the launcher, arguments, HOME and version-manager roots.
 # Launcher mtimes invalidate entries; use leos-refresh-init-cache after upgrades
 # that change only a separate implementation file.
+#
+# Every cache hit runs during shell startup, so the hit path stays fork-free:
+# the directory is fully validated once per shell and memoized, entries are
+# named in-process, and each entry's first line records its full identity,
+# which is compared before the entry is used.
 
 # A user-private group (useradd's USERGROUPS_ENAB default, often paired with
 # umask 002) grants nobody else write access. It must be the user's primary
@@ -33,7 +38,7 @@ __leos_private_group() {
 # rejected path is kept in __leos_cache_unsafe for the fallback warning.
 __leos_cache_safe_path() {
   emulate -L zsh
-  zmodload zsh/stat || return 1
+  zmodload -F zsh/stat b:zstat || return 1
   # Lexical normalization can erase a symlink/.. pair before validation even
   # though the kernel follows the symlink first. Refuse these paths outright.
   [[ /$1/ != */../* ]] || { typeset -g __leos_cache_unsafe=$1; return 1; }
@@ -69,58 +74,131 @@ __leos_cache_safe_path() {
 
 __leos_cache_safe_file() {
   emulate -L zsh
-  zmodload zsh/stat || return 1
+  zmodload -F zsh/stat b:zstat || return 1
   local -A info
   [[ -f $1 && ! -L $1 ]] || return 1
   zstat -H info -- "$1" 2>/dev/null || return 1
   (( info[uid] == EUID && !(info[mode] & 8#22) ))
 }
 
+# Full validation; __leos_cache_dir below memoizes its result per shell.
 # Create only inside already-validated ancestors, with private permissions.
 # REPLY receives the directory. Owned legacy cache directories are migrated
 # after their parents are validated; unrelated or unsafe storage is untouched.
-__leos_cache_dir() {
+__leos_cache_dir_validate() {
   emulate -L zsh
-  setopt localoptions localtraps
+  setopt extended_glob
+  zmodload -F zsh/stat b:zstat || return 1
   local root=${XDG_CACHE_HOME:-$HOME/.cache} item ancestor insecure=0
+  local -a missing
   local -A info
   typeset -g __leos_cache_unsafe=
   [[ $root == /* && ! -L $root && /$root/ != */../* ]] || return 1
   ancestor=$root
   while [[ ! -e $ancestor ]]; do
     [[ ! -L $ancestor ]] || return 1
+    missing=("$ancestor" $missing)
     ancestor=${ancestor:h}
   done
   __leos_cache_safe_path "$ancestor" || return 1
-  local old_umask=$(umask)
-  umask 077
-  {
-    mkdir -p -- "$root" 2>/dev/null || return 1
-    __leos_cache_safe_path "$root" || return 1
-    for item in "$root/leos-profiles" "$root/leos-profiles/init"; do
-      [[ ! -L $item ]] || return 1
-      [[ -d $item ]] || mkdir -- "$item" 2>/dev/null || return 1
-      [[ -O $item ]] || return 1
-      zstat -H info -- "$item" 2>/dev/null || return 1
-      (( !(info[mode] & 8#22) )) || insecure=1
-      # Only these two profile-owned directories are repaired. Never chmod
-      # the user's HOME, shared XDG root, or an unowned/symlink directory.
-      if (( (info[mode] & 8#777) != 8#700 )); then
-        chmod 700 "$item" 2>/dev/null || return 1
-      fi
-      __leos_cache_safe_path "$item" || return 1
-    done
-    if (( insecure )); then
-      # Other accounts could have changed even owner-only files while their
-      # containing directory was writable. Discard all executable cache bodies
-      # and negative/rehash markers only AFTER both directories are private.
-      local -a stale=("$item"/*.zsh(N) "$item"/*.zwc(N) "$item"/*.failed(N) "$item"/*-rehash(N))
-      (( ! $#stale )) || rm -f -- "${stale[@]}" 2>/dev/null || return 1
+  # Create the missing levels one at a time, and only when missing: `mkdir -m
+  # 700` sets the mode whatever the caller's umask, so there is no umask to
+  # save and restore (reading it back costs a fork). A level another shell
+  # created first is accepted here and validated with the whole chain below.
+  for item in $missing; do
+    command mkdir -m 700 -- "$item" 2>/dev/null || [[ -d $item && ! -L $item ]] || return 1
+  done
+  __leos_cache_safe_path "$root" || return 1
+  for item in "$root/leos-profiles" "$root/leos-profiles/init"; do
+    [[ ! -L $item ]] || return 1
+    if [[ ! -d $item ]]; then
+      command mkdir -m 700 -- "$item" 2>/dev/null || [[ -d $item && ! -L $item ]] || return 1
     fi
-    REPLY=$item
-  } always {
-    umask "$old_umask"
-  }
+    [[ -O $item ]] || return 1
+    zstat -H info -- "$item" 2>/dev/null || return 1
+    (( !(info[mode] & 8#22) )) || insecure=1
+    # Only these two profile-owned directories are repaired. Never chmod
+    # the user's HOME, shared XDG root, or an unowned/symlink directory.
+    if (( (info[mode] & 8#777) != 8#700 )); then
+      chmod 700 "$item" 2>/dev/null || return 1
+    fi
+    __leos_cache_safe_path "$item" || return 1
+  done
+  if (( insecure )); then
+    # Other accounts could have changed even owner-only files while their
+    # containing directory was writable. Discard all executable cache bodies
+    # and negative/rehash markers only AFTER both directories are private.
+    local -a stale=("$item"/*.zsh(N) "$item"/*.zwc(N) "$item"/*.failed(N) "$item"/*-rehash(N))
+    (( ! $#stale )) || rm -f -- "${stale[@]}" 2>/dev/null || return 1
+  fi
+  # Earlier versions named entries by the SHA-256 of their identity. Nothing
+  # looks those names up any more: remove them (regular files only).
+  local -a legacy=("$item"/[0-9a-f](#c64).(zsh|zsh.zwc|failed)(N.))
+  (( ! $#legacy )) || rm -f -- "${legacy[@]}" 2>/dev/null
+  REPLY=$item
+}
+
+# __leos_cache_dir_sig <path...>
+# REPLY: owner, mode, inode and device of each path, not following symlinks.
+__leos_cache_dir_sig() {
+  emulate -L zsh
+  zmodload -F zsh/stat b:zstat || return 1
+  local item sig=
+  local -A info
+  for item in "$@"; do
+    zstat -L -H info -- "$item" 2>/dev/null || return 1
+    sig+="$info[uid]:$info[mode]:$info[inode]:$info[device]/"
+  done
+  REPLY=$sig
+}
+
+# The private init-cache directory: REPLY receives it, or the call fails and
+# __leos_cache_unsafe names the first rejected path.
+#
+# Full validation walks every ancestor along two chains and costs several
+# milliseconds, and one startup asks for the directory about a dozen times. The
+# result is therefore memoized per shell, keyed on the cache root and EUID. A
+# repeat call re-checks only the cache root and the two profile-owned levels,
+# one lstat each: any change in their owner, mode or identity (a chmod, a
+# replacement, a symlink) drops the memo and validates in full again. Further
+# ancestors are trusted for the rest of this shell; every new shell validates
+# them again. A failed validation is memoized the same way, so the fallback
+# path does not re-walk the tree on every call; leos-refresh-init-cache and a
+# changed root or EUID start over.
+__leos_cache_dir() {
+  emulate -L zsh
+  local root=${XDG_CACHE_HOME:-$HOME/.cache} dir
+  local memo="$EUID:$root"
+  if [[ ${__leos_cache_memo_key-} == "$memo" ]]; then
+    if [[ -z ${__leos_cache_memo_dir-} ]]; then
+      typeset -g __leos_cache_unsafe=${__leos_cache_memo_unsafe-}
+      return 1
+    fi
+    dir=$__leos_cache_memo_dir
+    if [[ -d $dir && -O $dir && ! -L $dir ]] &&
+        __leos_cache_dir_sig "$root" "${dir:h}" "$dir" &&
+        [[ $REPLY == "$__leos_cache_memo_sig" ]]; then
+      REPLY=$dir
+      return 0
+    fi
+  fi
+  __leos_cache_forget
+  if __leos_cache_dir_validate; then
+    dir=$REPLY
+    # Without a signature there is nothing cheap to re-check: do not memoize.
+    if __leos_cache_dir_sig "$root" "${dir:h}" "$dir"; then
+      typeset -g __leos_cache_memo_key=$memo __leos_cache_memo_dir=$dir __leos_cache_memo_sig=$REPLY
+    fi
+    REPLY=$dir
+    return 0
+  fi
+  typeset -g __leos_cache_memo_key=$memo __leos_cache_memo_unsafe=${__leos_cache_unsafe-}
+  return 1
+}
+
+# Drop the memo, so the next __leos_cache_dir validates in full.
+__leos_cache_forget() {
+  typeset -g __leos_cache_memo_key= __leos_cache_memo_dir= __leos_cache_memo_sig= __leos_cache_memo_unsafe=
 }
 
 __leos_cache_warn_fallback() {
@@ -132,6 +210,51 @@ __leos_cache_warn_fallback() {
   print -u2 -r -- "Leo's Profiles: init cache is unsafe or unavailable at ${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init; using freshly generated initialization for this shell.$hint"
 }
 
+# __leos_init_cache_identity <key> <real-launcher> [args...]
+# REPLY: the identity line every cache entry (script or .failed marker) starts
+# with. It holds the key, the resolved launcher, HOME, both version-manager
+# roots and every argument. Each field is quoted with (q+), which renders
+# newlines, NULs and other control characters as $'...' escapes and quotes
+# spaces, so the line is always a single line and no field can fake a
+# boundary or a second header.
+__leos_init_cache_identity() {
+  emulate -L zsh
+  local key=$1 real=$2
+  shift 2
+  local -a fields=(v1 "$key" "$real" "$HOME" "${PYENV_ROOT:-}" "${RBENV_ROOT:-}" "$@")
+  REPLY="# leos-id: ${(j: :)${(@q+)fields}}"
+}
+
+# __leos_init_cache_name <key> <identity-line>
+# REPLY: the file stem for an entry, computed without a fork. The key is kept
+# readable: every byte outside [A-Za-z0-9_-] becomes %XX (so `%` itself is
+# always escaped and distinct keys can never share a stem), truncated to stay
+# well inside filename limits. A 32-bit FNV-1a digest of the identity line
+# follows, so different launchers, arguments and roots get separate entries
+# instead of evicting each other. The digest only spreads entries: what makes
+# an entry usable is its identity line, compared in full before every use.
+__leos_init_cache_name() {
+  emulate -L zsh
+  setopt no_multibyte
+  local key=$1 id=$2 c enc=
+  integer h=2166136261
+  if [[ $key == *[^A-Za-z0-9_-]* ]]; then
+    for c in ${(s::)key}; do
+      if [[ $c == [A-Za-z0-9_-] ]]; then
+        enc+=$c
+      else
+        enc+=%${(l:2::0:)$(( [##16] #c ))}
+      fi
+    done
+  else
+    enc=$key
+  fi
+  for c in ${(s::)id}; do
+    (( h = ((h ^ #c) * 16777619) & 16#FFFFFFFF ))
+  done
+  REPLY=${enc[1,160]}.${(l:8::0:)$(( [##16] h ))}
+}
+
 # __leos_init_cache <key> <bin> [args...]
 # 0: REPLY is a verified script path; 1: REPLY is fresh text to eval;
 # 2: fresh empty/failed generation; 3: a previously recorded empty generation.
@@ -139,50 +262,52 @@ __leos_init_cache() {
   emulate -L zsh
   local key=$1 bin=$2
   shift 2
-  local real=${bin:A} dir digest cache failed generated stage rc=0
-  local usable=0 untrusted=0
+  local real=${bin:A} dir cache failed generated stage identity line= rc=0
+  local usable=0 untrusted=0 f
   local -A info
+  __leos_init_cache_identity "$key" "$real" "$@"
+  identity=$REPLY
   if __leos_cache_dir; then
     dir=$REPLY
-    # NUL separators preserve boundaries, unlike flattened path names or joined
-    # arguments. SHA-256 also keeps filenames within filesystem length limits.
-    if (( $+commands[sha256sum] )); then
-      digest=$(printf '%s\0' "$key" "$real" "$HOME" "${PYENV_ROOT:-}" "${RBENV_ROOT:-}" "$@" | command sha256sum) || digest=
-    elif (( $+commands[shasum] )); then
-      digest=$(printf '%s\0' "$key" "$real" "$HOME" "${PYENV_ROOT:-}" "${RBENV_ROOT:-}" "$@" | command shasum -a 256) || digest=
-    fi
-    digest=${digest%% *}
-    if [[ ${#digest} == 64 && $digest != *[^0-9a-f]* ]]; then
-      cache=$dir/$digest.zsh
-      failed=$dir/$digest.failed
-      usable=1
-      # Check even stale entries and compiled siblings: never follow an unsafe
-      # destination while replacing it, and never let source choose hostile .zwc.
-      local f
-      for f in "$cache" "$cache.zwc" "$failed"; do
-        if [[ -e $f || -L $f ]]; then
-          if [[ ! -f $f || -L $f || ! -O $f ]]; then
-            usable=0
-            continue
-          fi
-          zstat -H info -- "$f" 2>/dev/null || { usable=0; continue; }
-          (( !(info[mode] & 8#22) )) || untrusted=1
-          if (( (info[mode] & 8#777) != 8#600 )); then
-            chmod 600 "$f" 2>/dev/null || usable=0
-          fi
+    __leos_init_cache_name "$key" "$identity"
+    cache=$dir/$REPLY.zsh
+    failed=$dir/$REPLY.failed
+    usable=1
+    # Check even stale entries and compiled siblings: never follow an unsafe
+    # destination while replacing it, and never let source choose hostile .zwc.
+    for f in "$cache" "$cache.zwc" "$failed"; do
+      if [[ -e $f || -L $f ]]; then
+        if [[ ! -f $f || -L $f || ! -O $f ]]; then
+          usable=0
+          continue
         fi
-      done
-      if (( usable && untrusted )); then
-        # Permission repair cannot establish the provenance of writable code.
-        # Throw away the text, compiled sibling and marker as a single entry.
-        rm -f -- "$cache" "$cache.zwc" "$failed" 2>/dev/null || usable=0
+        zstat -H info -- "$f" 2>/dev/null || { usable=0; continue; }
+        (( !(info[mode] & 8#22) )) || untrusted=1
+        if (( (info[mode] & 8#777) != 8#600 )); then
+          chmod 600 "$f" 2>/dev/null || usable=0
+        fi
       fi
-      if (( usable )); then
-        if [[ -s $cache && ! $real -nt $cache ]]; then
-          REPLY=$cache
-          return 0
-        fi
-        [[ ! -e $failed || $real -nt $failed ]] || return 3
+    done
+    if (( usable && untrusted )); then
+      # Permission repair cannot establish the provenance of writable code.
+      # Throw away the text, compiled sibling and marker as a single entry.
+      rm -f -- "$cache" "$cache.zwc" "$failed" 2>/dev/null || usable=0
+    fi
+    if (( usable )); then
+      # `read` from a redirection runs in this shell: the identity check costs
+      # no fork. A different identity under the same stem (a digest collision)
+      # is simply regenerated over.
+      if [[ -s $cache && ! $real -nt $cache ]] &&
+          { IFS= read -r line || [[ -n $line ]]; } < "$cache" 2>/dev/null &&
+          [[ $line == "$identity" ]]; then
+        REPLY=$cache
+        return 0
+      fi
+      line=
+      if [[ -f $failed && ! $real -nt $failed ]] &&
+          { IFS= read -r line || [[ -n $line ]]; } < "$failed" 2>/dev/null &&
+          [[ $line == "$identity" ]]; then
+        return 3
       fi
     fi
   fi
@@ -205,10 +330,12 @@ __leos_init_cache() {
     REPLY=$generated; return 1
   }
   if [[ -z $generated ]]; then
-    mv -f -- "$stage" "$failed" 2>/dev/null || rm -f -- "$stage"
+    # The marker carries the identity too: it only suppresses this generator.
+    { print -r -- "$identity" > "$stage" && mv -f -- "$stage" "$failed"; } 2>/dev/null ||
+      rm -f -- "$stage"
     return 2
   fi
-  if ! print -r -- "$generated" > "$stage"; then
+  if ! print -rl -- "$identity" "$generated" > "$stage"; then
     __leos_cache_warn_fallback
     rm -f -- "$stage"
     REPLY=$generated; return 1
@@ -300,6 +427,9 @@ leos-refresh-init-cache() {
     puts "No init cache to clear."
     return 0
   fi
+  # Validate in full: the user may have just fixed (or broken) the permissions
+  # this shell memoized.
+  __leos_cache_forget
   if ! __leos_cache_dir; then
     puts-err "Refusing to clear an unsafe init cache: $dir"
     return 1
@@ -322,8 +452,13 @@ leos-refresh-init-cache() {
 __leos_daily_due() {
   emulate -L zsh
   setopt extended_glob
+  local stamp=${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init/$1 staging
+  # The common case, a stamp from today, needs no directory validation at all:
+  # this check can only ever decide NOT to run the job, so whoever wrote the
+  # stamp, trusting it cannot make anything run.
+  [[ -z $stamp(#qN.mh-24) ]] || return 1
   __leos_cache_dir || return 1
-  local stamp=$REPLY/$1 staging
+  stamp=$REPLY/$1
   [[ ! -e $stamp && ! -L $stamp ]] || __leos_cache_safe_file "$stamp" || return 1
   [[ -z $stamp(#qN.mh-24) ]] || return 1
   staging=$(mktemp "${stamp:h}/.stamp.XXXXXXXX") || return 1

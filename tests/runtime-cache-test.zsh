@@ -260,9 +260,17 @@ __leos_init_cache suppressed "$tmp/bin/suppressed"
 cache=$REPLY
 failed=${cache%.zsh}.failed
 rm -f -- "$cache" "$cache.zwc" "$HOME/suppressed-calls"
+touch -t 202001010000 "$tmp/bin/suppressed"
+# A marker only counts for the identity written on its first line: one left by
+# another identity (or none at all) must not suppress this generator.
 : > "$failed"
 chmod 600 "$failed"
-touch -t 202001010000 "$tmp/bin/suppressed"
+st=0; __leos_init_cache suppressed "$tmp/bin/suppressed" || st=$?
+(( st == 0 )) || fail "a .failed without this identity suppressed the generator ($st)"
+rm -f -- "$cache" "$cache.zwc" "$HOME/suppressed-calls"
+__leos_init_cache_identity suppressed "${${:-$tmp/bin/suppressed}:A}"
+print -r -- "$REPLY" > "$failed"
+chmod 600 "$failed"
 st=0; __leos_init_cache suppressed "$tmp/bin/suppressed" || st=$?
 (( st == 3 )) || fail "planted .failed returned $st, expected 3"
 CACHE_VALUE=untouched
@@ -286,6 +294,106 @@ leos-source-cached parallel "$bin" concurrent
 [[ $CACHE_VALUE == concurrent ]] || fail 'published compiled cache'
 stages=("$XDG_CACHE_HOME/leos-profiles/init"/.init.*(N) "$XDG_CACHE_HOME/leos-profiles/init"/.compile.*(N))
 (( $#stages == 0 )) || fail 'staging files leaked'
+
+# The directory is validated in full once per shell; repeat calls re-check only
+# the root and the two profile-owned levels. Count full ancestor walks.
+functions -c __leos_cache_safe_path __leos_test_safe_path
+integer safe_walks=0
+__leos_cache_safe_path() { (( ++safe_walks )); __leos_test_safe_path "$@"; }
+__leos_cache_forget
+__leos_cache_dir || fail 'cache directory validation'
+init_dir=$REPLY
+(( safe_walks > 0 )) || fail 'first call did not validate the directory'
+safe_walks=0
+__leos_cache_dir && [[ $REPLY == $init_dir ]] || fail 'memoized cache directory'
+leos-source-cached secure "$bin" fresh
+(( safe_walks == 0 )) || fail "memoized directory was re-walked $safe_walks time(s)"
+# Any change to a checked level drops the memo: validate again, and repair.
+chmod 755 "$init_dir"
+__leos_cache_dir || fail 'revalidation after chmod'
+(( safe_walks > 0 )) || fail 'a changed directory mode did not trigger full validation'
+zstat -H info -- "$init_dir"
+(( (info[mode] & 8#777) == 8#700 )) || fail 'revalidation did not repair the directory mode'
+chmod 777 "$XDG_CACHE_HOME"
+if __leos_cache_dir; then fail 'a root made world-writable after validation stayed trusted'; fi
+safe_walks=0
+if __leos_cache_dir; then fail 'memoized failure'; fi
+(( safe_walks == 0 )) || fail 'a memoized failure was re-walked'
+[[ $__leos_cache_unsafe == $XDG_CACHE_HOME ]] || fail "memoized failure lost the unsafe path: $__leos_cache_unsafe"
+chmod 700 "$XDG_CACHE_HOME"
+if __leos_cache_dir; then fail 'memoized failure was not kept for this shell'; fi
+__leos_cache_forget
+__leos_cache_dir || fail 'forgetting the memo did not revalidate'
+# A different root (or EUID) is a different memo key.
+(
+  export XDG_CACHE_HOME=$tmp/other-root
+  __leos_cache_dir && [[ $REPLY == $tmp/other-root/leos-profiles/init ]] || fail 'memo leaked across cache roots'
+)
+functions -c __leos_test_safe_path __leos_cache_safe_path
+
+# A cache hit runs no external command at all: no PATH, still a hit.
+__leos_init_cache secure "$bin" fresh
+cache=$REPLY
+(
+  path=()
+  hash -r
+  __leos_init_cache secure "$bin" fresh && [[ $REPLY == $cache ]] || fail 'cache hit needed an external command'
+)
+
+# Each entry starts with its full identity. Control characters in any field are
+# escaped onto that one line, and an entry whose identity differs (a forged or
+# colliding first line) is regenerated rather than used.
+__leos_init_cache forge "$bin" $'one\n# leos-id: v1 forged'
+cache=$REPLY
+lines=("${(@f)$(<$cache)}")
+[[ $lines[1] == "# leos-id: v1 forge "*" \$'one\\n# leos-id: v1 forged'" ]] ||
+  fail "identity line does not escape a newline: $lines[1]"
+[[ $lines[2] == 'typeset -g CACHE_VALUE='* ]] || fail 'identity line must be a single line'
+print -rl -- '# leos-id: v1 someone-else' 'typeset -g CACHE_VALUE=forged' > "$cache"
+rm -f -- "$cache.zwc"
+leos-source-cached forge "$bin" $'one\n# leos-id: v1 forged'
+[[ $CACHE_VALUE != forged ]] || fail 'an entry with a different identity was used'
+IFS= read -r line < "$cache"
+[[ $line == $lines[1] ]] || fail 'a mismatched entry was not regenerated'
+
+# Keys are encoded reversibly into file names: `%` and separators are escaped,
+# so `a:b` and `a%3Ab` cannot share an entry name.
+__leos_init_cache_name 'a:b' x; first=$REPLY
+__leos_init_cache_name 'a%3Ab' x; second=$REPLY
+[[ $first == a%3Ab.* && $second == a%253Ab.* ]] || fail "key encoding: $first $second"
+
+# Entries named by the SHA-256 of their identity (earlier versions) are removed
+# when the directory is validated; nothing else is touched.
+legacy_name=${(l:64::a:)${:-}}
+: > "$init_dir/$legacy_name.zsh"
+: > "$init_dir/$legacy_name.zsh.zwc"
+: > "$init_dir/$legacy_name.failed"
+: > "$init_dir/keep-me.zsh"
+__leos_cache_forget
+__leos_cache_dir || fail 'validation with legacy entries'
+legacy=("$init_dir"/$legacy_name*(N))
+(( $#legacy == 0 )) || fail "legacy hash-named entries survived: $legacy"
+[[ -e $init_dir/keep-me.zsh ]] || fail 'legacy cleanup removed an unrelated entry'
+rm -f -- "$init_dir/keep-me.zsh"
+
+# A stamp from today answers __leos_daily_due without validating anything; a
+# stale or missing one validates before the job may run.
+functions -c __leos_cache_dir_validate __leos_test_validate
+integer validations=0
+__leos_cache_dir_validate() { (( ++validations )); __leos_test_validate "$@"; }
+__leos_cache_forget
+rm -f -- "$init_dir/stamp-test"
+__leos_daily_due stamp-test || fail 'a missing stamp was not due'
+(( validations == 1 )) || fail "a due job validated $validations time(s)"
+__leos_cache_forget
+validations=0
+if __leos_daily_due stamp-test; then fail 'a fresh stamp was due again'; fi
+(( validations == 0 )) || fail 'a fresh stamp still validated the directory'
+touch -t 202001010000 "$init_dir/stamp-test"
+__leos_daily_due stamp-test || fail 'a stale stamp was not due'
+(( validations == 1 )) || fail 'a stale stamp did not validate the directory'
+functions -c __leos_test_validate __leos_cache_dir_validate
+rm -f -- "$init_dir/stamp-test"
 
 # Homebrew's empty success is process-dependent, and must not poison a later
 # shell. The stub also rejects dialect inference by requiring an explicit zsh.
