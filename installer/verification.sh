@@ -16,7 +16,7 @@ font_is_installed() {
   if [[ $OS_FAMILY == macos ]]; then
     directory="$HOME/Library/Fonts"
   else
-    directory="$HOME/.local/share/fonts"
+    directory="${XDG_DATA_HOME:-$HOME/.local/share}/fonts"
   fi
   [[ -d $directory ]] || return 1
   # Nerd Fonts renames families whose upstream names are reserved. These

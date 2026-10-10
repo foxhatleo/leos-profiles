@@ -30,6 +30,27 @@ jobs:
       - name: Source profile in a clean home and test lazy helpers
         run: zsh tests/profile-test.zsh
 
+  lint:
+    name: Shell lint (gating)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Install pinned ShellCheck
+        env:
+          VERSION: v0.11.0
+          SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          # Pin the linter so CI and local runs report the same checks.
+          archive="shellcheck-$VERSION.linux.x86_64.tar.xz"
+          curl --proto '=https' --tlsv1.2 -fsSLo "$RUNNER_TEMP/$archive" \
+            "https://github.com/koalaman/shellcheck/releases/download/$VERSION/$archive"
+          printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellcheck-$VERSION" >> "$GITHUB_PATH"
+      - name: Lint deterministic installer
+        run: shellcheck --version && shellcheck -s bash -x install.sh installer/*.sh tests/*.sh
+
   install-checks:
     name: Installer + util checks (gating)
     runs-on: ubuntu-latest
@@ -40,7 +61,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install shell test dependencies
-        run: sudo apt-get update && sudo apt-get install -y shellcheck zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - name: Compile and exercise the metadata utility
         run: python3 -m py_compile util/rmdsstore.py
       - name: Test metadata utility behaviour
@@ -55,8 +76,6 @@ jobs:
         run: zsh tests/runtime-cache-test.zsh
       - name: Verify locked Linux artifacts and digests
         run: bash tests/locked-artifacts-test.sh
-      - name: Lint deterministic installer
-        run: shellcheck -s bash -x install.sh installer/*.sh tests/*.sh
       - name: Syntax-check installer modules and shell tests
         run: |
           for script in install.sh installer/*.sh tests/*.sh; do
@@ -97,7 +116,14 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Refresh formula metadata and tap Heroku
-        run: brew update && brew tap heroku/brew
+        run: |
+          # Upstream metadata fetches flake; retry before failing the gate.
+          for attempt in 1 2 3; do
+            brew update && brew tap heroku/brew && exit 0
+            echo "brew metadata refresh failed (attempt $attempt); retrying" >&2
+            sleep $((attempt * 20))
+          done
+          exit 1
       - name: Verify mapped formula availability
         run: bash tests/package-map-availability.sh macos
       - name: Verify locked macOS artifacts and digests
@@ -206,9 +232,18 @@ jobs:
         run: |
           # No emulation and no privileged container: each runner pulls its
           # native image architecture. The source checkout stays read-only.
-          docker run --rm --init -e GITHUB_ACTIONS=true \
-            -v "$PWD:/repo:ro" "$IMAGE" \
+          mkdir -p "$RUNNER_TEMP/provisioning-logs"
+          chmod 777 "$RUNNER_TEMP/provisioning-logs"
+          docker run --rm --init -e GITHUB_ACTIONS=true -e LEOS_CI_ARTIFACTS=/artifacts \
+            -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/provisioning-logs:/artifacts" "$IMAGE" \
             bash /repo/tests/provisioning-container.sh
+      - name: Upload provisioning diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: provisioning-${{ strategy.job-index }}-${{ matrix.runner }}
+          path: ${{ runner.temp }}/provisioning-logs
+          if-no-files-found: ignore
 
   provision-macos:
     name: Real provisioning / ${{ matrix.runner }} (gating)
@@ -223,4 +258,13 @@ jobs:
       - name: Provision a fresh HOME on the existing hosted macOS image
         # Hosted images already contain Homebrew and other tools. This exercises
         # real installations/upgrades, not a factory-fresh macOS bootstrap.
-        run: bash tests/provisioning-test.sh
+        run: |
+          mkdir -p "$RUNNER_TEMP/provisioning-logs"
+          LEOS_CI_ARTIFACTS="$RUNNER_TEMP/provisioning-logs" bash tests/provisioning-test.sh
+      - name: Upload provisioning diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: provisioning-${{ matrix.runner }}
+          path: ${{ runner.temp }}/provisioning-logs
+          if-no-files-found: ignore

@@ -7,17 +7,37 @@
 # Launcher mtimes invalidate entries; use leos-refresh-init-cache after upgrades
 # that change only a separate implementation file.
 
+# A user-private group (useradd's USERGROUPS_ENAB default, often paired with
+# umask 002) grants nobody else write access. It must be the user's primary
+# group, carry the user's name and list no other members. One lookup per shell.
+__leos_private_group() {
+  emulate -L zsh
+  local gid=$1 entry
+  local -a fields
+  (( gid == GID )) || return 1
+  if [[ -z ${__leos_private_gid-} ]]; then
+    typeset -g __leos_private_gid=-1
+    entry=$(command getent group "$gid" 2>/dev/null) || return 1
+    fields=("${(@s.:.)entry}")
+    [[ ${fields[1]-} == "$USERNAME" && ${fields[3]-} == "$gid" ]] || return 1
+    [[ -z ${fields[4]-} || ${fields[4]} == "$USERNAME" ]] || return 1
+    __leos_private_gid=$gid
+  fi
+  (( __leos_private_gid == gid ))
+}
+
 # Validate every existing ancestor. Root-owned sticky temporary directories are
 # safe ancestors: other users cannot replace a child owned by this user there.
 # Allow root-owned platform aliases such as macOS /var, but reject symlinks
-# at the supplied cache root or inside the profile-owned cache tree.
+# at the supplied cache root or inside the profile-owned cache tree. The first
+# rejected path is kept in __leos_cache_unsafe for the fallback warning.
 __leos_cache_safe_path() {
   emulate -L zsh
   zmodload zsh/stat || return 1
   # Lexical normalization can erase a symlink/.. pair before validation even
   # though the kernel follows the symlink first. Refuse these paths outright.
-  [[ /$1/ != */../* ]] || return 1
-  local item origin
+  [[ /$1/ != */../* ]] || { typeset -g __leos_cache_unsafe=$1; return 1; }
+  local item origin rejected=
   local -A info
   # Check both chains: lexical parents protect the aliases themselves, while
   # physical parents protect root-owned aliases that point elsewhere.
@@ -25,18 +45,26 @@ __leos_cache_safe_path() {
     item=$origin
     while true; do
       if [[ -L $item ]]; then
-        zstat -L -H info -- "$item" 2>/dev/null || return 1
-        (( info[uid] == 0 )) || return 1
+        zstat -L -H info -- "$item" 2>/dev/null || { rejected=$item; break 2; }
+        (( info[uid] == 0 )) || { rejected=$item; break 2; }
       fi
-      zstat -H info -- "$item" 2>/dev/null || return 1
-      (( info[uid] == EUID || info[uid] == 0 )) || return 1
+      zstat -H info -- "$item" 2>/dev/null || { rejected=$item; break 2; }
+      (( info[uid] == EUID || info[uid] == 0 )) || { rejected=$item; break 2; }
       if (( info[mode] & 8#22 )); then
-        (( (info[mode] & 8#1000) && info[uid] == 0 && (info[mode] & 8#170000) == 8#40000 )) || return 1
+        # Allowed: a root-owned sticky directory, or one owned by this user and
+        # writable only through the user's private group (never by others).
+        if (( !((info[mode] & 8#1000) && info[uid] == 0 && (info[mode] & 8#170000) == 8#40000) )); then
+          (( info[uid] == EUID && !(info[mode] & 8#2) )) &&
+            __leos_private_group "$info[gid]" || { rejected=$item; break 2; }
+        fi
       fi
       [[ $item != / ]] || break
       item=${item:h}
     done
   done
+  [[ -n $rejected ]] || return 0
+  typeset -g __leos_cache_unsafe=$rejected
+  return 1
 }
 
 __leos_cache_safe_file() {
@@ -56,6 +84,7 @@ __leos_cache_dir() {
   setopt localoptions localtraps
   local root=${XDG_CACHE_HOME:-$HOME/.cache} item ancestor insecure=0
   local -A info
+  typeset -g __leos_cache_unsafe=
   [[ $root == /* && ! -L $root && /$root/ != */../* ]] || return 1
   ancestor=$root
   while [[ ! -e $ancestor ]]; do
@@ -97,7 +126,10 @@ __leos_cache_dir() {
 __leos_cache_warn_fallback() {
   [[ ${__leos_cache_fallback_warned:-0} == 1 ]] && return 0
   typeset -g __leos_cache_fallback_warned=1
-  print -u2 -r -- "Leo's Profiles: init cache is unsafe or unavailable at ${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init; using freshly generated initialization for this shell."
+  local hint=
+  [[ -n ${__leos_cache_unsafe-} ]] &&
+    hint=" Unsafe path: ${(q-)__leos_cache_unsafe}; if it should be private to you, run: chmod go-w ${(q-)__leos_cache_unsafe}"
+  print -u2 -r -- "Leo's Profiles: init cache is unsafe or unavailable at ${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init; using freshly generated initialization for this shell.$hint"
 }
 
 # __leos_init_cache <key> <bin> [args...]

@@ -69,13 +69,20 @@ if command -v eza >/dev/null 2>&1; then
 fi
 zstyle ':completion:*' rehash true                           # find newly-installed executables without a restart
 zstyle ':completion:*' accept-exact '*(N)'
-zstyle ':completion:*' use-cache on
-# One cache root for the whole profile (path/node.zsh and start.zsh's init cache
-# live here too), and skip the mkdir syscall on the hot path once it exists.
-_leos_zcompcache=${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/zcompcache
-[[ -d $_leos_zcompcache ]] || mkdir -p "$_leos_zcompcache"
-zstyle ':completion:*' cache-path "$_leos_zcompcache"
-unset _leos_zcompcache
+# The completion cache lives beside the init cache in the same validated,
+# private root. If that storage is unsafe, completion caching stays off rather
+# than creating directories with the caller's umask.
+if __leos_cache_dir; then
+  _leos_zcompcache=${REPLY:h}/zcompcache
+  if [[ ! -e $_leos_zcompcache ]]; then
+    mkdir -m 700 -- "$_leos_zcompcache" 2>/dev/null
+  fi
+  if [[ -d $_leos_zcompcache && ! -L $_leos_zcompcache && -O $_leos_zcompcache ]]; then
+    zstyle ':completion:*' use-cache on
+    zstyle ':completion:*' cache-path "$_leos_zcompcache"
+  fi
+  unset _leos_zcompcache
+fi
 
 # iTerm2 integration is deliberately opt-in: it is external shell code and is
 # no longer downloaded by the installer. Install it through iTerm2, then set

@@ -106,6 +106,17 @@ sparse_checkout_pinned() {
   [[ $(git -C "$destination" rev-parse HEAD) == "$commit" ]] || return 1
 }
 
+# The upstream installer writes to $XDG_DATA_HOME/<Fonts|fonts>/NerdFonts when
+# XDG_DATA_HOME is set. On macOS that is not a font directory, so the fonts
+# would never load: always use ~/Library/Fonts there.
+nerd_fonts_installer() {
+  if [[ $OS_FAMILY == macos ]]; then
+    env -u XDG_DATA_HOME "$@"
+  else
+    "$@"
+  fi
+}
+
 install_fonts() {
   if ! font_should_install; then
     say "Skipping Nerd Fonts ($INSTALL_FONTS policy)"
@@ -124,13 +135,13 @@ install_fonts() {
   # (the original behavior) if the sparse layout doesn't satisfy the upstream
   # installer, so no supported font can regress.
   if sparse_checkout_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$checkout" nerd-fonts \
-       install.sh bin "patched-fonts/$font" && "$checkout/install.sh" "$font"; then
+       install.sh bin "patched-fonts/$font" && nerd_fonts_installer "$checkout/install.sh" "$font"; then
     :
   else
     say "Sparse Nerd Fonts install did not complete; retrying with a full pinned checkout"
     rm -rf "$checkout"
     clone_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$checkout" nerd-fonts
-    run "$checkout/install.sh" "$font"
+    run nerd_fonts_installer "$checkout/install.sh" "$font"
   fi
   rm -rf "$temp"
 }

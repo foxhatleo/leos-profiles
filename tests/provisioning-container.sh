@@ -30,4 +30,4 @@ useradd --create-home --shell /bin/bash leos-ci
 printf '%s\n' 'leos-ci ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/leos-ci
 chmod 440 /etc/sudoers.d/leos-ci
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
-exec sudo --preserve-env=GITHUB_ACTIONS -H -u leos-ci bash "$ROOT/tests/provisioning-test.sh"
+exec sudo --preserve-env=GITHUB_ACTIONS,LEOS_CI_ARTIFACTS -H -u leos-ci bash "$ROOT/tests/provisioning-test.sh"
