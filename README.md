@@ -574,12 +574,19 @@ within the current OS release only (`apt-get upgrade`, `dnf upgrade`,
 upgrade such as `do-release-upgrade` or `dnf system-upgrade`. Arch is rolling,
 so `pacman -Syu` is inherently in-release.
 
-`bye` remains the full maintenance-and-exit command. By default it runs package
-maintenance, runs `ai-checkup` (native `claude update`/`codex update`, and
-`opencode upgrade` for an opencode that Homebrew does not manage, only for the
-AI CLIs it detects), safely clears known history files, performs the intended
-system-wide macOS metadata scan, restarts Finder/Dock/SystemUIServer, and exits
-the current shell.
+`bye` remains the full maintenance-and-exit command. By default it runs
+`ai-checkup` (native `claude update`/`codex update`, and `opencode upgrade` for
+an opencode that Homebrew does not manage, only for the AI CLIs it detects) and
+the Homebrew checkup, then the OS package checkup (apt, dnf or pacman) and the
+system-wide macOS metadata scan, safely clears known history files, restarts
+Finder/Dock/SystemUIServer, and exits the current shell.
+
+Sudo is kept away from third-party code: `bye` first drops any cached sudo
+credential (`sudo -k`), so the AI CLIs' updaters and Homebrew (casks included)
+cannot reuse one; it asks for the password only right before the steps that
+need root and drops the credential again right after them. Every profile
+command uses the system `sudo` (`command -p sudo`), never one found earlier on
+PATH.
 
 Options:
 
@@ -589,7 +596,9 @@ Options:
 - `--purge-recycle-bins`: explicitly allow `$RECYCLE.BIN` directory removal.
 - `--shutdown-wsl`: shut down WSL after maintenance; normal WSL behavior exits
   only the current shell.
-- `--non-interactive`: suppress supported package-manager prompts.
+- `--non-interactive`: no prompts at all: Homebrew does not ask
+  (`HOMEBREW_NO_ASK`), and the steps that need sudo (OS package checkup,
+  metadata scan) are skipped with a note instead of asking for a password.
 - `--no-exit`: perform maintenance without exiting. It conflicts with
   `--shutdown-wsl`.
 
@@ -601,10 +610,19 @@ follow symlinks or implicitly cross nested mount boundaries, supports multiple
 roots/dry-run, and reports failures. Cloud-storage directories are included.
 On Linux, it reads `/proc/self/mountinfo` to preserve same-device bind mounts;
 an unreadable mount table aborts the scan before deletion.
-Recycle-bin directory removal is opt-in. The privileged wrapper uses the system
+Recycle-bin directory removal is opt-in. The wrapper passes every argument to the script
+(`rmdsstore --help` shows its options, without sudo). The privileged wrapper uses the system
 Python interpreter in isolated mode, but executes the script from this
 user-owned checkout. Trust changes to the checkout before running maintenance
 with sudo.
+
+To have fewer `.DS_Store` files to clean in the first place,
+`leos-ds-store-prevention on` asks Finder not to write them on network shares
+and USB volumes (`defaults write com.apple.desktopservices
+DSDontWriteNetworkStores` and `DSDontWriteUSBStores`); `off` restores the
+default and `status` (the default) shows the two settings. It is optional,
+never run by the installer or `bye`, and takes effect after logging out and
+back in (or `killall Finder`). Local disks are unaffected.
 
 `brew-china-enable` remains an explicitly confirmed USTC mirror option (the
 installer's `--brew-mirror china` sets the same flag); the mirror serves

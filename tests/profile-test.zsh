@@ -165,7 +165,7 @@ run_block 'multi-root metadata cleanup wrapper' \
     setopt err_return no_unset pipe_fail
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     uname() { print -r -- Darwin; }
-    sudo() { command "$@"; }
+    __leos_sudo() { command "$@"; }
     mkdir -p "$HOME/metadata-one" "$HOME/metadata-two"
     : > "$HOME/metadata-one/.DS_Store"
     : > "$HOME/metadata-two/Thumbs.db"
@@ -179,9 +179,45 @@ run_block 'rmdsstore must run the pinned, isolated system python under sudo, not
     source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     uname() { print -r -- Darwin; }
     typeset -g SUDO_LOG="$HOME/sudo-args"
-    sudo() { print -r -- "$*" > "$SUDO_LOG"; }    # capture the full sudo argv
+    __leos_sudo() { print -r -- "$*" > "$SUDO_LOG"; }    # capture the full sudo argv
     rmdsstore --dry-run "$HOME" >/dev/null 2>&1
     [[ "$(<$SUDO_LOG)" == "/usr/bin/python3 -I "* ]]
+  '
+
+# __leos_sudo is the system sudo: `command -p` ignores PATH and functions.
+mkdir -p "$tmp/sudo-path"
+print -rl -- '#!/bin/sh' ': > "$HOME/planted-sudo-ran"' > "$tmp/sudo-path/sudo"
+chmod +x "$tmp/sudo-path/sudo"
+run_block '__leos_sudo never resolves sudo through PATH or a function' \
+  HOME="$tmp/sudo-home" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+  PATH="$tmp/sudo-path:$fakepath" -- '
+    setopt err_return no_unset pipe_fail
+    mkdir -p "$HOME"
+    source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+    sudo() { : > "$HOME/sudo-function-ran"; }
+    # Checked without running sudo: the function body, and what `command -p`
+    # resolves with a planted sudo first on PATH.
+    [[ $functions[__leos_sudo] == *"command -p sudo"* ]]
+    resolved=$(command -pv sudo) || resolved=
+    [[ $resolved != $HOME/* && $resolved != */sudo-path/sudo && $resolved != sudo ]]
+  '
+
+# Every argument reaches the Python CLI unchanged, so its own --help works, and
+# help needs no sudo. Unknown options are argparse's to reject.
+run_block 'rmdsstore passes arguments through; help runs without sudo' \
+  HOME="$tmp" ZDOTDIR="$tmp" LEOS_PROFILES_HOME="$root" TERM=xterm-256color PATH="$fakepath" -- '
+    setopt err_return no_unset pipe_fail
+    source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+    uname() { print -r -- Darwin; }
+    __leos_sudo() { print -r -- SUDO >> "$HOME/sudo-calls"; command "$@"; }
+    out=$(rmdsstore --help)
+    [[ $out == *--purge-recycle-bins* && $out == *--dry-run* ]]
+    out=$(rmdsstore -h)
+    [[ $out == usage:* ]]
+    [[ ! -e $HOME/sudo-calls ]]
+    st=0; rmdsstore --no-such-option >/dev/null 2>&1 || st=$?
+    (( st == 2 )) && [[ $(<$HOME/sudo-calls) == SUDO ]]
+    rm -f -- "$HOME/sudo-calls"
   '
 
 run_block 'entries.zsh ends with the public command layer' LEOS_TEST_ROOT="$root" -- '
@@ -760,6 +796,100 @@ run_block 'native AI updates and contradictory bye options' \
   ai-checkup
   [[ "$(<$AI_LOG)" == $'"'"'claude update\ncodex update\nopencode upgrade'"'"' ]]
   ! bye --shutdown-wsl --no-exit >/dev/null 2>&1
+'
+
+# SEC-2: bye runs the third-party updaters with no cached sudo credential
+# (`sudo -k` first), primes sudo only right before the privileged steps and
+# drops it right after. --non-interactive skips those steps instead. Every
+# step is a stub that records the call order; __leos_sudo records its argv.
+bye_stubs='
+  setopt err_return no_unset pipe_fail
+  puts() { print -r -- "$*"; }; puts-err() { print -r -- "ERR $*"; }
+  source "$LEOS_TEST_ROOT/zsh/commands.zsh"
+  log() { print -r -- "$*" >> "$BYE_LOG"; }
+  __leos_sudo() { log "sudo $*"; [[ $1 != -v || -z ${SUDO_FAILS:-} ]]; }
+  ai-checkup() { log ai-checkup; }
+  brew-checkup() { log "brew-checkup ${HOMEBREW_NO_ASK:-ask}"; }
+  apt-checkup() { log apt-checkup; return 1; }
+  rmdsstore() { log "rmdsstore $*"; }
+  clear-history() { log clear-history "$@"; }
+  killall() { log "killall $*"; }
+  uname() { print -r -- Darwin; }
+  rm -f -- "$BYE_LOG"
+'
+run_block 'bye: updaters before sudo, sudo only around the privileged steps' \
+  HOME="$tmp/bye-home" LEOS_TEST_ROOT="$root" BYE_LOG="$tmp/bye-log" -- "$bye_stubs"'
+  st=0; bye --no-exit --purge-recycle-bins >/dev/null || st=$?
+  (( st == 1 ))                                  # apt-checkup failed
+  [[ "$(<$BYE_LOG)" == "sudo -k
+ai-checkup
+brew-checkup ask
+sudo -v
+apt-checkup
+rmdsstore --purge-recycle-bins
+sudo -k
+clear-history
+killall Finder Dock SystemUIServer" ]]
+'
+run_block 'bye --non-interactive skips the steps that need sudo' \
+  HOME="$tmp/bye-home" LEOS_TEST_ROOT="$root" BYE_LOG="$tmp/bye-log" -- "$bye_stubs"'
+  out=$(bye --no-exit --non-interactive --keep-history)
+  [[ $out == *"Skipped the steps that need sudo (--non-interactive): apt-checkup, rmdsstore."* ]]
+  [[ "$(<$BYE_LOG)" == "sudo -k
+ai-checkup
+brew-checkup 1
+killall Finder Dock SystemUIServer" ]]
+'
+run_block 'bye stops when sudo authentication fails' \
+  HOME="$tmp/bye-home" LEOS_TEST_ROOT="$root" BYE_LOG="$tmp/bye-log" SUDO_FAILS=1 -- "$bye_stubs"'
+  st=0; bye --no-exit >/dev/null || st=$?
+  (( st == 1 ))
+  [[ "$(<$BYE_LOG)" == "sudo -k
+ai-checkup
+brew-checkup ask
+sudo -v" ]]
+'
+run_block 'bye usage and completion come from one option list' \
+  HOME="$tmp/bye-home" LEOS_TEST_ROOT="$root" BYE_LOG="$tmp/bye-log" -- "$bye_stubs"'
+  out=$(bye --bogus) && exit 1
+  [[ $out == "ERR Usage: bye [--keep-history] [--non-interactive] [--no-exit] [--aggressive-history] [--purge-recycle-bins] [--shutdown-wsl]" ]]
+  # _leos_bye (interactive.zsh) turns the same array into _values specs.
+  _values() { shift; print -rl -- "$@"; }
+  eval "$(sed -n "/^  _leos_bye() {/,/^  }/p" "$LEOS_TEST_ROOT/zsh/interactive.zsh")"
+  specs=("${(@f)$(_leos_bye)}")
+  (( $#specs == $#__leos_bye_options ))
+  [[ $specs[1] == "--keep-history[Preserve history files]" ]]
+'
+
+# leos-ds-store-prevention runs `defaults` only when asked, and only for the
+# two desktopservices keys. `defaults` is a stub that records its argv.
+run_block 'leos-ds-store-prevention on, off and status' \
+  HOME="$tmp/ds-home" LEOS_TEST_ROOT="$root" DS_LOG="$tmp/ds-log" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }
+  source "$LEOS_TEST_ROOT/zsh/commands.zsh"
+  uname() { print -r -- Darwin; }
+  defaults() {
+    print -r -- "$*" >> "$DS_LOG"
+    if [[ $1 == read && $3 == DSDontWriteNetworkStores ]]; then print 1; fi
+    return 0
+  }
+  leos-ds-store-prevention on
+  leos-ds-store-prevention off
+  out=$(leos-ds-store-prevention)
+  [[ $out == "DSDontWriteNetworkStores: on"$'"'"'\n'"'"'"DSDontWriteUSBStores: off" ]]
+  [[ "$(<$DS_LOG)" == "write com.apple.desktopservices DSDontWriteNetworkStores -bool true
+write com.apple.desktopservices DSDontWriteUSBStores -bool true
+delete com.apple.desktopservices DSDontWriteNetworkStores
+delete com.apple.desktopservices DSDontWriteUSBStores
+read com.apple.desktopservices DSDontWriteNetworkStores
+read com.apple.desktopservices DSDontWriteUSBStores" ]]
+  st=0; leos-ds-store-prevention maybe || st=$?
+  (( st == 2 ))
+  uname() { print -r -- Linux; }
+  st=0; leos-ds-store-prevention on || st=$?
+  (( st == 1 ))
+  [[ $(wc -l < "$DS_LOG") -eq 6 ]]
 '
 
 mkdir -p "$tmp/updater-profile/local" "$tmp/fake-bin" "$tmp/bare-profile"

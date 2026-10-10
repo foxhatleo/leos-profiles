@@ -21,6 +21,13 @@ fi
 puts()     { print -Pn "%B%F{blue}===>%f%b "; print -r -- "$*"; }
 puts-err() { print -Pn "%B%F{red}===>%f%b " >&2; print -r -- "$*" >&2; }
 
+# The system sudo for every privileged profile command. `command -p` searches
+# only the default system path (/usr/bin:/bin:/usr/sbin:/sbin), so a `sudo`
+# earlier on PATH — the user-writable Homebrew prefix, ~/.local/bin, something
+# an upgrade just installed — or a function of that name is never what asks
+# for the password (SEC-2). Tests replace this function, not `sudo`.
+__leos_sudo() { command -p sudo "$@"; }
+
 # Prepend $1 to PATH (dedup, move-to-front) if it is a real dir.
 # add-path <dir> [required]  — with "required", warn + return 1 when missing.
 add-path() {

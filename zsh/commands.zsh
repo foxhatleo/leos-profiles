@@ -1,40 +1,75 @@
 # Leo's Profiles — user commands (zsh)
 
-__rmdsstore() {
+# rmdsstore [--dry-run] [--purge-recycle-bins] [root ...]
+# Remove .DS_Store and its Windows siblings under the macOS data volume and
+# every mounted volume, or under the given roots. Every argument goes to
+# util/rmdsstore.py unchanged, so `rmdsstore --help` is its own usage text.
+#
+# The sweep runs with the OS interpreter, not a PATH-resolved one: sudo must
+# not execute a python3 from a user-writable directory (the Homebrew prefix,
+# pyenv shims). `-I` isolates the interpreter (no PYTHON* environment, no user
+# site, no script directory on sys.path from 3.11). The script itself lives in
+# this user-owned checkout by design (see the README trust model).
+rmdsstore() {
+  local arg
   if [[ $(uname -s) != Darwin ]]; then
     puts-err "rmdsstore only supports the macOS data-volume layout."
     return 1
   fi
-  # Run the sweep with the OS interpreter, not a PATH-resolved one: `sudo` must
-  # not execute a python3 from a user-writable dir (the Homebrew prefix, pyenv
-  # shims), which would be a local root-escalation vector — especially since
-  # `bye` runs `brew upgrade` moments earlier. `-I` isolates the interpreter
-  # (ignores PYTHON* env and user site; drops the script dir from sys.path on
-  # 3.11+). rmdsstore.py is stdlib-only, so the system Python is sufficient.
-  # Note: the script itself lives in the user-owned checkout by design (see the
-  # README trust model); this closes the interpreter/env vectors, not that one.
   if [[ ! -x /usr/bin/python3 ]]; then
     puts-err "/usr/bin/python3 (the system Python) is required for rmdsstore."
     return 1
   fi
-  sudo /usr/bin/python3 -I "$LEOS_PROFILES/util/rmdsstore.py" "$@" || return $?
-  puts "Finished scanning $*"
+  # Help needs no privileges.
+  for arg in "$@"; do
+    [[ $arg != -- ]] || break
+    if [[ $arg == (-h|--help) ]]; then
+      /usr/bin/python3 -I "$LEOS_PROFILES/util/rmdsstore.py" "$@"
+      return
+    fi
+  done
+  __leos_sudo /usr/bin/python3 -I "$LEOS_PROFILES/util/rmdsstore.py" "$@"
 }
 
-# Remove all .DS_Store and sibling metadata files under standard macOS roots.
-rmdsstore() {
-  local arg
-  local -a options
-  while (( $# > 0 )); do
-    arg=$1
-    case $arg in
-      --dry-run|--purge-recycle-bins) options+=("$arg"); shift ;;
-      --) shift; break ;;
-      -*) puts-err "Usage: rmdsstore [--dry-run] [--purge-recycle-bins] [root ...]"; return 2 ;;
-      *) break ;;
-    esac
-  done
-  __rmdsstore "${options[@]}" "$@"
+# leos-ds-store-prevention [on|off|status]
+# Ask Finder not to write .DS_Store files on network shares and USB volumes
+# (com.apple.desktopservices DSDontWriteNetworkStores and DSDontWriteUSBStores),
+# the files other machines see. Optional and never run automatically; local
+# disks are unaffected, so rmdsstore still has work there. Finder reads the
+# setting when it starts: log out and back in, or `killall Finder`.
+leos-ds-store-prevention() {
+  local action=${1:-status} key value
+  local -a keys=(DSDontWriteNetworkStores DSDontWriteUSBStores)
+  if (( $# > 1 )) || [[ $action != (on|off|status) ]]; then
+    puts-err "Usage: leos-ds-store-prevention [on|off|status]"
+    return 2
+  fi
+  if [[ $(uname -s) != Darwin ]]; then
+    puts-err "leos-ds-store-prevention is only available on macOS."
+    return 1
+  fi
+  case $action in
+    on)
+      for key in $keys; do
+        defaults write com.apple.desktopservices "$key" -bool true || return 1
+      done
+      puts "Finder stops writing .DS_Store files on network shares and USB volumes after you log out and back in (or run killall Finder)." ;;
+    off)
+      # A key that was never set is already the default.
+      for key in $keys; do
+        defaults delete com.apple.desktopservices "$key" 2>/dev/null || true
+      done
+      puts "Restored Finder's default; it takes effect after you log out and back in (or run killall Finder)." ;;
+    status)
+      for key in $keys; do
+        value=$(defaults read com.apple.desktopservices "$key" 2>/dev/null) || value=
+        if [[ $value == (1|true|YES) ]]; then
+          print -r -- "$key: on"
+        else
+          print -r -- "$key: off"
+        fi
+      done ;;
+  esac
 }
 
 # Clear known history files. The aggressive mode adds the legacy broad globs,
@@ -89,54 +124,98 @@ mkcdir() {
   mkdir -p -- "$1" && cd -- "$1"
 }
 
+# bye's options, "--name:description", shared with its usage line and its
+# completion (_leos_bye in interactive.zsh), so the three cannot drift apart.
+# Descriptions must not contain square brackets (_values syntax).
+typeset -ga __leos_bye_options=(
+  '--keep-history:Preserve history files'
+  '--non-interactive:No prompts: skip the steps that need sudo, and no Homebrew questions'
+  '--no-exit:Do not quit the terminal'
+  '--aggressive-history:Also remove legacy history and HSTS matches'
+  '--purge-recycle-bins:Permit removal of macOS recycle-bin directories'
+  '--shutdown-wsl:Shut down WSL after maintenance'
+)
+
 # Clean up and quit the terminal. This intentionally performs the full Leo's
 # maintenance routine: package updates, AI CLI updates, history cleanup, and
 # on macOS a privileged metadata sweep plus Finder/Dock restart.
 # Options are exact; destructive extensions are explicit opt-ins.
+#
+# Order matters for sudo (SEC-2): a cached sudo credential lets any process in
+# this terminal run `sudo -n` without a prompt. So the third-party updaters
+# (the AI CLIs, then Homebrew and its casks) run first, after `sudo -k` has
+# dropped any credential an earlier command left; sudo is primed only right
+# before the steps that need it (OS package upgrades, the metadata sweep) and
+# dropped again right after them. --non-interactive skips those steps instead
+# of asking for a password.
 bye() {
-  local keep_history non_interactive no_exit aggressive_history purge_recycle_bins shutdown_wsl arg exit_code=0
+  local arg name usage=Usage:\ bye exit_code=0
+  local -A opt
+  local -a names privileged
+  names=(${__leos_bye_options%%:*})
+  for name in $names; do usage+=" [$name]"; done
   for arg in "$@"; do
-    case $arg in
-      # Dashed forms only: the usage string and the _leos_bye completion define
-      # the supported surface, and the bare aliases only ever existed for three
-      # of these six options.
-      --keep-history) keep_history=1 ;;
-      --non-interactive) non_interactive=1 ;;
-      --no-exit) no_exit=1 ;;
-      --aggressive-history) aggressive_history=1 ;;
-      --purge-recycle-bins) purge_recycle_bins=1 ;;
-      --shutdown-wsl) shutdown_wsl=1 ;;
-      *) puts-err "Usage: bye [--keep-history] [--non-interactive] [--no-exit] [--aggressive-history] [--purge-recycle-bins] [--shutdown-wsl]"; return 2 ;;
-    esac
+    if (( ${names[(Ie)$arg]} )); then
+      opt[$arg]=1
+    else
+      puts-err "$usage"
+      return 2
+    fi
   done
-  if [[ -n $shutdown_wsl && -n $no_exit ]]; then
+  if (( ${+opt[--shutdown-wsl]} && ${+opt[--no-exit]} )); then
     puts-err "--shutdown-wsl and --no-exit are contradictory."
     return 2
   fi
-  if [[ -n $keep_history && -n $aggressive_history ]]; then
+  if (( ${+opt[--keep-history]} && ${+opt[--aggressive-history]} )); then
     puts-err "--keep-history and --aggressive-history are contradictory."
     return 2
   fi
 
   puts "Bye!"
-
-  sudo -v || { puts-err "sudo authentication is required for the cleanup routine."; return 1; }
-
   # A local export is automatically restored even on an early function return.
-  if [[ -n $non_interactive ]]; then
+  if (( ${+opt[--non-interactive]} )); then
     local -x HOMEBREW_NO_ASK=1
   fi
-  [[ -n $keep_history    ]] && puts "History will be preserved."
+  (( ! ${+opt[--keep-history]} )) || puts "History will be preserved."
 
+  # No cached sudo credential while third-party code updates itself.
+  __leos_sudo -k 2>/dev/null || true
+  if (( $+functions[ai-checkup] )); then puts "Doing AI tools checkup..."; ai-checkup || exit_code=1; fi
   if (( $+functions[brew-checkup] )); then puts "Doing brew checkup..."; brew-checkup || exit_code=1; fi
-  if (( $+functions[apt-checkup]   )); then puts "Doing apt checkup...";  apt-checkup || exit_code=1; fi
-  if (( $+functions[dnf-checkup]   )); then puts "Doing dnf checkup...";  dnf-checkup || exit_code=1; fi
-  if (( $+functions[pacman-checkup] )); then puts "Doing pacman checkup..."; pacman-checkup || exit_code=1; fi
-  if (( $+functions[ai-checkup]    )); then puts "Doing AI tools checkup..."; ai-checkup || exit_code=1; fi
 
-  if [[ -z $keep_history ]]; then
+  for name in apt dnf pacman; do
+    (( ! $+functions[$name-checkup] )) || privileged+=($name-checkup)
+  done
+  [[ $(uname -s) != Darwin ]] || privileged+=(rmdsstore)
+  if (( ! $#privileged )); then
+    :
+  elif (( ${+opt[--non-interactive]} )); then
+    puts "Skipped the steps that need sudo (--non-interactive): ${(j:, :)privileged}. Run them yourself later."
+  else
+    # Sudo is primed only now, and dropped again however the steps end
+    # (a failure or Ctrl-C included).
+    __leos_sudo -v || { puts-err "sudo authentication is required for: ${(j:, :)privileged}."; return 1; }
+    {
+      for name in $privileged; do
+        case $name in
+          rmdsstore)
+            puts "Removing .DS_Store files..."
+            if (( ${+opt[--purge-recycle-bins]} )); then
+              rmdsstore --purge-recycle-bins || exit_code=1
+            else
+              rmdsstore || exit_code=1
+            fi ;;
+          *) puts "Doing ${name%-checkup} checkup..."; "$name" || exit_code=1 ;;
+        esac
+      done
+    } always {
+      __leos_sudo -k 2>/dev/null || true
+    }
+  fi
+
+  if (( ! ${+opt[--keep-history]} )); then
     puts "Clear all history files.."
-    if [[ -n $aggressive_history ]]; then
+    if (( ${+opt[--aggressive-history]} )); then
       clear-history --aggressive || exit_code=1
     else
       clear-history || exit_code=1
@@ -145,14 +224,13 @@ bye() {
 
   if [[ $(uname -s) == Darwin ]]; then
     puts "Restarting Finder, Dock, SystemUIServer..."
-    if [[ -n $purge_recycle_bins ]]; then rmdsstore --purge-recycle-bins || exit_code=1; else rmdsstore || exit_code=1; fi
     killall Finder Dock SystemUIServer || exit_code=1
   fi
 
-  if [[ -n $no_exit ]]; then
+  if (( ${+opt[--no-exit]} )); then
     puts "Skipped exiting."
     return $exit_code
-  elif [[ -n $shutdown_wsl ]] && command -v /mnt/c/Windows/system32/wsl.exe >/dev/null 2>&1; then
+  elif (( ${+opt[--shutdown-wsl]} )) && command -v /mnt/c/Windows/system32/wsl.exe >/dev/null 2>&1; then
     /mnt/c/Windows/system32/wsl.exe --shutdown
   else
     exit $exit_code
@@ -303,13 +381,13 @@ __leos_display_manager() {
 
 gui-start() {
   local service; service=$(__leos_display_manager) || { puts-err "No supported display manager was found."; return 1; }
-  sudo systemctl start "$service"
+  __leos_sudo systemctl start "$service"
 }
 gui-stop() {
   local service; service=$(__leos_display_manager) || { puts-err "No supported display manager was found."; return 1; }
-  sudo systemctl stop "$service"
+  __leos_sudo systemctl stop "$service"
 }
-gui-disable() { command -v systemctl >/dev/null 2>&1 || { puts-err "systemd is required."; return 1; }; sudo systemctl set-default multi-user.target && gui-stop; }
-gui-enable()  { command -v systemctl >/dev/null 2>&1 || { puts-err "systemd is required."; return 1; }; sudo systemctl set-default graphical.target && gui-start; }
+gui-disable() { command -v systemctl >/dev/null 2>&1 || { puts-err "systemd is required."; return 1; }; __leos_sudo systemctl set-default multi-user.target && gui-stop; }
+gui-enable()  { command -v systemctl >/dev/null 2>&1 || { puts-err "systemd is required."; return 1; }; __leos_sudo systemctl set-default graphical.target && gui-start; }
 
 :

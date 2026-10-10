@@ -203,14 +203,14 @@ _leos_plugin zsh-autosuggestions/zsh-autosuggestions.zsh
 # Custom completions (after compinit).
 if (( $+functions[compdef] )); then
   compdef _directories mkcdir
+  # The option list is commands.zsh's __leos_bye_options, as bye parses it.
   _leos_bye() {
-    _values 'option' \
-      '--no-exit[Do not quit the terminal]' \
-      '--keep-history[Preserve history files]' \
-      '--non-interactive[Run upgrades without confirmation prompts]' \
-      '--aggressive-history[Also remove legacy history and HSTS matches]' \
-      '--purge-recycle-bins[Permit removal of macOS recycle-bin directories]' \
-      '--shutdown-wsl[Shut down WSL after maintenance]'
+    local spec
+    local -a specs
+    for spec in ${__leos_bye_options[@]}; do
+      specs+=("${spec%%:*}[${spec#*:}]")
+    done
+    _values 'option' $specs
   }
   compdef _leos_bye bye
 
