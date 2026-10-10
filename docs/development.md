@@ -8,7 +8,7 @@ The implementation stays compatible with macOS Bash 3.2.
 
 | File | Responsibility |
 | --- | --- |
-| `installer/registry.sh` | Ordered component registry, dependency closure, handler validation |
+| `installer/registry.sh` | Ordered component registry, dependency closure, handler validation, and the direct-artifact table |
 | `installer/state.sh` | Saved profiles, schema migration, state signatures, locking and cleanup |
 | `installer/packages.sh` | Platform bootstrap, package maps and package-manager operations |
 | `installer/tools.sh` | Locked tools, dependency checkouts and Node selection/activation |
@@ -17,10 +17,17 @@ The implementation stays compatible with macOS Bash 3.2.
 | `installer/verification.sh` | Component postconditions |
 | `installer/signatures.sh` | Inputs that invalidate each component's recorded state |
 | `installer/lock.sh` | Reviewed versions, URLs, commits, digests and npm engine requirements |
+| `installer/plan.sh` | Disclosure records beyond the selection, the preflight before any change, and the inventory |
 
 Add a component to the registry and supply its install, verification and
 signature handlers. Registry validation rejects missing handlers or unknown
-dependencies. Tests should check behavior and repair, not just matching names.
+dependencies. A tool downloaded as a pinned file or archive into `~/.local/bin`
+is one row in `artifact_registry` (owning component, lock prefix, archive kind,
+executables, expected `--version` line) plus its `<PREFIX>_VERSION` and
+per-platform `<PREFIX>_<DARWIN|LINUX>_<AARCH64|X64>_URL`/`_SHA256` values in
+`lock.sh`; its handlers then just call `artifact_install`, `artifact_verify`
+and `artifact_signature`, and inspect, the inventory, the shadow check and
+`tests/locked-artifacts-test.sh` pick it up from the table. Tests should check behavior and repair, not just matching names.
 A recorded successful step is only a hint: verification must detect a missing,
 wrong-version, or damaged artifact before skipping it.
 
@@ -84,6 +91,35 @@ must never generate a replacement. Pending initial generation resumes the
 originally approved apply; API/network failures must not be interpreted as
 missing registration. Enabling global GPG commit signing follows successful
 local signing and confirmed GitHub registration.
+
+## Apply flow
+
+`main` runs, in order: argument parsing; `remove-blocks` and `inventory`
+(dispatched before platform detection, so they work anywhere); the saved
+profile for `reconcile` and `inspect --saved`; validation, dependency closure
+and `detect_os`; `inspect` stops here. Apply and reconcile then warn about an
+unsupported platform, capture the existing Node, and run `preflight`; only
+after it do they take the lock, migrate local state, write the profile, apply
+the Homebrew mirror, bootstrap, resolve Node, run each component, compile the
+Zsh sources, and last provision credentials. `finish_manual_actions` prints
+every queued `manual-action` and exits 3; a credential pause calls it at
+once.
+
+`preflight` (installer/plan.sh) changes nothing. It stops on a blocking
+pyenv/rbenv conflict (unless `--skip-existing-version-managers`), checks
+`--node-version` against a live resolution (exit 2 when they differ), and
+collects what the run needs from the user: when stdin is not a terminal, a
+passphrase prompt, chsh's password prompt (Linux, non-root) or a sudo password
+(`privileged_plan` is not empty and `sudo -n true` fails) ends the run with
+`manual-action run-in-terminal` carrying the exact command line, exit 3, before
+the lock exists. With a terminal, `sudo -v` asks once up front. Dry runs never
+call sudo; they report what would stop. Last, it downloads the pinned Nerd
+Fonts checksum list and rejects an unknown font name. Tests stub
+`stdin_is_terminal`, `sudo` and `privileged_plan`.
+
+A component that needs the user (a missing chsh) calls `queue_manual_action`
+and sets `STEP_AWAITS_MANUAL_ACTION`: `run_step` then leaves it unrecorded and
+the run continues.
 
 ## Zsh startup files
 
@@ -245,7 +281,9 @@ runners (Homebrew Tier 1; macOS 14 and Intel Macs are unsupported). Those images
 matrix does not establish factory-fresh macOS bootstrap coverage.
 
 Scenarios exercise minimal Zsh setup, pnpm-only dependency resolution,
-Yarn/pnpm execution, recommended provisioning, repeat reconciliation and repair.
+Yarn/pnpm execution, recommended provisioning, repeat reconciliation, repair
+(of bun, Starship, the `.zshenv` managed block, a drifted plugin checkout and
+the font) and the refusal to discard a locally edited plugin.
 They skip credentials, disable login-shell changes, and explicitly install
 fonts. Unit and credential fixture tests cover the excluded interactive flows;
 manual end-to-end GitHub registration remains outside automated CI.
@@ -260,7 +298,12 @@ runner labels and triggers.
 1. Read upstream release metadata and the exact candidate artifact's manifest.
    Update URLs, versions, immutable commits and SHA-256 digests together in
    `installer/lock.sh`. Download candidates for verification; do not execute an
-   unverified replacement installer.
+   unverified replacement installer. GitHub publishes each release asset's
+   SHA-256: `gh api repos/<owner>/<repo>/releases/tags/<tag> --jq
+   '.assets[]|[.name,.digest]|@tsv'`. For Nerd Fonts, pin the release and the
+   digest of its `SHA-256.txt`; font archives are checked against that list.
+   `LEOS_ARTIFACT_ALL_PLATFORMS=1 bash tests/locked-artifacts-test.sh`
+   downloads and digest-checks every platform's artifact from one machine.
 2. For Yarn/pnpm, compare `package.json`'s `engines.node` with the declared lock
    range. Update engine requirements and selection tests together. Do not infer
    runtime support solely from the package's major version.

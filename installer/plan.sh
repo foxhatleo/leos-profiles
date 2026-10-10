@@ -134,7 +134,7 @@ report_existing_setups() {
   fi
   for path in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3" "$HOME/mambaforge" "$(command -v conda 2>/dev/null || true)"; do
     if [[ -n $path && -e $path ]]; then
-      existing conda "$path" "an activated conda environment puts its python ahead of pyenv's shims; set auto_activate_base false to keep pyenv first"
+      existing conda "$path" "conda activate puts that environment's python ahead of pyenv's shims; at startup the shims come first, even before an auto-activated base"
       break
     fi
   done
