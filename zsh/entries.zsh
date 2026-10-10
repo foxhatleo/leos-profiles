@@ -1,4 +1,4 @@
-# Leo's Profiles — entries: ordered loader.
+# Leo's Profiles — entries: ordered PATH, environment and command loader.
 
 entry "path/brew"
 entry "path/gnu"
@@ -27,35 +27,8 @@ entry "env"
 
 entry "commands"
 
-# Private definitions live outside version control and load after the public
-# command layer so a machine-specific override can intentionally win.
-#
-# compinit has not run yet, so `compdef` does not exist here: completion and ZLE
-# widget overrides belong in local/private-interactive.zsh, which interactive.zsh
-# sources at the very end instead.
-if [[ -r $LEOS_PROFILES/local/private.zsh ]]; then
-  # This file routinely holds API keys, and a group-traversable home (the macOS
-  # default, where every local account is in staff) makes a permissive mode a
-  # real exposure. Warn instead of rewriting it: the mode is the owner's call,
-  # and the installer already enforces 600 on every apply.
-  #
-  # Checked inside an anonymous function so EXTENDED_GLOB — needed for the
-  # (#q...) qualifiers, and normally set by env.zsh —
-  # stays local, and so the `source` below still sees the ambient option set
-  # that a machine-specific override may depend on.
-  () {
-    emulate -L zsh
-    setopt extended_glob
-    local f=$LEOS_PROFILES/local/private.zsh
-    # `-f` follows symlinks: a bare `f:...:` qualifier lstats, and a symlink's
-    # own mode is 0777, so a link to a correctly-locked file would warn forever
-    # with no way to silence it.
-    [[ -n $f(#qN-f:g+r:) || -n $f(#qN-f:o+r:) ]] || return 0
-    puts-err "$f is readable beyond its owner and usually holds secrets. Fix with: chmod 600 ${(q)f}"
-  }
-  source "$LEOS_PROFILES/local/private.zsh"
-fi
-
-entry "interactive"
+# local/private.zsh, the interactive layer and local/private-interactive.zsh
+# are loaded by start.zsh after this file returns: private files must be
+# sourced at top level, not inside `entry`, so their declarations stay global.
 
 :

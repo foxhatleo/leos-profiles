@@ -191,64 +191,109 @@ run_block 'rmdsstore must run the pinned, isolated system python under sudo, not
     [[ "$(<$SUDO_LOG)" == "/usr/bin/python3 -I "* ]]
   '
 
-run_block 'private override load order' LEOS_TEST_ROOT="$root" -- '
+run_block 'entries.zsh ends with the public command layer' LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   typeset -a loaded
   entry() { loaded+=("$1"); }
   LEOS_PROFILES="$LEOS_TEST_ROOT"
   source "$LEOS_TEST_ROOT/zsh/entries.zsh"
-  [[ ${loaded[-2]} == commands && ${loaded[-1]} == interactive ]]
+  [[ ${loaded[-2]} == env && ${loaded[-1]} == commands ]]
+  (( ! ${loaded[(Ie)interactive]} ))           # start.zsh loads it, after private.zsh
 '
 
+# start.zsh's own load structure, against stub layers that record their order.
+# The private files use bare declarations on purpose: start.zsh sources them at
+# top level, so `typeset -A`, `local` and plain `typeset` must stay global.
 mkdir -p "$tmp/profile/local" "$tmp/profile/zsh"
-cp "$root/zsh/entries.zsh" "$tmp/profile/zsh/entries.zsh"
-print -r -- 'typeset -g LEOS_PRIVATE_LOADED=yes' > "$tmp/profile/local/private.zsh"
+cp "$root/zsh/start.zsh" "$tmp/profile/zsh/start.zsh"
+: > "$tmp/profile/zsh/cache.zsh"
+print -r -- 'typeset -ga LEOS_ORDER; LEOS_ORDER+=(entries)' > "$tmp/profile/zsh/entries.zsh"
+print -r -- 'LEOS_ORDER+=(interactive)' > "$tmp/profile/zsh/interactive.zsh"
+print -rl -- 'LEOS_ORDER+=(private)' 'typeset -g LEOS_PRIVATE_LOADED=yes' \
+  'typeset -A LEOS_PRIVATE_MAP; LEOS_PRIVATE_MAP[a]=1' 'local LEOS_PRIVATE_LOCAL=kept' \
+  'typeset LEOS_PRIVATE_SCALAR=kept' > "$tmp/profile/local/private.zsh"
+print -rl -- 'LEOS_ORDER+=(private-interactive)' 'typeset -A LEOS_PI_MAP; LEOS_PI_MAP[b]=2' \
+  > "$tmp/profile/local/private-interactive.zsh"
 # 600 is the mode a secrets file is supposed to have, and the mode the installer
 # enforces; a laxer fixture would trip the permission warning asserted below.
-chmod 600 "$tmp/profile/local/private.zsh"
-run_block 'local private override' LEOS_TEST_ROOT="$tmp/profile" -- '
+chmod 600 "$tmp/profile/local/private.zsh" "$tmp/profile/local/private-interactive.zsh"
+
+run_block 'start.zsh load order keeps private declarations global' \
+  HOME="$tmp" LEOS_PROFILES_HOME="$tmp/profile" TERM=xterm-256color -- '
   setopt err_return no_unset pipe_fail
-  entry() { :; }
-  puts-err() { print -u2 -r -- "$*"; }
-  LEOS_PROFILES="$LEOS_TEST_ROOT"
-  source "$LEOS_TEST_ROOT/zsh/entries.zsh"
-  [[ $LEOS_PRIVATE_LOADED == yes ]]
+  source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+  [[ ${(j: :)LEOS_ORDER} == "entries private interactive private-interactive" ]] || {
+    print -u2 -r -- "load order: ${(j: :)LEOS_ORDER}"; exit 1
+  }
+  [[ $LEOS_PRIVATE_LOADED == yes && ${LEOS_PRIVATE_MAP[a]} == 1 ]]
+  [[ ${(t)LEOS_PRIVATE_MAP} == association ]]
+  [[ $LEOS_PRIVATE_LOCAL == kept && $LEOS_PRIVATE_SCALAR == kept ]]
+  [[ ${LEOS_PI_MAP[b]} == 2 ]]
+'
+[[ $block_out != *"readable beyond its owner"* ]] || fail 'mode 600 private files warned anyway'
+
+run_block 'start.zsh loads once per shell' \
+  HOME="$tmp" LEOS_PROFILES_HOME="$tmp/profile" TERM=xterm-256color -- '
+  setopt err_return no_unset pipe_fail
+  source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+  source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+  (( $#LEOS_ORDER == 4 )) || { print -u2 -r -- "loaded twice: ${(j: :)LEOS_ORDER}"; exit 1; }
+  # A nested shell does not inherit the guard, so it still gets its profile.
+  [[ $(zsh -dfc "source ${(q)LEOS_PROFILES_HOME}/zsh/start.zsh; print -r -- \${(j: :)LEOS_ORDER}") == *private-interactive ]]
+'
+
+run_block 'TERM=dumb keeps PATH and private.zsh but skips the interactive layer' \
+  HOME="$tmp" LEOS_PROFILES_HOME="$tmp/profile" TERM=dumb -- '
+  setopt err_return no_unset pipe_fail
+  source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+  [[ ${(j: :)LEOS_ORDER} == "entries private" ]]
+  [[ $PS1 == "\$ " && ! -o zle ]]
+'
+
+# The root guard itself needs EUID 0; a non-root shell whose HOME it does not
+# own (here /) must still load normally.
+run_block 'non-root shell with a foreign HOME still loads' \
+  HOME=/ LEOS_PROFILES_HOME="$tmp/profile" TERM=xterm-256color -- '
+  setopt err_return no_unset pipe_fail
+  (( EUID != 0 )) || exit 0
+  source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+  (( $#LEOS_ORDER == 4 ))
 '
 
 # A secrets file readable beyond its owner must be reported, and must still load
-# (warn, never silently drop the override or rewrite the user's mode).
-for mode in 600 640 604 644; do
-  chmod $mode "$tmp/profile/local/private.zsh"
-  run_block "private override at mode $mode" LEOS_TEST_ROOT="$tmp/profile" -- '
-    setopt err_return no_unset pipe_fail
-    entry() { :; }
-    puts-err() { print -u2 -r -- "$*"; }
-    LEOS_PROFILES="$LEOS_TEST_ROOT"
-    source "$LEOS_TEST_ROOT/zsh/entries.zsh"
-    [[ $LEOS_PRIVATE_LOADED == yes ]]
-  '
-  if [[ $mode == 600 ]]; then
-    [[ $block_out != *"readable beyond its owner"* ]] || fail 'mode 600 private.zsh warned anyway'
-  else
-    [[ $block_out == *"readable beyond its owner"* ]] || fail "mode $mode private.zsh did not warn"
-  fi
+# (warn, never silently drop the override or rewrite the user's mode). Both
+# private files get the same check.
+for private_file in private private-interactive; do
+  for mode in 600 640 604 644; do
+    chmod $mode "$tmp/profile/local/$private_file.zsh"
+    run_block "$private_file.zsh at mode $mode" \
+      HOME="$tmp" LEOS_PROFILES_HOME="$tmp/profile" TERM=xterm-256color -- '
+      setopt err_return no_unset pipe_fail
+      source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+      (( $#LEOS_ORDER == 4 ))
+    '
+    if [[ $mode == 600 ]]; then
+      [[ $block_out != *"readable beyond its owner"* ]] || fail "mode 600 $private_file.zsh warned anyway"
+    else
+      [[ $block_out == *"$private_file.zsh is readable beyond its owner"* ]] ||
+        fail "mode $mode $private_file.zsh did not warn"
+    fi
+  done
+  chmod 600 "$tmp/profile/local/$private_file.zsh"
 done
-chmod 600 "$tmp/profile/local/private.zsh"
 
 # A symlink to a correctly locked file must not warn: mode qualifiers lstat by
 # default, and a symlink's own mode is 0777, so the check has to follow links.
 mkdir -p "$tmp/symprofile/zsh" "$tmp/symprofile/local" "$tmp/symtarget"
-cp "$root/zsh/entries.zsh" "$tmp/symprofile/zsh/entries.zsh"
+cp "$tmp/profile/zsh/"*.zsh "$tmp/symprofile/zsh/"
 print -r -- 'typeset -g LEOS_PRIVATE_LOADED=yes' > "$tmp/symtarget/private.zsh"
 ln -sf "$tmp/symtarget/private.zsh" "$tmp/symprofile/local/private.zsh"
 for target_mode in 600 644; do
   chmod $target_mode "$tmp/symtarget/private.zsh"
-  run_block "symlinked private.zsh at target mode $target_mode" LEOS_TEST_ROOT="$tmp/symprofile" -- '
+  run_block "symlinked private.zsh at target mode $target_mode" \
+    HOME="$tmp" LEOS_PROFILES_HOME="$tmp/symprofile" TERM=xterm-256color -- '
     setopt err_return no_unset pipe_fail
-    entry() { :; }
-    puts-err() { print -u2 -r -- "$*"; }
-    LEOS_PROFILES="$LEOS_TEST_ROOT"
-    source "$LEOS_TEST_ROOT/zsh/entries.zsh"
+    source "$LEOS_PROFILES_HOME/zsh/start.zsh"
     [[ $LEOS_PRIVATE_LOADED == yes ]]
   '
   if [[ $target_mode == 600 ]]; then
@@ -648,5 +693,51 @@ run_block 'configured-upstream reconciliation' \
   DIRTY=1
   ! upgrade-leos-profiles >/dev/null 2>&1
 '
+
+# Interactive shells on a real pseudo-terminal, loading the fixture profile
+# through a ZDOTDIR .zshrc exactly as the managed loader does. The helper types
+# a command that prints a marker and exits, then returns the whole transcript.
+mkdir -p "$tmp/ptyrc"
+print -r -- 'source "$LEOS_PROFILES_HOME/zsh/start.zsh"' > "$tmp/ptyrc/.zshrc"
+cat > "$tmp/pty.py" <<'PY'
+import os, pty, select, sys, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(sys.argv[1], sys.argv[1:])
+os.write(fd, b"print -r -- LEOS_PTY_DONE; exit\n")
+out = bytearray()
+deadline = time.time() + 30
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 1)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(fd, 65536)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+os.waitpid(pid, 0)
+sys.stdout.write(out.decode("utf-8", "replace"))
+PY
+pty_transcript() {
+  /usr/bin/env HOME="$tmp/pty-home" ZDOTDIR="$tmp/ptyrc" LEOS_PROFILES_HOME="$root" \
+    PATH="$fakepath" "$@" python3 -I "$tmp/pty.py" "$zsh_bin" -di
+}
+mkdir -p "$tmp/pty-home"
+if (( $+commands[python3] )); then
+  # Control: a normal terminal does get line-editor escape sequences, so the
+  # assertion below would notice them.
+  out=$(pty_transcript TERM=xterm-256color)
+  [[ $out == *LEOS_PTY_DONE* ]] || fail "pty shell did not run its command: $out"
+  [[ $out == *$'\e'* ]] || fail 'pty control transcript has no escape sequences; the dumb test proves nothing'
+  out=$(pty_transcript TERM=dumb)
+  [[ $out == *LEOS_PTY_DONE* ]] || fail "TERM=dumb shell did not run its command: $out"
+  [[ $out != *$'\e'* ]] || fail "TERM=dumb shell emitted escape sequences: ${(q+)out}"
+  [[ $out == *'$ '* ]] || fail "TERM=dumb shell did not show the plain prompt: ${(q+)out}"
+else
+  print -u2 -r -- 'SKIP: python3 unavailable; pty TERM=dumb test not run'
+fi
 
 print -r -- 'profile tests: PASS'

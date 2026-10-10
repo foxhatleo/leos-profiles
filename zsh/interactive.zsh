@@ -1,5 +1,6 @@
 # Leo's Profiles — interactive stack: plugins, completion, Starship.
-# Loaded LAST so zsh-syntax-highlighting is the final plugin sourced.
+# start.zsh loads this after the PATH/environment layer and local/private.zsh,
+# and sources only local/private-interactive.zsh after it.
 
 # Every other file reads flags from $LEOS_PROFILES, but this one is also sourced
 # standalone by the test suite with only LEOS_PROFILES_ZSH set. Derive the root
@@ -95,7 +96,8 @@ if (( $+functions[compdef] )); then
 fi
 
 # Syntax highlighting is the final plugin, after completion definitions.
-# Prompt initialization and private interactive overrides follow below.
+# Prompt initialization follows below; start.zsh then sources
+# local/private-interactive.zsh.
 _leos_plugin zsh-syntax-highlighting/zsh-syntax-highlighting.zsh   # MUST be last
 
 # Starship prompt. The built-in fallback is used whenever Starship cannot drive
@@ -131,13 +133,6 @@ else
   PROMPT=$_leos_fallback_prompt
 fi
 unset _leos_fallback_prompt
-
-# Machine-local interactive overrides, last of all: this is the counterpart to
-# local/private.zsh for anything that needs `compdef`, a ZLE widget, or the final
-# word over the plugin stack — none of which exist yet when private.zsh loads.
-if [[ -r $_leos_root/local/private-interactive.zsh ]]; then
-  source "$_leos_root/local/private-interactive.zsh"
-fi
 
 unset _leos_root
 

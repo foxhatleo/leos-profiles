@@ -422,22 +422,19 @@ test_local_migration_and_conflict_detection() {
 }
 
 test_prepare_local_dir_hardens_private_zsh() {
-  local temp mode
+  local temp
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
   DRY_RUN=0
   mkdir -p "$LOCAL_DIR"
   printf '%s\n' 'export SECRET=1' > "$LOCAL_DIR/private.zsh"
-  chmod 644 "$LOCAL_DIR/private.zsh"
+  printf '%s\n' 'export SECRET=2' > "$LOCAL_DIR/private-interactive.zsh"
+  chmod 644 "$LOCAL_DIR/private.zsh" "$LOCAL_DIR/private-interactive.zsh"
   prepare_local_dir
-  if [[ $(uname -s) == Darwin ]]; then
-    mode=$(/usr/bin/stat -f '%Lp' "$LOCAL_DIR/private.zsh")
-  else
-    mode=$(stat -c '%a' "$LOCAL_DIR/private.zsh")
-  fi
-  assert_equals "$mode" "600"
-  # A missing private.zsh must not make the run fail.
-  rm -f "$LOCAL_DIR/private.zsh"
+  assert_equals "$(file_mode "$LOCAL_DIR/private.zsh")" "600"
+  assert_equals "$(file_mode "$LOCAL_DIR/private-interactive.zsh")" "600"
+  # A missing private file must not make the run fail.
+  rm -f "$LOCAL_DIR/private.zsh" "$LOCAL_DIR/private-interactive.zsh"
   prepare_local_dir || fail "prepare_local_dir failed without a private.zsh"
   rm -rf "$temp"
 }
