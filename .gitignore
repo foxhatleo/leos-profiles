@@ -1,6 +1,7 @@
 # ---- Project-specific ----
 *.bak
 .omc/
+.claude/worktrees/
 .ai/
 docs/*
 !docs/development.md
