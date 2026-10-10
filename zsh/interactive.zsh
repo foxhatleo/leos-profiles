@@ -221,10 +221,44 @@ if whence -p starship >/dev/null; then
   else
     export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship.toml"
   fi
-  # Cached: the init script is deterministic, and the parts that must vary per
-  # shell (the session key, PROMPT2) are expanded when it is sourced.
+  # Cached: the init script is deterministic, and the part that must vary per
+  # shell (the session key) is expanded when it is sourced. The filter below
+  # turns the script's `PROMPT2="$(starship prompt --continuation)"`, a
+  # starship run on every shell start (~5 ms), into the same command in single
+  # quotes: PROMPT_SUBST (which the script sets) then runs it only when a
+  # continuation prompt is actually shown.
+  __leos_starship_init_filter() {
+    emulate -L zsh
+    local -a lines=("${(@f)REPLY}")
+    local i
+    for (( i = 1; i <= $#lines; i++ )); do
+      if [[ $lines[i] == 'PROMPT2="$('*')"' && $lines[i] != *\'* ]]; then
+        lines[i]="PROMPT2='${lines[i][10,-2]}'"
+      fi
+    done
+    REPLY=${(F)lines}
+  }
   typeset -g _leos_starship_status=0
-  leos-source-cached starship-init $commands[starship] init zsh || _leos_starship_status=$?
+  __leos_init_filter=__leos_starship_init_filter \
+    leos-source-cached starship-init $commands[starship] init zsh || _leos_starship_status=$?
+  if (( ! _leos_starship_status )) && [[ ${RPROMPT-} == *starship* ]]; then
+    # The script also draws a right prompt before every prompt: a second
+    # starship run (~5 ms per Enter) that prints nothing unless the active
+    # configuration has a right_format, and neither bundled one does. Keep
+    # its template, and use it only while the configuration (re-read in-process
+    # before each prompt, so a later STARSHIP_CONFIG change is honoured)
+    # defines one, or cannot be read.
+    typeset -g __leos_starship_rprompt=$RPROMPT
+    __leos_starship_right() {
+      if [[ -r ${STARSHIP_CONFIG:-} && "$(<$STARSHIP_CONFIG)" != *right_format* ]]; then
+        RPROMPT=
+      else
+        RPROMPT=$__leos_starship_rprompt
+      fi
+    }
+    autoload -Uz add-zsh-hook
+    add-zsh-hook precmd __leos_starship_right
+  fi
   if (( _leos_starship_status )); then
     # Only warn on a fresh failure (1); 2 means an earlier shell already said so.
     (( _leos_starship_status == 1 )) &&

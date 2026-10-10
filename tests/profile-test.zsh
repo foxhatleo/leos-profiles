@@ -1109,6 +1109,43 @@ compinit_round 'new fpath directory' "$tmp/ci-home/newcomp"
 compinit_round 'same new fpath' "$tmp/ci-home/newcomp"
 [[ $REPLY == "compinit -C -d $ci_dump" ]] || fail "an unchanged fpath must take the fast path: ${(q+)REPLY}"
 
+# Starship: PROMPT2 is no longer computed (a starship run) at startup but when
+# shown, and the right prompt's starship run happens only while the active
+# configuration has a right_format. The fake mimics `starship init zsh`.
+mkdir -p "$tmp/ss-home/bin"
+cat > "$tmp/ss-home/bin/starship" <<'STARSHIP'
+#!/bin/sh
+case "$1" in
+  init) cat <<'EOS'
+setopt promptsubst
+PROMPT='$(starship prompt --terminal-width="$COLUMNS")'
+RPROMPT='$(starship prompt --right --terminal-width="$COLUMNS")'
+PROMPT2="$(starship prompt --continuation)"
+EOS
+  ;;
+  prompt) printf '%s\n' "prompt $*" >> "$HOME/starship-calls"; printf '> ' ;;
+esac
+STARSHIP
+chmod +x "$tmp/ss-home/bin/starship"
+run_block 'starship continuation prompt is lazy and the right prompt runs only when configured' \
+  HOME="$tmp/ss-home" LEOS_PROFILES_ZSH="$tmp/ci-root/zsh" TERM=xterm-256color \
+  PATH="$tmp/ss-home/bin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  puts() { :; }; puts-err() { :; }; entry() { :; }
+  source "$LEOS_PROFILES_ZSH/cache.zsh"
+  source "$LEOS_PROFILES_ZSH/interactive.zsh"
+  [[ ! -e $HOME/starship-calls ]] || { print -u2 -r -- "starship ran at startup: $(<$HOME/starship-calls)"; exit 1; }
+  [[ $PROMPT2 == "\$(starship prompt --continuation)" ]] || { print -u2 -r -- "PROMPT2: $PROMPT2"; exit 1; }
+  print -r -- "format = \"\$all\"" > "$HOME/starship.toml"
+  STARSHIP_CONFIG=$HOME/starship.toml
+  __leos_starship_right
+  [[ -z $RPROMPT ]]
+  print -r -- "right_format = \"\$time\"" >> "$HOME/starship.toml"
+  __leos_starship_right
+  [[ $RPROMPT == *"prompt --right"* ]]
+  (( ${precmd_functions[(Ie)__leos_starship_right]} ))
+'
+
 mkdir -p "$tmp/unsafe-home/shared"
 chmod 777 "$tmp/unsafe-home/shared"
 run_block 'completion dump falls back to ZDOTDIR when the cache root is unsafe' \
