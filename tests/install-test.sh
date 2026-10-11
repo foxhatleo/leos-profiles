@@ -2,7 +2,6 @@
 # shellcheck disable=SC1091,SC2016,SC2030,SC2031,SC2034,SC2317,SC2329
 
 set -Eeuo pipefail
-IFS=$'\n\t'
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 export LEOS_PROFILES_INSTALL_LIB_ONLY=1
@@ -16,6 +15,25 @@ CURRENT_TEST=""
 fail() { printf '%s\n' "FAIL [${CURRENT_TEST:-?}]: $*" >&2; exit 1; }
 assert_equals() { [[ $1 == "$2" ]] || fail "expected '$2', got '$1'"; }
 assert_contains() { [[ $1 == *"$2"* ]] || fail "expected '$1' to contain '$2'"; }
+
+# A copy of the public checkout, so CLI tests never read or write the
+# developer's local/ state.
+make_fixture_checkout() {
+  mkdir -p "$1"
+  cp -R "$ROOT/install.sh" "$ROOT/installer" "$ROOT/zsh" "$ROOT/util" "$1/"
+  rm -rf -- "$1/zsh/plugins" "$1/zsh/_private.zsh"
+}
+
+# run_cli <checkout> <home> <args...>: the real entrypoint, with this suite's
+# interpreter (the system Bash 3.2 on macOS CI) and a fixture HOME.
+run_cli() {
+  local checkout=$1 home=$2
+  shift 2
+  mkdir -p "$home"
+  env LEOS_PROFILES_INSTALL_LIB_ONLY=0 HOME="$home" XDG_STATE_HOME="$home/.local/state" \
+    XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" XDG_DATA_HOME="$home/.local/share" \
+    "$BASH" "$checkout/install.sh" "$@"
+}
 
 test_dependency_normalisation() {
   SELECTED_STEPS="zsh-config"
@@ -163,6 +181,47 @@ test_tar_archive_install_creates_extraction_directory() {
   rm -rf "$temp"
 }
 
+# uv's archive holds uv and uvx in a versioned directory: both are installed,
+# verified and listed, from the registry alone.
+test_uv_artifact_installs_uv_and_uvx() {
+  local temp name
+  temp=$(mktemp -d)
+  mkdir -p "$temp/source/uv-aarch64-apple-darwin" "$temp/home"
+  for name in uv uvx; do
+    printf '#!/bin/sh\nprintf "%%s %%s (fixture 2026-10-01)\\n" "%s" "%s"\n' "$name" "$UV_VERSION" > "$temp/source/uv-aarch64-apple-darwin/$name"
+    chmod 755 "$temp/source/uv-aarch64-apple-darwin/$name"
+  done
+  TEST_ARCHIVE="$temp/uv.tar.gz"
+  tar -czf "$TEST_ARCHIVE" -C "$temp/source" uv-aarch64-apple-darwin
+  HOME="$temp/home"
+  DRY_RUN=0
+  OS_FAMILY=macos
+  download_verified() { mkdir -p "$(dirname -- "$3")"; cp "$TEST_ARCHIVE" "$3"; }
+  uname() { if [[ ${1:-} == -m ]]; then printf 'arm64\n'; else command uname "$@"; fi; }
+  install_uv
+  [[ -x $HOME/.local/bin/uv && -x $HOME/.local/bin/uvx ]] || fail "uv and uvx were not both installed"
+  verify_step uv || fail "the installed uv did not verify"
+  rm "$HOME/.local/bin/uvx"
+  ! verify_step uv || fail "uv verified without uvx"
+  assert_contains "$(platform_asset uv)" "uv-aarch64-apple-darwin.tar.gz"
+  OS_FAMILY=apt
+  assert_contains "$(platform_asset uv)" "uv-aarch64-unknown-linux-musl.tar.gz"
+  rm -rf "$temp"
+}
+
+# BP-11: Starship and uv use the static musl builds on every Linux CPU.
+test_linux_artifacts_use_static_musl_builds() {
+  local tool machine
+  OS_FAMILY=apt
+  uname() { if [[ ${1:-} == -m ]]; then printf '%s\n' "$FAKE_MACHINE"; else command uname "$@"; fi; }
+  for tool in starship uv; do
+    for machine in aarch64 x86_64; do
+      FAKE_MACHINE=$machine
+      assert_contains "$(platform_asset "$tool")" "$tool-$machine-unknown-linux-musl.tar.gz"$'\t'
+    done
+  done
+}
+
 test_platform_assets_are_locked() {
   OS_FAMILY=macos
   local asset expected
@@ -180,10 +239,15 @@ test_package_maps_cover_every_supported_os() {
   local family group packages
   for family in macos apt fedora arch; do
     OS_FAMILY=$family
-    for group in core-utils shell dev-tools languages media network system; do
+    for group in core-utils shell dev-tools languages python media network system; do
       packages=$(package_list_for_group "$group")
       [[ -n $packages ]] || fail "missing package mapping for $family/$group"
     done
+    if [[ $family == macos ]]; then
+      assert_equals "$(package_list_for_group heroku)" heroku
+    else
+      assert_equals "$(package_list_for_group heroku)" ""
+    fi
   done
   OS_FAMILY=apt
   assert_contains "$(package_list_for_group dev-tools)" "libssl-dev"
@@ -196,6 +260,31 @@ test_package_maps_cover_every_supported_os() {
   assert_contains "$(package_list_for_group dev-tools)" "openssl-devel"
   OS_FAMILY=macos
   assert_contains "$(package_list_for_group dev-tools)" "openssl@3"
+}
+
+# ONB-3: `rbenv install` of Ruby 3 builds openssl, psych (libyaml), readline,
+# zlib and fiddle (libffi) extensions. dev-tools must carry each library's
+# development package, per family. macOS uses the SDK's libffi and zlib, but
+# Homebrew's zlib is listed too.
+test_dev_tools_cover_ruby_build_dependencies() {
+  local family requirement members
+  for family in macos apt fedora arch; do
+    OS_FAMILY=$family
+    members=" $(package_list_for_group dev-tools) "
+    case $family in
+      macos) requirement='openssl@3 readline zlib libyaml' ;;
+      apt) requirement='libssl-dev libreadline-dev zlib1g-dev libyaml-dev libffi-dev build-essential' ;;
+      fedora) requirement='openssl-devel readline-devel zlib-devel libyaml-devel libffi-devel gcc make' ;;
+      arch) requirement='openssl readline zlib libyaml libffi base-devel' ;;
+    esac
+    for requirement in $requirement; do
+      [[ $members == *" $requirement "* ]] || fail "$family dev-tools lacks ruby-build dependency $requirement"
+    done
+    # MI-8: GitHub CLI and jq.
+    for requirement in jq "$( [[ $family == arch ]] && printf github-cli || printf gh)"; do
+      [[ $members == *" $requirement "* ]] || fail "$family dev-tools lacks $requirement"
+    done
+  done
 }
 
 # Version literals live only in lock.sh; restating them here would just make
@@ -248,7 +337,7 @@ test_macos_install_batches_and_resolves_aliases() {
     local IFS=' '
     printf '%s\n' "$*" >> "$BREW_CALLS_FILE"
     [[ $1 == list && $2 == --formula ]] || return 0
-    printf '%s\n' bat direnv eza fd fzf git openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib pkg-config
+    printf '%s\n' bat direnv eza fd fzf gh git jq libyaml openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib pkg-config
   }
   ensure_brew() { :; }
   out=$(install_os_packages 2>&1)
@@ -325,26 +414,11 @@ test_font_verifier_accepts_renamed_families() {
   if font_is_installed; then
     fail "verifier accepted a different installed Nerd Font family"
   fi
-  # Linux follows the upstream installer's XDG_DATA_HOME font directory.
+  # Linux uses the XDG_DATA_HOME font directory the installer writes to.
   OS_FAMILY=apt FONT_NAME=JetBrainsMono XDG_DATA_HOME="$temp/xdg-data"
   mkdir -p "$XDG_DATA_HOME/fonts/NerdFonts"
   : > "$XDG_DATA_HOME/fonts/NerdFonts/JetBrainsMonoNerdFont-Regular.ttf"
   font_is_installed || fail "Linux verifier ignored XDG_DATA_HOME"
-  rm -rf "$temp"
-}
-
-test_nerd_fonts_installer_ignores_xdg_data_home_on_macos() {
-  local temp seen
-  temp=$(mktemp -d)
-  printf '#!/bin/sh\nprintf "%%s" "${XDG_DATA_HOME-unset}" > "$1"\n' > "$temp/fake-install"
-  chmod +x "$temp/fake-install"
-  export XDG_DATA_HOME="$temp/xdg-data"
-  OS_FAMILY=macos nerd_fonts_installer "$temp/fake-install" "$temp/seen"
-  seen=$(cat "$temp/seen")
-  [[ $seen == unset ]] || fail "macOS Nerd Fonts install saw XDG_DATA_HOME=$seen"
-  OS_FAMILY=apt nerd_fonts_installer "$temp/fake-install" "$temp/seen"
-  seen=$(cat "$temp/seen")
-  [[ $seen == "$temp/xdg-data" ]] || fail "Linux Nerd Fonts install lost XDG_DATA_HOME"
   rm -rf "$temp"
 }
 
@@ -777,13 +851,42 @@ test_equivalent_github_origins() {
 }
 
 test_recommended_and_whole_group_closure() {
-  [[ $SELECTED_STEPS == 'packages,pyenv,rbenv,bun,fnm,yarn,pnpm,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
+  [[ $SELECTED_STEPS == 'packages,pyenv,rbenv,bun,fnm,yarn,pnpm,uv,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
   [[ $SELECTED_GROUPS == 'core-utils,shell,dev-tools,languages,media,network,system' ]] || fail "Recommended package groups changed"
-  SELECTED_STEPS=bun
-  SELECTED_GROUPS=core-utils
+  # MI-4: the Node and Bun tools bring no OS runtimes.
+  SELECTED_STEPS=bun,yarn,pnpm
+  SELECTED_GROUPS=""
   normalise_dependencies
-  assert_contains "$SELECTED_STEPS" packages
-  assert_contains "$SELECTED_GROUPS" languages
+  assert_equals "$SELECTED_STEPS" bun,yarn,pnpm,packages,fnm
+  assert_equals "$SELECTED_GROUPS" ""
+  # rpatool needs python3 and nothing else from languages.
+  SELECTED_STEPS=bins
+  normalise_dependencies
+  assert_equals "$SELECTED_GROUPS" python
+}
+
+test_heroku_is_an_opt_in_macos_group() {
+  local out
+  OS_FAMILY=macos
+  DRY_RUN=1
+  FULL_UPGRADE=0
+  ensure_brew() { :; }
+  package_installed() { return 1; }
+  ensure_sudo() { :; }
+  SELECTED_GROUPS=network
+  out=$(install_os_packages)
+  [[ $out != *heroku* ]] || fail "the network group still taps or installs heroku: $out"
+  SELECTED_GROUPS=network,heroku
+  out=$(install_os_packages)
+  assert_contains "$out" "+ brew tap heroku/brew"
+  assert_contains "$out" "heroku"
+  SELECTED_STEPS=packages
+  REQUESTED_STEPS=packages
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  verify_step() { return 1; }
+  assert_contains "$(inspect_tsv)" $'action\trepository\tHomebrew heroku/brew tap'
+  SELECTED_GROUPS=network
+  [[ $(inspect_tsv) != *heroku* ]] || fail "inspect discloses the heroku tap without the heroku group"
 }
 
 test_node_lts_is_resolved_once_per_run() {
@@ -840,8 +943,9 @@ test_inspection_schema_and_membership() {
   assert_contains "$output" $'meta\tschema\t1'
   assert_contains "$output" $'group\tcomponent\tbun\tselected'
   assert_contains "$output" $'group\tcomponent\tpackages\timplied'
-  assert_contains "$output" $'group\tpackage\tlanguages\timplied'
-  assert_contains "$output" $'package\tmacos\tnode'
+  assert_contains "$output" $'group\tpackage\tcore-utils\tselected'
+  [[ $output != *$'group\tpackage\tlanguages'* ]] || fail "bun implied the languages group"
+  assert_contains "$output" $'package\tmacos\tcoreutils'
   assert_contains "$output" $'artifact\tdirect\tbun\t'
 }
 
@@ -954,27 +1058,6 @@ test_stale_lock_fails_closed_with_guidance() {
   rm -rf "$temp"
 }
 
-test_sparse_font_checkout_is_blobless_and_scoped() {
-  local temp log
-  temp=$(mktemp -d)
-  log="$temp/git-args"
-  : > "$log"
-  DRY_RUN=0
-  git() {
-    local IFS=' '
-    printf '%s\n' "$*" >> "$log"
-    case "$*" in
-      *"rev-parse HEAD"*) printf '%s\n' DEADBEEFCOMMIT ;;
-    esac
-    return 0
-  }
-  sparse_checkout_pinned "https://example.invalid/nerd-fonts.git" DEADBEEFCOMMIT "$temp/nf" nerd-fonts \
-    install.sh bin patched-fonts/JetBrainsMono || fail "sparse checkout returned nonzero on a healthy path"
-  assert_contains "$(cat "$log")" "sparse-checkout set install.sh bin patched-fonts/JetBrainsMono"
-  assert_contains "$(cat "$log")" "fetch --depth 1 --filter=blob:none origin DEADBEEFCOMMIT"
-  rm -rf "$temp"
-}
-
 test_no_os_release_upgrade_tooling() {
   # Full-upgrade / checkup paths must stay in-release. Strip comments first so
   # the intentional mentions in guard comments don't count as usage.
@@ -1054,11 +1137,40 @@ test_set_default_shell_uses_sudo_chsh_on_macos() {
   CHANGE_DEFAULT_SHELL=yes
   DRY_RUN=1
   OS_FAMILY=macos
-  USER=tester
+  SUDO=sudo
   current_login_shell() { printf '%s\n' /bin/bash; }
   local out
   out=$(set_default_shell 2>&1)
-  assert_contains "$out" "sudo chsh -s"
+  # SEC-8: the root-owned system zsh, not a PATH-resolved Homebrew one.
+  [[ -x /bin/zsh ]] || return 0
+  assert_contains "$out" "sudo chsh -s /bin/zsh $(id -un)"
+  current_login_shell() { printf '%s\n' /bin/zsh; }
+  verify_step default-shell || fail "/bin/zsh did not verify as the macOS login shell"
+}
+
+# BP-9: without chsh the run continues, the step waits for a manual action,
+# and the run ends with exit 3 and the record.
+test_missing_chsh_queues_a_manual_action() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  mkdir -p "$temp/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$temp/bin/zsh"
+  chmod +x "$temp/bin/zsh"
+  OS_FAMILY=apt
+  CHANGE_DEFAULT_SHELL=yes
+  DRY_RUN=0
+  LOCAL_DIR="$temp/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
+  current_login_shell() { printf '%s\n' /bin/bash; }
+  command() { if [[ ${1:-} == -v && ${2:-} == chsh ]]; then return 1; fi; builtin command "$@"; }
+  PATH="$temp/bin:$PATH"
+  out=$( (run_step default-shell; printf 'continued\n'; finish_manual_actions) 2>"$temp/err" ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" "continued"
+  assert_contains "$out" $'manual-action\tset-login-shell\t'"$temp/bin/zsh"$'\t'"$(id -un)"
+  assert_contains "$(cat "$temp/err")" "chsh -s $temp/bin/zsh"
+  ! state_done default-shell || fail "a step awaiting a manual action was recorded complete"
+  rm -rf "$temp"
 }
 
 test_known_hosts_matches_metadata_and_dedupes() {
@@ -1266,6 +1378,790 @@ test_macos_login_path_block() {
   rm -rf "$temp"
 }
 
+test_package_signature_is_ifs_independent() {
+  local expected
+  OS_FAMILY=apt
+  SELECTED_GROUPS=shell,system
+  # Newline-joined, as recorded by earlier versions, whatever IFS the caller has.
+  expected=$'|shell,system|zsh\nsmartmontools'
+  assert_equals "$(signature_packages)" "$expected"
+  assert_equals "$(IFS=,; signature_packages)" "$expected"
+  assert_equals "$(IFS=$'\n\t'; signature_packages)" "$expected"
+  assert_equals "$(IFS=' '; step_signature packages)" "$(step_signature packages)"
+}
+
+# ONB-14: an empty package selection crashed Bash 3.2 under set -u when the
+# packages step computed its signature.
+test_empty_package_selection_signs_and_runs() {
+  local temp out
+  temp=$(mktemp -d)
+  OS_FAMILY=apt
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=""
+  assert_equals "$(signature_packages)" "||"
+  LOCAL_DIR="$temp/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
+  DRY_RUN=0
+  mark_done packages
+  state_done packages || fail "an empty package selection was not recorded"
+  make_fixture_checkout "$temp/profile"
+  out=$(run_cli "$temp/profile" "$temp/home" apply --yes --dry-run --groups packages --package-groups none 2>&1) ||
+    fail "apply --groups packages --package-groups none failed: $out"
+  assert_contains "$out" "Profile apply complete"
+  rm -rf "$temp"
+}
+
+test_pkg_install_uses_one_command_per_family() {
+  local out
+  DRY_RUN=1
+  SUDO=sudo
+  ensure_brew() { :; }
+  OS_FAMILY=macos
+  assert_equals "$(pkg_install curl jq)" "+ brew install curl jq "
+  OS_FAMILY=apt
+  out=$(pkg_install jq)
+  assert_contains "$out" "+ sudo apt-get update"
+  # BP-7: no dpkg configuration-file prompt can stop an unattended run.
+  assert_contains "$out" "+ sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y jq"
+  OS_FAMILY=fedora
+  assert_equals "$(pkg_install jq)" "+ sudo dnf install -y jq "
+  # BP-8: Arch never installs against a stale database.
+  OS_FAMILY=arch
+  assert_equals "$(pkg_install jq)" "+ sudo pacman -Syu --needed --noconfirm jq "
+  assert_equals "$(pkg_install)" ""
+}
+
+test_apt_upgrade_keeps_local_configuration() {
+  local out
+  OS_FAMILY=apt
+  DRY_RUN=1
+  SUDO=sudo
+  FULL_UPGRADE=1
+  SELECTED_GROUPS=shell
+  out=$(install_os_packages)
+  assert_contains "$out" "apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y"
+  assert_contains "$(cat "$ROOT/zsh/path/apt.zsh")" "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y"
+}
+
+# SEC-4: --allowerasing applies only to the ffmpeg swap, never to the whole
+# media install; without media there is no RPM Fusion and no swap.
+test_fedora_media_swaps_only_ffmpeg() {
+  local out
+  OS_FAMILY=fedora
+  DRY_RUN=1
+  SUDO=sudo
+  FULL_UPGRADE=0
+  package_installed() { return 1; }
+  rpm() { [[ $1 == -E ]] && printf '44\n'; return 1; }
+  SELECTED_GROUPS=media
+  out=$(install_os_packages)
+  assert_contains "$out" "+ sudo dnf install -y https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm"
+  assert_contains "$out" "+ sudo dnf install -y ImageMagick yt-dlp "
+  assert_contains "$out" "+ sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing"
+  [[ $(grep -c -- --allowerasing <<< "$out") == 1 ]] || fail "--allowerasing reached another command: $out"
+  SELECTED_GROUPS=core-utils
+  out=$(install_os_packages)
+  [[ $out != *rpmfusion* && $out != *swap* && $out != *allowerasing* ]] || fail "a non-media install touched RPM Fusion: $out"
+}
+
+# BP-8: missing packages on Arch sync and upgrade in one transaction, with or
+# without the full-upgrade policy; there is never a bare -S.
+test_arch_installs_with_a_synced_database() {
+  local out
+  OS_FAMILY=arch
+  DRY_RUN=1
+  SUDO=sudo
+  package_installed() { return 1; }
+  SELECTED_GROUPS=shell
+  for FULL_UPGRADE in 0 1; do
+    out=$(install_os_packages)
+    assert_equals "$out" "+ sudo pacman -Syu --needed --noconfirm zsh "
+  done
+}
+
+# CQ-7: a root installer (a container) runs privileged commands directly,
+# including the /etc/shells edit, and never needs a sudo binary.
+test_root_runs_privileged_commands_without_sudo() {
+  local temp name
+  temp=$(mktemp -d)
+  mkdir -p "$temp/bin"
+  for name in sudo tee chsh; do
+    printf '#!/bin/sh\nprintf "%%s %%s\\n" "%s" "$*" >> "%s/calls"\ncat >/dev/null\n' "$name" "$temp" > "$temp/bin/$name"
+    chmod +x "$temp/bin/$name"
+  done
+  printf '#!/bin/sh\nexit 0\n' > "$temp/bin/zsh"
+  chmod +x "$temp/bin/zsh"
+  PATH="$temp/bin:$PATH"
+  SUDO=""
+  DRY_RUN=0
+  OS_FAMILY=apt
+  CHANGE_DEFAULT_SHELL=yes
+  current_login_shell() { printf '%s\n' /bin/bash; }
+  set_default_shell </dev/null >/dev/null
+  assert_contains "$(cat "$temp/calls")" "tee -a /etc/shells"
+  assert_contains "$(cat "$temp/calls")" "chsh -s $temp/bin/zsh"
+  [[ $(cat "$temp/calls") != *"sudo "* ]] || fail "a root run used sudo: $(cat "$temp/calls")"
+  DRY_RUN=1
+  assert_equals "$(run_root apt-get update)" "+ apt-get update "
+  rm -rf "$temp"
+}
+
+# ONB-12: the login shell is looked up for `id -un`, with USER unset.
+test_login_shell_lookup_ignores_unset_user() {
+  unset USER
+  getent() { [[ $2 == "$(id -un)" ]] && printf 'u:x:1:1::/home/u:/usr/bin/zsh\n'; }
+  dscl() { [[ $3 == /Users/"$(id -un)" ]] && printf 'UserShell: /usr/bin/zsh\n'; }
+  assert_equals "$(current_login_shell)" /usr/bin/zsh
+}
+
+# The per-tool lookup the artifact registry replaced (CQ-8), kept here as the
+# reference the registry must reproduce exactly.
+legacy_platform_asset() {
+  local tool=$1 arch=$2
+  case "$tool:$OS_FAMILY:$arch" in
+    bun:macos:aarch64) printf '%s\t%s\n' "$BUN_DARWIN_AARCH64_URL" "$BUN_DARWIN_AARCH64_SHA256" ;;
+    bun:macos:x64) printf '%s\t%s\n' "$BUN_DARWIN_X64_URL" "$BUN_DARWIN_X64_SHA256" ;;
+    bun:*:aarch64) printf '%s\t%s\n' "$BUN_LINUX_AARCH64_URL" "$BUN_LINUX_AARCH64_SHA256" ;;
+    bun:*:x64) printf '%s\t%s\n' "$BUN_LINUX_X64_URL" "$BUN_LINUX_X64_SHA256" ;;
+    fnm:macos:*) printf '%s\t%s\n' "$FNM_DARWIN_URL" "$FNM_DARWIN_SHA256" ;;
+    fnm:*:aarch64) printf '%s\t%s\n' "$FNM_LINUX_AARCH64_URL" "$FNM_LINUX_AARCH64_SHA256" ;;
+    fnm:*:x64) printf '%s\t%s\n' "$FNM_LINUX_X64_URL" "$FNM_LINUX_X64_SHA256" ;;
+    starship:macos:aarch64) printf '%s\t%s\n' "$STARSHIP_DARWIN_AARCH64_URL" "$STARSHIP_DARWIN_AARCH64_SHA256" ;;
+    starship:macos:x64) printf '%s\t%s\n' "$STARSHIP_DARWIN_X64_URL" "$STARSHIP_DARWIN_X64_SHA256" ;;
+    starship:*:aarch64) printf '%s\t%s\n' "$STARSHIP_LINUX_AARCH64_URL" "$STARSHIP_LINUX_AARCH64_SHA256" ;;
+    starship:*:x64) printf '%s\t%s\n' "$STARSHIP_LINUX_X64_URL" "$STARSHIP_LINUX_X64_SHA256" ;;
+    rpatool:*) printf '%s\t%s\n' "$RPATOOL_URL" "$RPATOOL_SHA256" ;;
+  esac
+}
+
+# Same assets, and byte-identical signatures, for every family and CPU, so
+# recorded state stays valid across the refactor.
+test_artifact_registry_matches_legacy_lookup() {
+  local family machine arch tool expected
+  TARGET=/fixture/profile
+  NODE_POLICY=preserve-compatible
+  RESOLVED_NODE_VERSION=""
+  uname() { if [[ ${1:-} == -m ]]; then printf '%s\n' "$FAKE_MACHINE"; else command uname "$@"; fi; }
+  for family in macos apt fedora arch; do
+    OS_FAMILY=$family
+    for machine in arm64 x86_64; do
+      FAKE_MACHINE=$machine
+      if [[ $machine == arm64 ]]; then arch=aarch64; else arch=x64; fi
+      for tool in rpatool bun fnm starship; do
+        assert_equals "$(platform_asset "$tool")" "$(legacy_platform_asset "$tool" "$arch")"
+      done
+      assert_equals "$(signature_bins)" "|$RPATOOL_URL|$RPATOOL_SHA256"
+      assert_equals "$(signature_bun)" "|$BUN_VERSION|$(legacy_platform_asset bun "$arch")"
+      assert_equals "$(signature_fnm)" "|$FNM_VERSION|$(legacy_platform_asset fnm "$arch")|preserve-compatible|unresolved"
+      expected="|$TARGET|$STARSHIP_VERSION|$(legacy_platform_asset starship "$arch")"
+      expected+="|$ZSH_AUTOSUGGESTIONS_COMMIT|$ZSH_SYNTAX_HIGHLIGHTING_COMMIT|$ZSH_COMPLETIONS_COMMIT|$FZF_TAB_COMMIT"
+      assert_equals "$(signature_plugins)" "$expected"
+    done
+  done
+  FAKE_MACHINE=riscv64
+  ! artifact_asset bun >/dev/null || fail "an unsupported CPU resolved a locked asset"
+  assert_equals "$(component_handler plugins artifacts)" starship
+  assert_equals "$(component_handler zsh-config artifacts)" ""
+}
+
+# Verification checks the version line (archives) or the digest (files), and
+# every executable the registry lists.
+test_artifact_verification_checks_version_and_digest() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp"
+  OS_FAMILY=apt
+  mkdir -p "$HOME/.local/bin"
+  fake_tool() { printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$2" > "$HOME/.local/bin/$1"; chmod +x "$HOME/.local/bin/$1"; }
+  fake_tool bun "$BUN_VERSION"
+  artifact_verify bun || fail "the locked bun version was rejected"
+  verify_step bun || fail "verify_bun disagrees with the registry"
+  fake_tool bun 0.0.1
+  ! artifact_verify bun || fail "a wrong bun version was accepted"
+  fake_tool starship "starship $STARSHIP_VERSION"
+  artifact_verify starship || fail "the locked starship version was rejected"
+  fake_tool starship "starship ${STARSHIP_VERSION}9"
+  ! artifact_verify starship || fail "a longer version string was accepted as the locked one"
+  fake_tool fnm "fnm $FNM_VERSION"
+  artifact_verify fnm || fail "the locked fnm version was rejected"
+  printf 'rpatool body' > "$HOME/.local/bin/rpatool"
+  chmod 700 "$HOME/.local/bin/rpatool"
+  ! artifact_verify rpatool || fail "rpatool with the wrong digest was accepted"
+  artifact_asset() { printf '%s\t%s\n' https://example.invalid/rpatool "$(printf 'rpatool body' | hash_text)"; }
+  artifact_verify rpatool || fail "rpatool with the locked digest was rejected"
+  rm -rf "$temp"
+}
+
+test_inspect_lists_every_selected_registry_artifact() {
+  local output name url digest
+  OS_FAMILY=macos
+  SELECTED_STEPS=bins,bun,plugins
+  SELECTED_GROUPS=""
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=""
+  verify_step() { return 1; }
+  output=$(inspect_tsv)
+  for name in rpatool bun starship; do
+    IFS=$'\t' read -r url digest <<< "$(platform_asset "$name")"
+    assert_contains "$output" $'artifact\tdirect\t'"$name"$'\t'"$url"$'\t'"$digest"
+  done
+  [[ $output != *$'artifact\tdirect\tfnm\t'* ]] || fail "an unselected artifact was listed"
+}
+
+test_retired_flags_are_rejected_everywhere() {
+  local out flag
+  for flag in --ref --target --plan; do
+    COMMAND=""
+    out=$( (parse_args "$flag" x) 2>&1 ) && fail "$flag was accepted as the command"
+    assert_contains "$out" "retired ref/target CLI"
+    COMMAND=""
+    out=$( (parse_args apply "$flag" x) 2>&1 ) && fail "apply accepted $flag"
+    assert_contains "$out" "retired ref/target CLI"
+    COMMAND=""
+    out=$( (parse_args reconcile --yes "$flag") 2>&1 ) && fail "reconcile accepted $flag"
+    assert_contains "$out" "retired ref/target CLI"
+  done
+}
+
+test_version_manager_extension_compile_is_best_effort() {
+  local temp err
+  temp=$(mktemp -d)
+  mkdir -p "$temp/root/src"
+  printf '#!/bin/sh\nexit 1\n' > "$temp/root/src/configure"
+  chmod +x "$temp/root/src/configure"
+  DRY_RUN=0
+  err=$(compile_optional_extension "$temp/root" pyenv 2>&1) || fail "a failed optional compile aborted the step"
+  assert_contains "$err" "pyenv's optional native extension did not compile"
+  rm -rf "$temp"
+}
+
+# A fixture Nerd Fonts release: <dir>/Fixture.tar.xz holding two fonts and a
+# README, and <dir>/SHA-256.txt listing it with the given digest (default:
+# the real one). A fake curl serves files from <dir> by name and logs each URL.
+make_font_release() {
+  local dir=$1 digest=${2:-}
+  mkdir -p "$dir/src"
+  : > "$dir/src/FixtureNerdFont-Regular.ttf"
+  : > "$dir/src/FixtureNerdFontMono-Bold.otf"
+  : > "$dir/src/README.md"
+  tar -cJf "$dir/Fixture.tar.xz" -C "$dir/src" . 2>/dev/null || return 1
+  [[ -n $digest ]] || digest=$(sha256 "$dir/Fixture.tar.xz")
+  printf '%s  %s\n' "$digest" Fixture.tar.xz "$(printf other | hash_text)" Other.zip > "$dir/SHA-256.txt"
+  NERD_FONTS_TEST_RELEASE_URL=https://example.invalid/release
+  NERD_FONTS_TEST_CHECKSUMS_SHA256=$(sha256 "$dir/SHA-256.txt")
+  FONT_RELEASE_DIR=$dir
+  curl() {
+    [[ ${1:-} == --help ]] && return 0
+    local out="" want=0 a url=""
+    for a in "$@"; do
+      [[ $want == 1 ]] && { out=$a; want=0; continue; }
+      [[ $a == --output ]] && want=1
+      url=$a
+    done
+    printf '%s\n' "$url" >> "$FONT_RELEASE_DIR/curl.log"
+    cp "$FONT_RELEASE_DIR/${url##*/}" "$out"
+  }
+}
+
+# ONB-9: a font is one verified release archive, never a repository clone, and
+# an unknown name stops before any font download.
+test_nerd_font_rejects_unknown_names_before_downloading() {
+  local temp err
+  temp=$(mktemp -d)
+  make_font_release "$temp/release" || { rm -rf "$temp"; return 0; }
+  HOME="$temp/home"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  err=$( (install_nerd_font Fixtur) 2>&1 ) && fail "an unknown font name was accepted"
+  assert_contains "$err" "Unknown Nerd Font: Fixtur"
+  assert_equals "$(cat "$temp/release/curl.log")" "https://example.invalid/release/SHA-256.txt"
+  [[ ! -e $HOME/.local/share/fonts ]] || fail "an unknown font created the font directory"
+  rm -rf "$temp"
+}
+
+test_nerd_font_archive_is_verified_and_installed() {
+  local temp fake
+  temp=$(mktemp -d)
+  make_font_release "$temp/release" || { rm -rf "$temp"; return 0; }
+  HOME="$temp/home"
+  DRY_RUN=0
+  FONT_NAME=Fixture
+  INSTALL_FONTS=yes
+  fake="$temp/bin"
+  mkdir -p "$fake"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/fc-cache.log"\n' "$temp" > "$fake/fc-cache"
+  chmod +x "$fake/fc-cache"
+  PATH="$fake:$PATH"
+  # macOS: ~/Library/Fonts/NerdFonts, whatever XDG_DATA_HOME says; no fc-cache.
+  export XDG_DATA_HOME="$temp/xdg"
+  OS_FAMILY=macos
+  install_fonts
+  [[ -f $HOME/Library/Fonts/NerdFonts/FixtureNerdFont-Regular.ttf &&
+     -f $HOME/Library/Fonts/NerdFonts/FixtureNerdFontMono-Bold.otf ]] || fail "macOS fonts were not installed"
+  [[ ! -e $HOME/Library/Fonts/NerdFonts/README.md ]] || fail "a non-font file was installed"
+  [[ ! -e $temp/xdg && ! -e $temp/fc-cache.log ]] || fail "macOS used XDG_DATA_HOME or fc-cache"
+  verify_step fonts || fail "installed macOS fonts did not verify"
+  # Linux: the XDG font directory, then fc-cache.
+  OS_FAMILY=apt
+  install_fonts
+  [[ -f $XDG_DATA_HOME/fonts/NerdFonts/FixtureNerdFont-Regular.ttf ]] || fail "Linux fonts were not installed"
+  assert_equals "$(cat "$temp/fc-cache.log")" "-f $XDG_DATA_HOME/fonts/NerdFonts"
+  verify_step fonts || fail "installed Linux fonts did not verify"
+  rm -rf "$temp"
+}
+
+test_nerd_font_archive_digest_mismatch_fails() {
+  local temp err
+  temp=$(mktemp -d)
+  make_font_release "$temp/release" 0000000000000000000000000000000000000000000000000000000000000000 ||
+    { rm -rf "$temp"; return 0; }
+  HOME="$temp/home"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  err=$( (install_nerd_font Fixture) 2>&1 ) && fail "a font archive with the wrong digest was installed"
+  assert_contains "$err" "Digest mismatch"
+  [[ -z $(find "$HOME" -name '*.ttf' 2>/dev/null) ]] || fail "fonts were installed despite the mismatch"
+  # A checksum list that is not the pinned one is rejected before it is read.
+  NERD_FONTS_TEST_CHECKSUMS_SHA256=$(printf tampered | hash_text)
+  err=$( (install_nerd_font Fixture) 2>&1 ) && fail "an unpinned checksum list was trusted"
+  assert_contains "$err" "Digest mismatch"
+  rm -rf "$temp"
+}
+
+# ONB-10: a Node mirror serves the LTS lookup too, and inspect names it.
+test_node_lts_lookup_honours_the_dist_mirror() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME"
+  record_curl_argv "$temp/curl-argv"
+  SELECTED_STEPS=fnm
+  RESOLVED_NODE_VERSION=""
+  FNM_NODE_DIST_MIRROR=https://mirror.example.invalid/node/
+  resolve_node_lts
+  assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
+  assert_contains "$(cat "$temp/curl-argv")" '<https://mirror.example.invalid/node/index.tab>'
+  OS_FAMILY=apt
+  REQUESTED_STEPS=fnm
+  SELECTED_GROUPS=""
+  REQUESTED_GROUPS=""
+  verify_step() { return 1; }
+  assert_contains "$(inspect_tsv)" $'external\tnode-lts-index\thttps://mirror.example.invalid/node/index.tab'
+  rm -rf "$temp"
+}
+
+test_sudo_keeps_proxy_variables() {
+  DRY_RUN=1
+  SUDO=sudo
+  unset http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY all_proxy
+  assert_equals "$(run_root apt-get update)" "+ sudo apt-get update "
+  export HTTPS_PROXY=http://proxy.example.invalid:3128
+  local out
+  out=$(run_root apt-get update)
+  out=${out//\\/}                       # printf %q may escape the commas
+  assert_equals "$out" \
+    "+ sudo --preserve-env=http_proxy,https_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,NO_PROXY,ALL_PROXY,all_proxy apt-get update "
+  SUDO=""
+  assert_equals "$(run_root apt-get update)" "+ apt-get update "
+}
+
+# --brew-mirror applies exactly brew.zsh's mirror variables to the run and
+# records (or clears) the runtime flag; reconcile follows the flag.
+test_brew_mirror_option_matches_the_runtime_mirror() {
+  local temp name value
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  OS_FAMILY=macos
+  DRY_RUN=0
+  for name in HOMEBREW_BREW_GIT_REMOTE HOMEBREW_BOTTLE_DOMAIN HOMEBREW_API_DOMAIN; do
+    value=$(sed -n "s/^ *export $name=\"\(.*\)\"$/\1/p" "$ROOT/zsh/path/brew.zsh")
+    [[ -n $value ]] || fail "brew.zsh no longer exports $name"
+    case $name in
+      HOMEBREW_BREW_GIT_REMOTE) assert_equals "$BREW_CHINA_GIT_REMOTE" "$value" ;;
+      HOMEBREW_BOTTLE_DOMAIN) assert_equals "$BREW_CHINA_BOTTLE_DOMAIN" "$value" ;;
+      HOMEBREW_API_DOMAIN) assert_equals "$BREW_CHINA_API_DOMAIN" "$value" ;;
+    esac
+  done
+  unset HOMEBREW_BREW_GIT_REMOTE HOMEBREW_BOTTLE_DOMAIN HOMEBREW_API_DOMAIN
+  BREW_MIRROR=china
+  apply_brew_mirror >/dev/null
+  [[ -f $LOCAL_DIR/flags/brew-china ]] || fail "--brew-mirror china did not set the runtime flag"
+  assert_equals "$(file_mode "$LOCAL_DIR/flags/brew-china")" 600
+  assert_equals "${HOMEBREW_BOTTLE_DOMAIN:-}" "$BREW_CHINA_BOTTLE_DOMAIN"
+  # Reconcile: no option, the flag decides.
+  BREW_MIRROR=""
+  assert_equals "$(brew_mirror_effective)" china
+  BREW_MIRROR=none
+  (apply_brew_mirror >/dev/null)
+  [[ ! -e $LOCAL_DIR/flags/brew-china ]] || fail "--brew-mirror none kept the runtime flag"
+  BREW_MIRROR=""
+  assert_equals "$(brew_mirror_effective)" none
+  rm -rf "$temp"
+}
+
+# ONB-4: components install first, credentials last, so a registration pause
+# (exit 3) no longer holds back the rest of the setup.
+test_credentials_run_after_components() {
+  local temp out zsh_line ssh_line
+  temp=$(mktemp -d)
+  make_fixture_checkout "$temp/profile"
+  out=$(run_cli "$temp/profile" "$temp/home" apply --yes --dry-run --groups zsh-config --package-groups none \
+    --ssh generate --default-shell no 2>&1) || fail "dry-run apply failed: $out"
+  zsh_line=$(grep -n 'Running zsh-config' <<< "$out" | cut -d: -f1)
+  ssh_line=$(grep -n 'Would prepare the selected SSH key' <<< "$out" | cut -d: -f1)
+  [[ -n $zsh_line && -n $ssh_line ]] || fail "missing component or credential output: $out"
+  (( zsh_line < ssh_line )) || fail "credentials ran before the components"
+  rm -rf "$temp"
+}
+
+# A credential pause also reports the manual actions components queued.
+test_credential_pause_reports_queued_component_actions() {
+  local out status=0
+  queue_manual_action set-login-shell /bin/zsh tester "install chsh" 2>/dev/null
+  out=$( (credential_manual_action github-login '' https://github.com/login "log in") 2>/dev/null ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" $'manual-action\tset-login-shell\t/bin/zsh\ttester'
+  assert_contains "$out" $'manual-action\tgithub-login\t\thttps://github.com/login'
+}
+
+# --- Preflight (ONB-1, CI-11): stubs for sudo and the terminal. -------------
+# preflight_fixture <tty yes|no> <sudo -n result 0|1>: a plan that needs root,
+# a recording sudo, and nothing else selected.
+preflight_fixture() {
+  PREFLIGHT_TTY=$1
+  SUDO_N_STATUS=$2
+  SUDO_LOG=$(mktemp)
+  track_temp "$SUDO_LOG"
+  SUDO=sudo
+  DRY_RUN=0
+  OS_FAMILY=apt
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=shell
+  INVOCATION="bash /fixture/install.sh apply --yes"
+  stdin_is_terminal() { [[ $PREFLIGHT_TTY == yes ]]; }
+  privileged_plan() { printf 'package-manager\tsudo apt-get install of the selected packages\n'; }
+  sudo() {
+    printf '%s\n' "$*" >> "$SUDO_LOG"
+    [[ $1 == -n ]] && return "$SUDO_N_STATUS"
+    return 0
+  }
+}
+
+test_preflight_without_terminal_stops_before_any_change() {
+  local out status=0
+  preflight_fixture no 1
+  out=$( (preflight) 2>&1 ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" $'manual-action\trun-in-terminal\t\tbash /fixture/install.sh apply --yes'
+  assert_contains "$out" "sudo needs a password"
+  assert_equals "$(cat "$SUDO_LOG")" "-n true"
+}
+
+test_preflight_accepts_passwordless_sudo_without_terminal() {
+  preflight_fixture no 0
+  preflight >/dev/null 2>&1 || fail "NOPASSWD sudo without a terminal was refused"
+  assert_equals "$(cat "$SUDO_LOG")" "-n true"
+}
+
+test_preflight_asks_for_sudo_once_on_a_terminal() {
+  local out
+  preflight_fixture yes 1
+  out=$(preflight 2>&1) || fail "preflight on a terminal failed: $out"
+  assert_contains "$out" "sudo asks for your password once"
+  assert_equals "$(cat "$SUDO_LOG")" $'-n true\n-v'
+}
+
+test_preflight_needs_no_sudo_without_root_actions() {
+  preflight_fixture no 1
+  privileged_plan() { :; }
+  preflight >/dev/null 2>&1 || fail "a plan without root actions was refused"
+  [[ ! -s $SUDO_LOG ]] || fail "sudo was called without a root action: $(cat "$SUDO_LOG")"
+}
+
+test_preflight_refuses_prompts_without_terminal() {
+  local out status=0
+  preflight_fixture no 0
+  privileged_plan() { :; }
+  SSH_MODE=generate
+  SSH_PASSPHRASE_MODE=prompt
+  out=$( (preflight) 2>&1 ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" "passphrase"
+  SSH_MODE=skip
+  # Linux chsh asks for the user's password.
+  SELECTED_STEPS=default-shell
+  CHANGE_DEFAULT_SHELL=yes
+  verify_default_shell() { return 1; }
+  command() { if [[ ${1:-} == -v && ${2:-} == chsh ]]; then printf '/usr/bin/chsh\n'; return 0; fi; builtin command "$@"; }
+  status=0
+  out=$( (preflight) 2>&1 ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" "chsh asks for your password"
+  # Dry-run reports the stop instead of exiting, and never calls sudo.
+  DRY_RUN=1
+  : > "$SUDO_LOG"
+  out=$(preflight 2>&1) || fail "dry-run preflight failed: $out"
+  assert_contains "$out" "Would stop before any change"
+  [[ ! -s $SUDO_LOG ]] || fail "a dry run called sudo"
+}
+
+# --- Version-manager conflicts (ONB-5, CI-11) ------------------------------
+test_existing_pyenv_is_reported_and_can_be_kept() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  HOMEBREW_PREFIX="$temp/brew"
+  mkdir -p "$HOME/.pyenv/bin" "$HOMEBREW_PREFIX/bin" "$HOMEBREW_PREFIX/opt/rbenv"
+  OS_FAMILY=macos
+  SELECTED_STEPS=pyenv,rbenv
+  assert_equals "$(version_manager_conflicts pyenv)" "$HOME/.pyenv"$'\tnot-a-git-checkout'
+  assert_equals "$(version_manager_conflicts rbenv)" "$HOMEBREW_PREFIX/opt/rbenv"$'\thomebrew-install'
+  out=$(report_conflicts)
+  assert_contains "$out" $'conflict\tpyenv\t'"$HOME/.pyenv"$'\tnot-a-git-checkout'
+  assert_contains "$out" $'conflict\trbenv\t'"$HOMEBREW_PREFIX/opt/rbenv"$'\thomebrew-install'
+  # Without the option, preflight stops before any change and names it.
+  privileged_plan() { :; }
+  out=$( (preflight) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "--skip-existing-version-managers"
+  # With it, both components are skipped and reported as such.
+  SKIP_EXISTING_VERSION_MANAGERS=1
+  install_pyenv() { fail "the kept pyenv was replaced"; }
+  install_rbenv() { fail "the Homebrew rbenv was shadowed"; }
+  out=$(run_step pyenv; run_step rbenv)
+  assert_contains "$out" "Skipping pyenv: keeping the existing installation"
+  SELECTED_GROUPS=""
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=""
+  assert_contains "$(inspect_tsv)" $'postcondition\tpyenv\tskipped'
+  # A pinned checkout of another repository is a conflict too.
+  rm -rf "$HOME/.pyenv"
+  git init -q "$HOME/.pyenv"
+  git -C "$HOME/.pyenv" remote add origin https://github.com/example/not-pyenv.git
+  assert_equals "$(version_manager_conflicts pyenv)" "$HOME/.pyenv"$'\tunexpected-origin'
+  rm -rf "$temp"
+}
+
+# --- Disclosure records (ONB-6, ONB-11, MI-3, R5) --------------------------
+test_existing_setups_and_shadowed_artifacts_are_disclosed() {
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  HOMEBREW_PREFIX="$temp/brew"
+  mkdir -p "$HOME/.oh-my-zsh" "$HOME/.nvm" "$HOME/miniconda3" "$HOMEBREW_PREFIX/bin" "$HOMEBREW_PREFIX/opt/powerlevel10k"
+  printf '#!/bin/sh\n' > "$HOMEBREW_PREFIX/bin/starship"
+  chmod +x "$HOMEBREW_PREFIX/bin/starship"
+  unset ZSH NVM_DIR
+  OS_FAMILY=macos
+  SELECTED_STEPS=plugins
+  out=$(report_existing_setups)
+  assert_contains "$out" $'existing\toh-my-zsh\t'"$HOME/.oh-my-zsh"$'\t'
+  assert_contains "$out" $'existing\tpowerlevel10k\t'"$HOMEBREW_PREFIX/opt/powerlevel10k"$'\t'
+  assert_contains "$out" $'existing\tnvm\t'"$HOME/.nvm"$'\t'
+  assert_contains "$out" $'existing\tconda\t'"$HOME/miniconda3"$'\t'
+  out=$(report_shadowed_artifacts)
+  assert_equals "$out" $'shadow\tstarship\t'"$HOMEBREW_PREFIX/bin/starship"$'\t'"$HOME/.local/bin/starship"
+  SELECTED_STEPS=pyenv
+  [[ -z $(report_shadowed_artifacts) ]] || fail "an unselected artifact was reported as shadowing"
+  rm -rf "$temp"
+}
+
+test_privileged_and_behaviour_records() {
+  local out
+  OS_FAMILY=fedora
+  SUDO=sudo
+  FULL_UPGRADE=0
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=media
+  bootstrap_missing() { :; }
+  selected_packages_installed() { return 1; }
+  out=$(privileged_plan)
+  assert_contains "$out" $'package-manager\tsudo dnf install of the selected packages'
+  assert_contains "$out" $'dnf-swap\tsudo dnf swap -y ffmpeg-free ffmpeg --allowerasing'
+  OS_FAMILY=arch
+  assert_contains "$(privileged_plan)" $'pacman-sync\tsudo pacman -Syu --needed --noconfirm'
+  OS_FAMILY=apt
+  SELECTED_GROUPS=dev-tools
+  selected_packages_installed() { return 0; }
+  [[ -z $(privileged_plan) ]] || fail "installed packages still planned a root action: $(privileged_plan)"
+  assert_contains "$(report_behaviour)" $'behaviour\tcompat-symlinks\t'
+  OS_FAMILY=macos
+  SELECTED_GROUPS=core-utils
+  GPG_MODE=generate
+  out=$(report_behaviour)
+  assert_contains "$out" $'behaviour\tgnu-tools\t'
+  assert_contains "$out" $'behaviour\tgit-identity\t'
+  # The macOS login-shell change: /etc/shells (when missing) and sudo chsh.
+  SELECTED_STEPS=default-shell
+  CHANGE_DEFAULT_SHELL=yes
+  verify_default_shell() { return 1; }
+  preferred_zsh_path() { printf '/fixture/zsh\n'; }
+  out=$(privileged_plan)
+  assert_contains "$out" $'etc-shells\tsudo append /fixture/zsh to /etc/shells'
+  assert_contains "$out" $'login-shell\tsudo chsh -s /fixture/zsh '"$(id -un)"
+}
+
+test_unsupported_macs_are_warned_about() {
+  local out
+  OS_FAMILY=macos
+  sw_vers() { printf '%s\n' "$FAKE_MACOS"; }
+  sysctl() { printf '%s\n' "$FAKE_ARM64"; }
+  FAKE_MACOS=15.4 FAKE_ARM64=1
+  ! platform_support_problem >/dev/null || fail "Apple-silicon macOS 15 was reported as unsupported"
+  FAKE_MACOS=26.0
+  ! platform_support_problem >/dev/null || fail "macOS 26 was reported as unsupported"
+  FAKE_MACOS=14.7
+  assert_contains "$(platform_support_problem)" "macOS 14.7 is unsupported"
+  FAKE_MACOS=15.4 FAKE_ARM64=0
+  assert_contains "$(platform_support_problem)" "Intel Mac"
+  SELECTED_STEPS=""
+  SELECTED_GROUPS=""
+  REQUESTED_STEPS=""
+  REQUESTED_GROUPS=""
+  out=$(inspect_tsv)
+  assert_contains "$out" $'warning\tunsupported-platform\tIntel Mac'
+  OS_FAMILY=apt
+  ! platform_support_problem >/dev/null || fail "Linux was checked against macOS support"
+  # A platform the lock has no build for is a warning, not an inspect failure.
+  OS_FAMILY=macos
+  SELECTED_STEPS=uv
+  REQUESTED_STEPS=uv
+  uname() { if [[ ${1:-} == -m ]]; then printf 'x86_64\n'; else command uname "$@"; fi; }
+  verify_step() { return 1; }
+  out=$(inspect_tsv) || fail "inspect failed without a locked uv build"
+  assert_contains "$out" $'warning\tno-locked-artifact\tuv has no locked build for macos on x86_64'
+}
+
+# --- --node-version (SEC-5) ------------------------------------------------
+test_approved_node_version_is_enforced() {
+  local out status=0
+  SELECTED_STEPS=fnm
+  select_existing_node() { return 1; }
+  resolve_node_lts() { RESOLVED_NODE_VERSION=$LIVE_LTS; NODE_SELECTION=current-lts; [[ -n $LIVE_LTS ]]; }
+  NODE_VERSION_APPROVED=v24.11.1
+  LIVE_LTS=v24.11.1
+  check_approved_node_version || fail "the approved, current LTS was refused"
+  RESOLVED_NODE_VERSION=""
+  LIVE_LTS=v24.12.0
+  out=$( (check_approved_node_version) 2>&1 ) || status=$?
+  assert_equals "$status" 2
+  assert_contains "$out" "the current LTS is now v24.12.0"
+  # Offline: the approved version is used as the current-lts choice.
+  RESOLVED_NODE_VERSION=""
+  LIVE_LTS=""
+  check_approved_node_version
+  assert_equals "$RESOLVED_NODE_VERSION:$NODE_SELECTION" v24.11.1:current-lts
+  COMMAND=""
+  out=$( (parse_args apply --node-version 24; validate_options) 2>&1 ) && fail "a malformed --node-version was accepted"
+  assert_contains "$out" "--node-version must look like"
+}
+
+# --- inspect --saved (MI-14) and inventory, remove-blocks anywhere (ONB-13) --
+test_inspect_saved_uses_the_saved_selection() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  make_fixture_checkout "$temp/profile"
+  out=$(run_cli "$temp/profile" "$temp/home" inspect --saved 2>&1) && fail "inspect --saved worked without a saved profile"
+  assert_contains "$out" "No saved install profile"
+  mkdir -p "$temp/profile/local"
+  printf '%s\t%s\n' schema 2 groups zsh-config package-groups shell full-upgrade yes \
+    fonts no font '' default-shell no git-name '' git-email '' ssh skip ssh-key '' \
+    ssh-passphrase empty gpg skip gpg-key '' gpg-passphrase empty node-channel current-lts \
+    node-policy preserve-compatible ai-cli-update-channel native package-channel system > "$temp/profile/local/install-profile.tsv"
+  out=$(run_cli "$temp/profile" "$temp/home" inspect --saved 2>&1) || fail "inspect --saved failed: $out"
+  assert_contains "$out" $'policy\tselection\tsaved'
+  assert_contains "$out" $'policy\tfull-upgrade\tno'
+  assert_contains "$out" $'group\tcomponent\tzsh-config\tselected'
+  [[ $out != *$'group\tcomponent\tfnm'* ]] || fail "inspect --saved used the default selection"
+  out=$(run_cli "$temp/profile" "$temp/home" inspect --saved --groups fnm 2>&1) || status=$?
+  [[ $status -ne 0 ]] || fail "inspect --saved accepted a selection option"
+  assert_contains "$out" "takes only --full-upgrade"
+  rm -rf "$temp"
+}
+
+test_inventory_lists_managed_items() {
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  LOCAL_DIR="$TARGET/local"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  mkdir -p "$HOME/.local/bin" "$LOCAL_DIR/flags"
+  install_zsh_config
+  : > "$HOME/.local/bin/uv"
+  : > "$LOCAL_DIR/flags/no-gnu"
+  export GIT_CONFIG_GLOBAL="$temp/gitconfig"
+  git config --global user.name Fixture
+  out=$(inventory_records)
+  assert_contains "$out" $'item\tmanaged-block\tloader\t'"$HOME/.zshrc"$'\tpresent'
+  assert_contains "$out" $'item\tmanaged-block\tlogin-path\t'"$HOME/.zprofile"$'\tabsent'
+  assert_contains "$out" $'item\tlocal-bin\tuv\t'"$HOME/.local/bin/uv"$'\tpresent'
+  assert_contains "$out" $'item\tlocal-bin\tstarship\t'"$HOME/.local/bin/starship"$'\tabsent'
+  assert_contains "$out" $'item\tflag\tno-gnu\t'"$LOCAL_DIR/flags/no-gnu"$'\tpresent'
+  assert_contains "$out" $'item\tgit-global\tuser.name\t'"$temp/gitconfig"$'\tpresent'
+  assert_contains "$out" $'item\tgit-global\tcommit.gpgsign\t'"$temp/gitconfig"$'\tabsent'
+  assert_contains "$out" $'item\tfonts\tnerd-fonts\t'
+  INVENTORY_FORMAT=human
+  assert_contains "$(inventory)" "present  managed-block"
+  rm -rf "$temp"
+}
+
+# remove-blocks and inventory work on a host detect_os rejects.
+test_remove_blocks_and_inventory_need_no_supported_platform() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  make_fixture_checkout "$temp/profile"
+  mkdir -p "$temp/bin" "$temp/home"
+  printf '#!/bin/sh\n[ "$1" = -s ] && { echo FreeBSD; exit 0; }\nexec /usr/bin/uname "$@"\n' > "$temp/bin/uname"
+  chmod +x "$temp/bin/uname"
+  printf '%s\n' '# >>> leos-profiles loader >>>' 'x' '# <<< leos-profiles loader <<<' > "$temp/home/.zshrc"
+  # detect_os also recognises Linux hosts by their package manager, so the
+  # fake host must not see apt-get, dnf or pacman: mirror the system tools
+  # without them.
+  local dir tool
+  for dir in /usr/bin /bin /usr/sbin /sbin; do
+    for tool in "$dir"/*; do
+      case ${tool##*/} in apt-get|dnf|pacman) continue ;; esac
+      [[ -e $temp/bin/${tool##*/} ]] || ln -s "$tool" "$temp/bin/${tool##*/}"
+    done
+  done
+  PATH="$temp/bin"
+  out=$(run_cli "$temp/profile" "$temp/home" apply --yes --dry-run 2>&1) || status=$?
+  [[ $status -ne 0 ]] || fail "apply ran on an unsupported host"
+  assert_contains "$out" "Unsupported platform"
+  out=$(run_cli "$temp/profile" "$temp/home" inventory --tsv 2>&1) || fail "inventory failed on an unsupported host: $out"
+  assert_contains "$out" $'item\tmanaged-block\tloader\t'"$temp/home/.zshrc"$'\tpresent'
+  out=$(run_cli "$temp/profile" "$temp/home" remove-blocks 2>&1) || fail "remove-blocks failed on an unsupported host: $out"
+  ! grep -q leos-profiles "$temp/home/.zshrc" || fail "remove-blocks left the block"
+  rm -rf "$temp"
+}
+
+# --- Success hints (MI-10) -------------------------------------------------
+test_success_names_the_terminal_font_and_wsl_action() {
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  OS_FAMILY=apt
+  XDG_DATA_HOME="$temp/xdg"
+  mkdir -p "$XDG_DATA_HOME/fonts/NerdFonts"
+  : > "$XDG_DATA_HOME/fonts/NerdFonts/CaskaydiaCoveNerdFont-Regular.ttf"
+  SELECTED_STEPS=plugins,fonts
+  INSTALL_FONTS=yes
+  FONT_NAME=CascadiaCode
+  assert_contains "$(print_terminal_font_hint)" '"CaskaydiaCove Nerd Font"'
+  INSTALL_FONTS=no
+  assert_contains "$(print_terminal_font_hint)" "LEOS_PLAIN_PROMPT=1"
+  # WSL: installing the font queues the Windows-side installation.
+  INSTALL_FONTS=yes
+  DRY_RUN=0
+  install_nerd_font() { :; }
+  is_wsl() { return 0; }
+  install_fonts 2>/dev/null
+  assert_contains "$PENDING_MANUAL_ACTIONS" $'manual-action\tinstall-windows-font\t'"$XDG_DATA_HOME/fonts/NerdFonts"$'\t'"$NERD_FONTS_RELEASE_URL/CascadiaCode.zip"
+  rm -rf "$temp"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -1288,7 +2184,6 @@ TESTS=(
   test_macos_install_batches_and_resolves_aliases
   test_compile_zsh_sources_is_best_effort
   test_font_verifier_accepts_renamed_families
-  test_nerd_fonts_installer_ignores_xdg_data_home_on_macos
   test_ssh_public_material_ignores_comments
   test_github_key_checks_fail_closed_on_api_errors
   test_github_key_checks_still_match_present_keys
@@ -1330,7 +2225,6 @@ TESTS=(
   test_inspect_degrades_when_node_lts_unresolvable
   test_packages_full_upgrade_rerun_has_no_false_warning
   test_stale_lock_fails_closed_with_guidance
-  test_sparse_font_checkout_is_blobless_and_scoped
   test_no_os_release_upgrade_tooling
   test_download_verified_rejects_bad_digest
   test_macos_package_verification_detects_missing
@@ -1338,6 +2232,46 @@ TESTS=(
   test_set_default_shell_uses_unprivileged_chsh_on_linux
   test_set_default_shell_uses_sudo_chsh_on_macos
   test_known_hosts_matches_metadata_and_dedupes
+  test_package_signature_is_ifs_independent
+  test_empty_package_selection_signs_and_runs
+  test_pkg_install_uses_one_command_per_family
+  test_root_runs_privileged_commands_without_sudo
+  test_login_shell_lookup_ignores_unset_user
+  test_artifact_registry_matches_legacy_lookup
+  test_artifact_verification_checks_version_and_digest
+  test_inspect_lists_every_selected_registry_artifact
+  test_retired_flags_are_rejected_everywhere
+  test_heroku_is_an_opt_in_macos_group
+  test_dev_tools_cover_ruby_build_dependencies
+  test_uv_artifact_installs_uv_and_uvx
+  test_linux_artifacts_use_static_musl_builds
+  test_apt_upgrade_keeps_local_configuration
+  test_fedora_media_swaps_only_ffmpeg
+  test_arch_installs_with_a_synced_database
+  test_version_manager_extension_compile_is_best_effort
+  test_nerd_font_rejects_unknown_names_before_downloading
+  test_nerd_font_archive_is_verified_and_installed
+  test_nerd_font_archive_digest_mismatch_fails
+  test_node_lts_lookup_honours_the_dist_mirror
+  test_sudo_keeps_proxy_variables
+  test_brew_mirror_option_matches_the_runtime_mirror
+  test_missing_chsh_queues_a_manual_action
+  test_credentials_run_after_components
+  test_credential_pause_reports_queued_component_actions
+  test_preflight_without_terminal_stops_before_any_change
+  test_preflight_accepts_passwordless_sudo_without_terminal
+  test_preflight_asks_for_sudo_once_on_a_terminal
+  test_preflight_needs_no_sudo_without_root_actions
+  test_preflight_refuses_prompts_without_terminal
+  test_existing_pyenv_is_reported_and_can_be_kept
+  test_existing_setups_and_shadowed_artifacts_are_disclosed
+  test_privileged_and_behaviour_records
+  test_unsupported_macs_are_warned_about
+  test_approved_node_version_is_enforced
+  test_inspect_saved_uses_the_saved_selection
+  test_inventory_lists_managed_items
+  test_remove_blocks_and_inventory_need_no_supported_platform
+  test_success_names_the_terminal_font_and_wsl_action
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

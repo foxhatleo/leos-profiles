@@ -5,7 +5,9 @@
 # The checkout containing this file is the profile being installed.
 
 set -Eeuo pipefail
-IFS=$'\n\t'
+# The default IFS stays in force everywhere. CSV values are split explicitly
+# with csv_split (`IFS=, read -r -a`), and signatures join their lists with
+# printf, so no handler depends on the caller's field separator (CQ-1).
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=installer/lock.sh
@@ -21,11 +23,15 @@ LEGACY_STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/leos-profiles/install-s
 COMMAND=""
 # shellcheck source=installer/registry.sh
 source "$SCRIPT_DIR/installer/registry.sh"
-readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
+# Every package group, in install order. Recommended selects all but the
+# opt-in ones: python (rpatool's interpreter; languages already has one) and
+# heroku (a third-party tap, macOS only).
+readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,languages,python,media,network,heroku,system"
+readonly RECOMMENDED_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
 # rpatool remains available as the explicit `bins` step, but is not a default
 # because its upstream does not publish a stable release.
 SELECTED_STEPS="${CANONICAL_STEPS/,bins/}"
-SELECTED_GROUPS="$CANONICAL_GROUPS"
+SELECTED_GROUPS="$RECOMMENDED_GROUPS"
 SSH_MODE="skip"
 SSH_PASSPHRASE_MODE="empty"
 GPG_MODE="skip"
@@ -49,6 +55,10 @@ NODE_SELECTION=""
 PROFILE_SCHEMA=2
 AI_CLI_UPDATE_CHANNEL="native"
 PACKAGE_CHANNEL="system"
+BREW_MIRROR=""
+SKIP_EXISTING_VERSION_MANAGERS=0
+SAVED_SELECTION=0
+INVENTORY_FORMAT=human
 SELECTED_PACKAGES=()
 TEMP_PATHS=()
 LOCK_HELD=0
@@ -61,9 +71,11 @@ usage() {
   cat <<EOF
 Usage:
   bash install.sh inspect [options]
+  bash install.sh inspect --saved [--full-upgrade]
   bash install.sh apply --yes [options]
   bash install.sh reconcile --yes [--full-upgrade]
   bash install.sh remove-blocks [--dry-run]
+  bash install.sh inventory [--tsv]
 
 Options:
   --groups <csv|none>             $CANONICAL_STEPS
@@ -81,15 +93,27 @@ Options:
   --git-email <email>             Global Git email when identity is missing
   --full-upgrade                  Run the host package-manager upgrade phase
   --no-full-upgrade               Install/reconcile packages without a host upgrade
+  --brew-mirror <china|none>      macOS: use (china) or stop using (none) the USTC
+                                  Homebrew mirror for this run and later shells
+  --skip-existing-version-managers
+                                  Keep an existing ~/.pyenv or ~/.rbenv that is
+                                  not the pinned checkout; skip that component
+  --node-version <vX.Y.Z>         The Node version inspect resolved; apply stops
+                                  (exit 2) if it would now choose another
+  --saved                         inspect: use the saved profile's selection
   --dry-run                       Print mutations without performing them
   --yes                           Confirm that the AI-presented plan was approved
   --help                          Show this help
 
 The AI runbook is the supported user interface. \`inspect\` emits typed TSV for
 agents and diagnostics; \`apply\` and \`reconcile\` never ask setup questions.
+Before changing anything they check what the run needs from you: without a
+terminal, a sudo password, passphrase prompt or chsh password ends the run
+with a run-in-terminal manual action (exit 3) and the command to run yourself.
 \`remove-blocks\` deletes only the managed blocks (and a legacy unmarked loader)
 from the zsh startup files (.zshrc, .zshenv, and .zprofile on macOS), leaving
-packages, plugins and credentials in place.
+packages, plugins and credentials in place. \`inventory\` lists everything the
+installer creates or manages and whether it is present.
 
 Node: preserve a compatible version by adopting it into fnm; otherwise use LTS.
 Credentials: local creation is supported; GitHub registration and SSH identity
@@ -102,26 +126,50 @@ require_value() {
   [[ $# -ge 2 && -n $2 ]] || die "$1 requires a value"
 }
 
+# The ref/target CLI was retired with the move to an in-place checkout; its
+# flags are still recognised so an old instruction fails with directions.
+reject_retired_flag() {
+  case $1 in
+    --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
+      die "$1 belongs to the retired ref/target CLI; run apply (or reconcile with the saved profile) from this local checkout" ;;
+  esac
+}
+
 parse_args() {
   [[ $# -gt 0 ]] || { usage >&2; exit 2; }
+  reject_retired_flag "$1"
   case $1 in
-    inspect|apply|reconcile|remove-blocks) COMMAND=$1; shift ;;
-    --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
-      die "$1 belongs to the retired ref/target CLI; use the AI runbook with this local checkout" ;;
+    inspect|apply|reconcile|remove-blocks|inventory) COMMAND=$1; shift ;;
     --help|-h) usage; exit 0 ;;
-    *) die "Expected inspect, apply, reconcile, or remove-blocks; the AI runbook is the setup interface" ;;
+    *) die "Expected inspect, apply, reconcile, remove-blocks, or inventory; the AI runbook is the setup interface" ;;
   esac
   if [[ $COMMAND == reconcile ]]; then FULL_UPGRADE=0; fi
+  if [[ $COMMAND == inspect && " $* " == *" --saved "* ]]; then
+    # Inspect what reconcile would do: the saved selection, no host upgrade
+    # unless asked for (MI-14).
+    SAVED_SELECTION=1
+    FULL_UPGRADE=0
+  fi
   while [[ $# -gt 0 ]]; do
-    if [[ $COMMAND == reconcile ]]; then
+    reject_retired_flag "$1"
+    if [[ $COMMAND == reconcile || $SAVED_SELECTION -eq 1 ]]; then
       case $1 in
         --full-upgrade) FULL_UPGRADE=1; shift ;;
-        --dry-run) DRY_RUN=1; shift ;;
-        --yes) ASSUME_YES=1; shift ;;
-        --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
-          die "$1 belongs to the retired ref/target CLI; use reconcile with the saved local profile" ;;
+        --dry-run) [[ $COMMAND == reconcile ]] || die "inspect --saved takes only --full-upgrade"; DRY_RUN=1; shift ;;
+        --yes) [[ $COMMAND == reconcile ]] || die "inspect --saved takes only --full-upgrade"; ASSUME_YES=1; shift ;;
+        --saved) shift ;;
         --help|-h) usage; exit 0 ;;
-        *) die "reconcile reads the saved local profile and only accepts --yes, --full-upgrade, or --dry-run" ;;
+        *)
+          [[ $COMMAND == reconcile ]] || die "inspect --saved reads the selection from the saved profile and takes only --full-upgrade"
+          die "reconcile reads the saved local profile and only accepts --yes, --full-upgrade, or --dry-run" ;;
+      esac
+      continue
+    fi
+    if [[ $COMMAND == inventory ]]; then
+      case $1 in
+        --tsv) INVENTORY_FORMAT=tsv; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "inventory takes only --tsv" ;;
       esac
       continue
     fi
@@ -139,33 +187,39 @@ parse_args() {
     --default-shell) require_value "$1" "${2:-}"; CHANGE_DEFAULT_SHELL=$2; shift 2 ;;
     --git-name) require_value "$1" "${2:-}"; GIT_NAME=$2; shift 2 ;;
     --git-email) require_value "$1" "${2:-}"; GIT_EMAIL=$2; shift 2 ;;
+    --brew-mirror) require_value "$1" "${2:-}"; BREW_MIRROR=$2; shift 2 ;;
+    --skip-existing-version-managers) SKIP_EXISTING_VERSION_MANAGERS=1; shift ;;
+    --node-version) require_value "$1" "${2:-}"; NODE_VERSION_APPROVED=$2; shift 2 ;;
     --full-upgrade) FULL_UPGRADE=1; shift ;;
     --no-full-upgrade) FULL_UPGRADE=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
-    --target|--ref|--steps|--repair|--plan|--allow-mutable-ref)
-      die "$1 belongs to the retired ref/target CLI; use the AI runbook with this local checkout" ;;
     --help|-h) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
     esac
   done
 }
 
+# csv_split <array-name> <csv>: split a comma-separated value into the named
+# array (empty for an empty value). Only this read sees IFS=,.
+csv_split() {
+  IFS=, read -r -a "$1" <<< "$2"
+}
+
 valid_csv() {
   local value=$1 allowed=$2 item seen=","
+  local -a items=()
   [[ -n $value ]] || return 1
   [[ $value != ,* && $value != *, && $value != *,,* ]] || return 1
-  local old_ifs=$IFS
-  IFS=,
-  for item in $value; do
-    [[ ",$allowed," == *",$item,"* ]] || { IFS=$old_ifs; return 1; }
+  csv_split items "$value"
+  for item in "${items[@]}"; do
+    [[ ",$allowed," == *",$item,"* ]] || return 1
     # Reject repeats: a duplicated group would otherwise double every package in
     # collect_selected_packages and change the step signature, so an equivalent
     # normalized run would be treated as never done and repeat the step.
-    [[ $seen != *",$item,"* ]] || { IFS=$old_ifs; return 1; }
+    [[ $seen != *",$item,"* ]] || return 1
     seen="$seen$item,"
   done
-  IFS=$old_ifs
 }
 
 has_csv_item() {
@@ -180,14 +234,13 @@ add_csv_item() {
 }
 
 order_selected_steps() {
-  local canonical="$CANONICAL_STEPS"
-  local step old_ifs=$IFS ordered=""
-  IFS=,
-  for step in $canonical; do
+  local step ordered=""
+  local -a steps=()
+  csv_split steps "$CANONICAL_STEPS"
+  for step in "${steps[@]}"; do
     has_csv_item "$SELECTED_STEPS" "$step" || continue
     ordered="${ordered:+$ordered,}$step"
   done
-  IFS=$old_ifs
   SELECTED_STEPS=$ordered
 }
 
@@ -200,6 +253,8 @@ validate_options() {
   [[ $GPG_PASSPHRASE_MODE == empty || $GPG_PASSPHRASE_MODE == prompt ]] || die "Invalid --gpg-passphrase value"
   [[ $INSTALL_FONTS == auto || $INSTALL_FONTS == yes || $INSTALL_FONTS == no ]] || die "Invalid --fonts value"
   [[ $CHANGE_DEFAULT_SHELL == auto || $CHANGE_DEFAULT_SHELL == yes || $CHANGE_DEFAULT_SHELL == no ]] || die "Invalid --default-shell value"
+  [[ -z $BREW_MIRROR || $BREW_MIRROR == china || $BREW_MIRROR == none ]] || die "Invalid --brew-mirror value"
+  [[ -z $NODE_VERSION_APPROVED ]] || node_version_ok "$NODE_VERSION_APPROVED" || die "--node-version must look like v24.11.1"
   [[ $SSH_MODE != reuse || -n $SSH_KEY_PATH ]] || die "--ssh reuse requires --ssh-key <private-key-path>"
   [[ $GPG_MODE != reuse || -n $GPG_KEY_ID ]] || die "--gpg reuse requires --gpg-key <fingerprint>"
   [[ $INSTALL_FONTS != yes || -n $FONT_NAME ]] || die "--fonts yes requires --font <name>"
@@ -233,7 +288,6 @@ run() {
   printf '%q ' "$@"
   printf '\n'
   [[ $DRY_RUN -eq 0 ]] || return 0
-  if [[ $EUID -eq 0 && ${1:-} == sudo ]]; then shift; fi
   "$@"
 }
 
@@ -263,13 +317,10 @@ detect_os() {
 
 sha256() { hash_text < "$1"; }
 
-# Octal mode of a file, spelling around BSD vs GNU stat.
+# Octal mode of a file, with GNU stat or else BSD stat (not keyed on the OS:
+# remove-blocks also runs on hosts detect_os does not know).
 file_mode() {
-  if [[ $(uname -s) == Darwin ]]; then
-    /usr/bin/stat -f '%Lp' "$1"
-  else
-    stat -c '%a' "$1"
-  fi
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 hash_text() {
@@ -327,8 +378,15 @@ source "$SCRIPT_DIR/installer/verification.sh"
 # shellcheck source=installer/signatures.sh
 source "$SCRIPT_DIR/installer/signatures.sh"
 
+# shellcheck source=installer/plan.sh
+source "$SCRIPT_DIR/installer/plan.sh"
+
 run_step() {
   local step=$1 force_rerun=0
+  if component_skipped_for_existing "$step"; then
+    say "Skipping $step: keeping the existing installation (--skip-existing-version-managers)"
+    return 0
+  fi
   # A full host upgrade always re-runs the packages step; it deliberately skips
   # the state/verify short-circuit rather than failing verification.
   [[ $step == packages && $FULL_UPGRADE -eq 1 ]] && force_rerun=1
@@ -344,16 +402,44 @@ run_step() {
   say "Running $step"
   local handler
   handler=$(component_handler "$step" install)
+  STEP_AWAITS_MANUAL_ACTION=0
   "$handler"
+  if [[ $STEP_AWAITS_MANUAL_ACTION -eq 1 ]]; then
+    say "$step waits for the manual action above; it is not recorded as complete"
+    STEP_AWAITS_MANUAL_ACTION=0
+    return 0
+  fi
   [[ $DRY_RUN -eq 1 ]] || verify_step "$step" || die "$step did not pass post-install verification"
   mark_done "$step"
 }
 
+# One `artifact direct` record per registry artifact a selected component owns.
+inspect_artifacts() {
+  local step name url digest asset
+  local -a steps=()
+  csv_split steps "$SELECTED_STEPS"
+  for step in ${steps[@]+"${steps[@]}"}; do
+    while IFS= read -r name; do
+      if ! asset=$(artifact_asset "$name"); then
+        printf 'warning\tno-locked-artifact\t%s has no locked build for %s on %s; the %s component cannot be installed here\n' \
+          "$name" "$OS_FAMILY" "$(uname -m)" "$step"
+        continue
+      fi
+      IFS=$'\t' read -r url digest <<< "$asset"
+      printf 'artifact\tdirect\t%s\t%s\t%s\n' "$name" "$url" "$digest"
+    done < <(component_handler "$step" artifacts)
+  done
+}
+
 inspect_tsv() {
-  local step group package status origin asset url digest
+  local step group package status origin message
   printf 'meta\tschema\t1\n'
   printf 'platform\tfamily\t%s\n' "$OS_FAMILY"
+  if message=$(platform_support_problem); then
+    printf 'warning\tunsupported-platform\t%s\n' "$message"
+  fi
   printf 'profile\troot\t%s\n' "$TARGET"
+  if [[ $SAVED_SELECTION -eq 1 ]]; then printf 'policy\tselection\tsaved\n'; fi
   printf 'policy\tfull-upgrade\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf yes || printf no)"
   printf 'channel\tpackages\t%s\n' "$PACKAGE_CHANNEL"
   printf 'channel\tnode\t%s\n' "$NODE_CHANNEL"
@@ -362,22 +448,19 @@ inspect_tsv() {
   report_legacy_loaders
   printf 'channel\tai-cli-updates\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
   printf 'group\tinternal\tbootstrap\tselected\n'
-  local canonical="$CANONICAL_STEPS"
-  local old_ifs=$IFS
-  IFS=,
-  for step in $canonical; do
+  local -a items=()
+  csv_split items "$CANONICAL_STEPS"
+  for step in "${items[@]}"; do
     has_csv_item "$SELECTED_STEPS" "$step" || continue
     if has_csv_item "$REQUESTED_STEPS" "$step"; then origin=selected; else origin=implied; fi
     printf 'group\tcomponent\t%s\t%s\n' "$step" "$origin"
   done
-  # IFS is still "," from the step loop above, so the CSV splits directly. Do not
-  # rewrite this as a space-separated list: the global IFS has no space in it.
-  for group in $CANONICAL_GROUPS; do
+  csv_split items "$CANONICAL_GROUPS"
+  for group in "${items[@]}"; do
     has_csv_item "$SELECTED_GROUPS" "$group" || continue
     if has_csv_item "$REQUESTED_GROUPS" "$group"; then origin=selected; else origin=implied; fi
     printf 'group\tpackage\t%s\t%s\n' "$group" "$origin"
   done
-  IFS=$old_ifs
   printf 'group\tcredential\tssh\t%s\n' "$SSH_MODE"
   printf 'group\tcredential\tgpg\t%s\n' "$GPG_MODE"
   collect_selected_packages
@@ -385,13 +468,19 @@ inspect_tsv() {
     for package in "${SELECTED_PACKAGES[@]}"; do printf 'package\t%s\t%s\n' "$OS_FAMILY" "$package"; done
   fi
   printf 'action\tbootstrap\tensure git,curl,ca-certificates,archive tools\n'
+  if [[ $OS_FAMILY == macos && $(brew_mirror_effective) == china ]]; then
+    printf 'external\thomebrew-mirror\t%s\n' "$BREW_CHINA_GIT_REMOTE"
+  fi
+  if [[ $OS_FAMILY == macos && -n $BREW_MIRROR ]]; then
+    printf 'file\tbrew-mirror-flag\t%s\n' "$LOCAL_DIR/flags/brew-china"
+  fi
   if [[ $OS_FAMILY == macos ]] && ! command -v brew >/dev/null 2>&1; then
     printf 'artifact\tdirect\thomebrew-bootstrap\t%s\t%s\n' "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256"
   fi
   if has_csv_item "$SELECTED_STEPS" packages; then
     printf 'action\tpackages\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf 'full host upgrade and selected package installation' || printf 'install missing selected packages without full host upgrade')"
     if [[ $FULL_UPGRADE -eq 1 ]]; then printf 'irreversible\thost-upgrade\tin-release package-manager upgrades (never an OS release upgrade) are not automatically reversible\n'; fi
-    if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" network; then
+    if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
       printf 'action\trepository\tHomebrew heroku/brew tap\n'
     fi
     if [[ $OS_FAMILY == fedora ]] && has_csv_item "$SELECTED_GROUPS" media; then
@@ -420,55 +509,85 @@ inspect_tsv() {
   if [[ $SSH_MODE != skip ]]; then printf 'file\tssh-reference\t%s\n' "${SSH_KEY_PATH:-generated path under ~/.ssh}"; fi
   if [[ $GPG_MODE != skip ]]; then printf 'global\tgit\tuser.signingkey,gpg.format,commit.gpgsign\n'; fi
   if has_csv_item "$SELECTED_STEPS" default-shell && [[ $CHANGE_DEFAULT_SHELL != no ]]; then printf 'irreversible\tlogin-shell\tchsh may require a new login\n'; fi
-  if has_csv_item "$SELECTED_STEPS" bins; then printf 'artifact\tdirect\trpatool\t%s\t%s\n' "$RPATOOL_URL" "$RPATOOL_SHA256"; fi
+  inspect_artifacts
   if has_csv_item "$SELECTED_STEPS" pyenv; then printf 'artifact\tgit\tpyenv\t%s\t%s\n' "$PYENV_REPOSITORY" "$PYENV_COMMIT"; fi
   if has_csv_item "$SELECTED_STEPS" rbenv; then
     printf 'artifact\tgit\trbenv\t%s\t%s\n' "$RBENV_REPOSITORY" "$RBENV_COMMIT"
     printf 'artifact\tgit\truby-build\t%s\t%s\n' "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT"
   fi
-  if has_csv_item "$SELECTED_STEPS" bun; then
-    asset=$(platform_asset bun); IFS=$'\t' read -r url digest <<< "$asset"
-    printf 'artifact\tdirect\tbun\t%s\t%s\n' "$url" "$digest"
-  fi
   if has_csv_item "$SELECTED_STEPS" yarn; then printf 'artifact\tdirect\tyarn\t%s\t%s\n' "$YARN_URL" "$YARN_SHA256"; fi
   if has_csv_item "$SELECTED_STEPS" pnpm; then printf 'artifact\tdirect\tpnpm\t%s\t%s\n' "$PNPM_URL" "$PNPM_SHA256"; fi
   if has_csv_item "$SELECTED_STEPS" fnm; then
-    asset=$(platform_asset fnm); IFS=$'\t' read -r url digest <<< "$asset"
-    printf 'artifact\tdirect\tfnm\t%s\t%s\n' "$url" "$digest"
-    printf 'external\tnode-lts-index\thttps://nodejs.org/dist/index.tab\n'
+    printf 'external\tnode-lts-index\t%s\n' "$(node_dist_index_url)"
   fi
   if has_csv_item "$SELECTED_STEPS" plugins; then
-    asset=$(platform_asset starship); IFS=$'\t' read -r url digest <<< "$asset"
-    printf 'artifact\tdirect\tstarship\t%s\t%s\n' "$url" "$digest"
     printf 'artifact\tgit\tzsh-autosuggestions\t%s\t%s\n' "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT"
     printf 'artifact\tgit\tzsh-syntax-highlighting\t%s\t%s\n' "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT"
     printf 'artifact\tgit\tzsh-completions\t%s\t%s\n' "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT"
     printf 'artifact\tgit\tfzf-tab\t%s\t%s\n' "$FZF_TAB_REPOSITORY" "$FZF_TAB_COMMIT"
   fi
   if has_csv_item "$SELECTED_STEPS" fonts && font_should_install; then
-    printf 'artifact\tgit\tnerd-fonts\t%s\t%s\n' "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT"
+    # The archive's digest comes from the pinned checksum list at apply time.
+    printf 'artifact\tdirect\tnerd-fonts-checksums\t%s\t%s\n' "$NERD_FONTS_RELEASE_URL/SHA-256.txt" "$NERD_FONTS_CHECKSUMS_SHA256"
+    printf 'artifact\tdirect\tnerd-font\t%s\t%s\n' "$NERD_FONTS_RELEASE_URL/${FONT_NAME:-JetBrainsMono}.tar.xz" SHA-256.txt
+    printf 'file\tfonts\t%s\n' "$(nerd_font_directory)"
   fi
   if has_csv_item "$SELECTED_STEPS" fnm; then
     if resolve_node_version; then
       printf 'runtime\tnode\t%s\t%s\n' "$RESOLVED_NODE_VERSION" "$NODE_SELECTION"
+      if [[ -n $NODE_VERSION_APPROVED && $NODE_VERSION_APPROVED != "$RESOLVED_NODE_VERSION" ]]; then
+        printf 'warning\tnode-version\tthe plan now resolves Node %s, not the given %s; apply --node-version %s would stop\n' \
+          "$RESOLVED_NODE_VERSION" "$NODE_VERSION_APPROVED" "$NODE_VERSION_APPROVED"
+      fi
     else printf 'runtime\tnode\tunresolved\tresolve-during-apply\n'; fi
   fi
-  old_ifs=$IFS
-  IFS=,
-  for step in $SELECTED_STEPS; do
-    if verify_step "$step"; then status=verified; else status=needed; fi
+  while IFS=$'\t' read -r step message; do
+    printf 'privileged\t%s\t%s\n' "$step" "$message"
+  done < <(privileged_plan)
+  report_behaviour
+  report_conflicts
+  report_existing_setups
+  report_shadowed_artifacts
+  csv_split items "$SELECTED_STEPS"
+  for step in ${items[@]+"${items[@]}"}; do
+    if component_skipped_for_existing "$step"; then status=skipped
+    elif verify_step "$step"; then status=verified
+    else status=needed; fi
     printf 'postcondition\t%s\t%s\n' "$step" "$status"
   done
-  IFS=$old_ifs
+}
+
+# After a successful run: what the user still has to do in the terminal
+# itself (MI-10).
+print_terminal_font_hint() {
+  has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" fonts || return 0
+  if has_csv_item "$SELECTED_STEPS" fonts && font_should_install && font_is_installed; then
+    say "Set your terminal's font to \"$(nerd_font_family) Nerd Font\" (or its Mono variant) so the prompt's icons render, or set LEOS_PLAIN_PROMPT=1 in local/private.zsh for the plain prompt."
+  elif has_csv_item "$SELECTED_STEPS" plugins; then
+    say "The themed prompt needs a Nerd Font in the terminal you use; without one, set LEOS_PLAIN_PROMPT=1 in local/private.zsh for the plain prompt."
+  fi
 }
 
 main() {
   validate_component_registry
+  INVOCATION=$(printf '%q ' bash "$SCRIPT_DIR/install.sh" "$@")
+  INVOCATION=${INVOCATION% }
   parse_args "$@"
   trap cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
-  if [[ $COMMAND == reconcile ]]; then
+  # These two only read, or remove the profile's own blocks: they work on any
+  # host, supported or not (ONB-13).
+  if [[ $COMMAND == remove-blocks ]]; then
+    remove_managed_blocks
+    return 0
+  fi
+  if [[ $COMMAND == inventory ]]; then
+    if [[ $(uname -s) == Darwin ]]; then OS_FAMILY=macos; else OS_FAMILY=linux; fi
+    inventory
+    return 0
+  fi
+  if [[ $COMMAND == reconcile || $SAVED_SELECTION -eq 1 ]]; then
     read_profile
   fi
   REQUESTED_STEPS=$SELECTED_STEPS
@@ -477,18 +596,25 @@ main() {
   normalise_dependencies
   order_selected_steps
   detect_os
+  if [[ $OS_FAMILY != macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
+    die "The heroku package group is macOS-only (Heroku's Homebrew tap); remove it from --package-groups"
+  fi
+  if [[ $OS_FAMILY != macos && $BREW_MIRROR == china ]]; then
+    die "--brew-mirror china applies to Homebrew on macOS only"
+  fi
   if [[ $COMMAND == inspect ]]; then
     inspect_tsv
     return 0
   fi
-  # Touches only the managed blocks, so it needs neither --yes nor the lock.
-  if [[ $COMMAND == remove-blocks ]]; then
-    remove_managed_blocks
-    return 0
-  fi
   [[ $ASSUME_YES -eq 1 ]] || die "Apply/reconcile requires --yes after the AI-presented plan is approved"
+  local support_problem
+  if support_problem=$(platform_support_problem); then
+    warn "Unsupported platform. $support_problem Continuing as asked; expect long source builds or failures."
+  fi
   # Capture the existing runtime before any bootstrap/package changes.
   if has_csv_item "$SELECTED_STEPS" fnm; then select_existing_node || true; fi
+  # Everything the run needs from the user, checked before the first change.
+  preflight
   acquire_lock
   report_profile_migration
   migrate_local_state
@@ -496,24 +622,31 @@ main() {
     if [[ $FULL_UPGRADE -eq 1 ]]; then SAVED_FULL_UPGRADE=yes; else SAVED_FULL_UPGRADE=no; fi
     write_profile
   fi
+  apply_brew_mirror
   bootstrap_tools
   if has_csv_item "$SELECTED_STEPS" fnm && [[ $DRY_RUN -eq 0 ]]; then
     resolve_node_version || die "Could not select a compatible Node version or resolve current LTS"
     say "Selected Node $RESOLVED_NODE_VERSION ($NODE_SELECTION)"
   fi
+  write_profile
+  local step
+  local -a steps=()
+  csv_split steps "$SELECTED_STEPS"
+  for step in ${steps[@]+"${steps[@]}"}; do
+    run_step "$step"
+  done
+  if has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" zsh-config; then
+    compile_zsh_sources
+  fi
+  # Credentials come last: no component uses them, and their first run always
+  # pauses for a manual GitHub registration (exit 3), which must not hold back
+  # the components (ONB-4). A pause also prints the actions queued above.
   install_credential_prerequisites
   provision_ssh
   provision_gpg
   write_profile
-  local step old_ifs=$IFS
-  IFS=,
-  for step in $SELECTED_STEPS; do
-    run_step "$step"
-  done
-  IFS=$old_ifs
-  if has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" zsh-config; then
-    compile_zsh_sources
-  fi
+  print_terminal_font_hint
+  finish_manual_actions
   if [[ $COMMAND == reconcile ]]; then
     say "Profile reconciliation complete. Restart the terminal; default-shell changes apply at next login."
   else

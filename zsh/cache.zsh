@@ -83,13 +83,14 @@ __leos_cache_safe_file() {
 
 # Full validation; __leos_cache_dir below memoizes its result per shell.
 # Create only inside already-validated ancestors, with private permissions.
-# REPLY receives the directory. Owned legacy cache directories are migrated
-# after their parents are validated; unrelated or unsafe storage is untouched.
+# REPLY receives the directory. Entries an earlier version named by digest are
+# removed from it; unrelated or unsafe storage is untouched.
 __leos_cache_dir_validate() {
   emulate -L zsh
   setopt extended_glob
   zmodload -F zsh/stat b:zstat || return 1
   local root=${XDG_CACHE_HOME:-$HOME/.cache} item ancestor insecure=0
+  local dir=$root/leos-profiles/init
   local -a missing
   local -A info
   typeset -g __leos_cache_unsafe=
@@ -128,14 +129,15 @@ __leos_cache_dir_validate() {
     # Other accounts could have changed even owner-only files while their
     # containing directory was writable. Discard all executable cache bodies
     # and negative/rehash markers only AFTER both directories are private.
-    local -a stale=("$item"/*.zsh(N) "$item"/*.zwc(N) "$item"/*.failed(N) "$item"/*-rehash(N))
+    local -a stale=("$dir"/*.zsh(N) "$dir"/*.zwc(N) "$dir"/*.failed(N) "$dir"/*-rehash(N))
     (( ! $#stale )) || rm -f -- "${stale[@]}" 2>/dev/null || return 1
   fi
   # Earlier versions named entries by the SHA-256 of their identity. Nothing
-  # looks those names up any more: remove them (regular files only).
-  local -a legacy=("$item"/[0-9a-f](#c64).(zsh|zsh.zwc|failed)(N.))
+  # looks those names up any more: remove them (regular files only). Remove
+  # this sweep after 2027-04.
+  local -a legacy=("$dir"/[0-9a-f](#c64).(zsh|zsh.zwc|failed)(N.))
   (( ! $#legacy )) || rm -f -- "${legacy[@]}" 2>/dev/null
-  REPLY=$item
+  REPLY=$dir
 }
 
 # __leos_cache_dir_sig <path...>

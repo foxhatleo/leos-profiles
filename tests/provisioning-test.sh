@@ -142,4 +142,43 @@ rm -- "$HOME/.local/bin/bun"
 bash "$PROFILE/install.sh" reconcile --yes | tee "$FIXTURE/repair.log"
 grep -Fq 'Running bun' "$FIXTURE/repair.log" || fail 'reconcile did not repair bun'
 [[ $("$HOME/.local/bin/bun" --version) == "$BUN_VERSION" ]] || fail 'repaired bun version differs'
+
+printf '%s\n' '=== Reconcile must repair Starship, a managed block, a plugin checkout and the font ==='
+if [[ $(uname -s) == Darwin ]]; then
+  FONT_DIR="$HOME/Library/Fonts/NerdFonts"
+else
+  FONT_DIR="$XDG_DATA_HOME/fonts/NerdFonts"
+fi
+PLUGIN="$PROFILE/zsh/plugins/zsh-autosuggestions"
+rm -- "$HOME/.local/bin/starship"
+awk '$0 == "# >>> leos-profiles environment >>>" { skip = 1; next }
+     $0 == "# <<< leos-profiles environment <<<" { skip = 0; next }
+     !skip { print }' "$HOME/.zshenv" > "$FIXTURE/zshenv" && cat "$FIXTURE/zshenv" > "$HOME/.zshenv"
+! grep -q 'leos-profiles environment' "$HOME/.zshenv" || fail 'could not remove the .zshenv block'
+# A drifted checkout (another commit, clean) is repaired; a dirty one is
+# refused, so local edits are never thrown away (checked below).
+git -C "$PLUGIN" checkout --quiet --detach HEAD~1
+# Every file of the family: verification only needs one of them.
+find "$FONT_DIR" -type f -name 'JetBrainsMono*' -delete
+[[ -z $(find "$FONT_DIR" -type f -name 'JetBrainsMono*') ]] || fail 'could not remove the font files'
+bash "$PROFILE/install.sh" reconcile --yes | tee "$FIXTURE/repair-more.log"
+for step in plugins zsh-config fonts; do
+  grep -Fq "Running $step" "$FIXTURE/repair-more.log" || fail "reconcile did not repair $step"
+done
+[[ $("$HOME/.local/bin/starship" --version | sed -n '1p') == "starship $STARSHIP_VERSION" ]] ||
+  fail 'repaired starship version differs'
+grep -qxF '# >>> leos-profiles environment >>>' "$HOME/.zshenv" || fail 'the .zshenv block was not restored'
+[[ $(git -C "$PLUGIN" rev-parse HEAD) == "$ZSH_AUTOSUGGESTIONS_COMMIT" ]] || fail 'the plugin checkout was not restored'
+[[ -n $(find "$FONT_DIR" -type f -name 'JetBrainsMonoNerdFont-*') ]] || fail 'the font was not reinstalled'
+
+printf '%s\n' '=== Reconcile must refuse, not discard, a locally edited plugin ==='
+printf '\n# local edit\n' >> "$PLUGIN/zsh-autosuggestions.zsh"
+rm -- "$HOME/.local/bin/starship"
+if bash "$PROFILE/install.sh" reconcile --yes > "$FIXTURE/dirty.log" 2>&1; then
+  fail 'reconcile accepted a dirty plugin checkout'
+fi
+grep -Fq 'checkout has local changes' "$FIXTURE/dirty.log" || fail "dirty plugin refusal not explained: $(cat "$FIXTURE/dirty.log")"
+git -C "$PLUGIN" checkout --quiet -- .
+bash "$PROFILE/install.sh" reconcile --yes > "$FIXTURE/clean-again.log"
+[[ -x $HOME/.local/bin/starship ]] || fail 'reconcile after restoring the plugin did not repair starship'
 printf 'real provisioning (%s/%s): PASS\n' "$(uname -s)" "$(uname -m)"

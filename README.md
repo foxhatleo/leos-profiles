@@ -10,7 +10,7 @@ Recommended is intentionally broad. A first installation installs the full
 default workstation selection and performs a full package-manager/host upgrade.
 It can write shell configuration, install packages and tools, prepare credentials
 for manual GitHub registration, and change the login shell. Optional rpatool
-(`bins`) is excluded;
+(`bins`) and the opt-in `python` and `heroku` package groups are excluded;
 SSH and GPG default to Skip; fonts and the Zsh default-shell policy are Auto.
 
 ## Start here
@@ -38,9 +38,9 @@ The dotfile surface here is deliberately tiny — two managed blocks (three on
 macOS) plus a `STARSHIP_CONFIG` pointer — so templating and symlink-farm tools solve very
 little of the actual problem. What `install.sh` mostly does is *machine
 provisioning*: OS packages across four distribution families, SHA-256-pinned
-bun/fnm/starship/yarn/pnpm artifacts, commit-pinned pyenv/rbenv/plugin clones,
-local SSH/GPG preparation and read-only GitHub verification, a sparse Nerd Fonts checkout,
-and `chsh`. chezmoi covers that only through `run_once_` escape hatches, which
+bun/fnm/starship/uv/yarn/pnpm artifacts, commit-pinned pyenv/rbenv/plugin clones,
+local SSH/GPG preparation and read-only GitHub verification, a verified Nerd
+Fonts release archive, and `chsh`. chezmoi covers that only through `run_once_` escape hatches, which
 would leave the same amount of shell to maintain plus a second tool to learn.
 
 The engine also exists to serve the AI-first flow: `inspect` emits typed TSV for
@@ -55,20 +55,29 @@ surface ever grows beyond a couple of managed blocks, revisit this.
 ## Selection model
 
 Component groups are `bins`, `packages`, `pyenv`, `rbenv`, `bun`, `yarn`,
-`pnpm`, `fnm`, `plugins`, `fonts`, `zsh-config`, and `default-shell`. Package
-groups are `core-utils`, `shell`, `dev-tools`, `languages`, `media`, `network`,
-and `system`. Internal `bootstrap`, `ssh`, and `gpg` groups make the remaining
-mutations visible in the approved plan.
+`pnpm`, `fnm`, `uv`, `plugins`, `fonts`, `zsh-config`, and `default-shell`.
+Package groups are `core-utils`, `shell`, `dev-tools`, `languages`, `python`,
+`media`, `network`, `heroku`, and `system`. Internal `bootstrap`, `ssh`, and
+`gpg` groups make the remaining mutations visible in the approved plan.
 
-Groups are atomic: selecting one selects every member. rpatool, Bun, fnm, Yarn,
-and pnpm imply the full `languages` package group. Yarn and pnpm also imply
-fnm, which runs before their installation; pyenv/rbenv imply `dev-tools`;
-plugins, Zsh configuration, and default-shell setup imply `shell`. The AI shows
-all selected and implied groups plus exact OS package membership before asking
-for approval.
+Groups are atomic: selecting one selects every member. A component implies a
+package group only when it needs its members: rpatool (`bins`) implies the
+small `python` group (python3 alone); pyenv/rbenv imply `dev-tools`, which
+carries every build dependency ruby-build suggests for Ruby 3 (OpenSSL,
+readline, zlib, libyaml, libffi) besides the GitHub CLI and jq; plugins, Zsh
+configuration, and default-shell setup imply `shell`. Bun, fnm, Yarn, pnpm and
+uv imply no OS runtimes: they are self-contained, and Yarn/pnpm run on fnm's
+Node, so selecting them never installs a system Node, Python or Ruby that
+non-interactive shells would then pick up. Yarn and pnpm imply fnm, which runs
+before their installation. The AI shows all selected and implied groups plus
+exact OS package membership before asking for approval.
 
-Recommended selects all current default component and package groups except
-`bins`. Customize allows whole-group selection. The initial package pass keeps
+`languages` (system node, python and ruby) stays its own group. `heroku` is
+macOS-only and opt-in: the Heroku CLI comes from Heroku's third-party Homebrew
+tap, which is added (and shown in the plan) only when this group is selected.
+
+Recommended selects every component except `bins`, and every package group
+except `python` and `heroku`. Customize allows whole-group selection. The initial package pass keeps
 the broad full-upgrade default, but the AI offers a no-full-upgrade choice.
 With `--no-full-upgrade`, only missing selected packages are requested from the
 package manager. Dependency resolution can still install or upgrade dependencies;
@@ -109,6 +118,37 @@ cleanup traps, atomic profile/state/config writes, and first-write managed-block
 backups. A saved state row is only a resume hint: postconditions are checked,
 so missing or corrupt tools are repaired.
 
+### What a plan discloses, and what apply checks first
+
+Besides the selection, packages, artifacts and files, `inspect` reports every
+action that runs as root (`privileged`: package-manager runs, Arch's
+`pacman -Syu`, Fedora's ffmpeg swap, the `/etc/shells` edit, macOS
+`sudo chsh`), side effects (`behaviour`: Debian's fd/bat links, GNU tools ahead
+of BSD on macOS, global Git identity writes, the Homebrew mirror), effects that
+cannot be undone automatically (`irreversible`), existing installations in the
+way (`conflict`), shell setups the profile coexists with (`existing`), Homebrew
+copies the pinned tools will shadow (`shadow`), and `warning`s such as an
+unsupported Mac. `docs/development.md` lists every record type.
+
+Before its first change, apply (and reconcile) checks what the run needs from
+you. Run without a terminal (as an AI agent does), a plan that needs a sudo
+password, a passphrase prompt or chsh's password prompt stops at once with a
+`manual-action run-in-terminal` record that carries the exact command, exit
+status 3, having changed nothing: run that command in your own terminal. With
+passwordless sudo it proceeds. In a terminal, sudo asks once, up front. A
+mistyped Nerd Font name is rejected at this point too, and an existing
+`~/.pyenv` or `~/.rbenv` that is not the pinned Git checkout (for example
+Homebrew's pyenv root) stops the run unless `--skip-existing-version-managers`
+keeps it and skips that component; reconcile remembers the choice.
+
+Pass the Node version `inspect` resolved with `--node-version vX.Y.Z`: apply
+then installs exactly that one and stops with status 2 if it would now choose
+another (a new LTS since the plan was approved). `inspect --saved` inspects
+the saved profile's selection, as reconcile would run it, without writing
+anything. Components install before credentials, so a first SSH or GPG
+registration pause no longer holds back the rest; every manual action is
+listed at the end, and the run exits 3.
+
 ## Installed channels and credentials
 
 Direct tool archives and managed plugin/dependency checkouts are locked to
@@ -116,6 +156,26 @@ reviewed URLs, commits, and SHA-256 digests. Equivalent GitHub HTTPS/SSH origins
 are accepted and normalized; dirty installer-managed dependency checkouts are
 refused. This locked-direct-artifact promise intentionally excludes OS package
 manager channels and Node.
+
+uv and uvx install as one locked artifact into `~/.local/bin` (the static musl
+builds on Linux, as for Starship), with their completions cached like the
+other tools'. Nerd Fonts come from one font's archive in the pinned release,
+checked against that release's `SHA-256.txt`, whose own digest is pinned; an
+unknown font name is refused before anything is downloaded. Fonts go to
+`~/Library/Fonts/NerdFonts` on macOS and
+`${XDG_DATA_HOME:-~/.local/share}/fonts/NerdFonts` on Linux (then `fc-cache`).
+After the run, set your terminal's font to that Nerd Font, or set
+`LEOS_PLAIN_PROMPT=1` in `local/private.zsh` for the plain prompt. Under WSL
+the terminal is a Windows program: install the font on Windows too (the run
+ends with an `install-windows-font` manual action saying so).
+
+Behind a proxy or a slow route: the proxy variables (`http_proxy`,
+`https_proxy`, `no_proxy`, `ALL_PROXY` and their uppercase forms) are kept
+through sudo; `FNM_NODE_DIST_MIRROR` (an https URL) serves the Node LTS lookup
+as well as fnm's downloads; and on macOS `--brew-mirror china` uses the USTC
+Homebrew mirror (Homebrew's own code, metadata and bottles) for the run,
+including a Homebrew bootstrap, and for later shells, exactly like
+`brew-china-enable`. `--brew-mirror none` turns it off again.
 
 Node uses the saved `preserve-compatible` policy. The installer first preserves
 a compatible fnm default; otherwise it adopts the exact version of a compatible
@@ -151,6 +211,35 @@ The independent `tag.gpgsign` preference is preserved. Reconciliation never
 generates credentials. If an initial run paused before another requested key
 was generated, resume the originally approved apply choices while reusing keys
 already created; do not expect reconciliation to create the pending key.
+
+## Existing setups
+
+The installer appends its loader to your `.zshrc`; it never rewrites the rest.
+`inspect` lists what it found (`existing` records). How each coexists:
+
+- **oh-my-zsh**: its loader runs first, then the profile, so `compinit` runs
+  twice and the profile's Starship prompt replaces the oh-my-zsh theme. Set
+  `ZSH_THEME=""` and drop plugins the profile already provides
+  (autosuggestions, syntax highlighting), or remove the oh-my-zsh lines.
+- **powerlevel10k**: Starship sets the prompt after it. Keep one: remove the
+  p10k source line and its instant-prompt block, or skip the `plugins`
+  component and keep p10k.
+- **nvm**: fnm's default Node comes first in new shells; `nvm use` still
+  switches. Remove nvm's loader to save its startup time once fnm has your
+  versions (the installer adopts a compatible existing Node into fnm).
+- **conda**: at startup pyenv's shims come first, even ahead of the base
+  environment `conda init` activates; `conda activate` then puts that
+  environment's python ahead of them, as intended.
+- **asdf / mise**: their shims and fnm/pyenv/rbenv's all provide node, python
+  and ruby, and whichever activates last wins. Use one manager per language,
+  or skip the overlapping components (`fnm`, `pyenv`, `rbenv`).
+- **Homebrew copies of fnm, bun, Starship or uv**: the pinned copies in
+  `~/.local/bin` come first (`shadow` records), so `brew upgrade` of those no
+  longer changes what your shell runs; uninstall the Homebrew copies or keep
+  them for other users.
+- **Homebrew pyenv/rbenv**: reported as `conflict … homebrew-install`. The
+  profile uses the pinned `~/.pyenv`/`~/.rbenv` when present and otherwise the
+  one on PATH; `--skip-existing-version-managers` keeps Homebrew's alone.
 
 ## Zsh runtime
 
@@ -205,7 +294,7 @@ kept another user's HOME (`sudo -s`) does not load the profile at all, so it
 cannot leave root-owned files in that HOME.
 
 Deterministic initialization scripts for pyenv/rbenv, direnv, zoxide, fzf,
-Starship, and npm/pnpm/Bun completions are cached under
+Starship, and npm/pnpm/Bun/uv/uvx completions are cached under
 `${XDG_CACHE_HOME:-~/.cache}/leos-profiles/init`. Each entry's first line
 records its full identity: the key, the resolved binary path, the arguments,
 HOME, and the version-manager roots, each field quoted so no value can fake a
@@ -337,15 +426,25 @@ unset gcloud_completion
 
 ## Updating and maintenance
 
-`upgrade-leos-profiles [--full-upgrade]` requires a branch with an upstream and
-refuses tracked or non-ignored untracked checkout changes (`local/` remains
-intentionally ignored). It fast-forwards from
-that configured upstream—official or otherwise—then launches the newly pulled
-`install.sh reconcile`. By default it installs missing selected packages and
-repairs locked tools, plugins, configuration, fonts, and the selected Node runtime without a full host upgrade.
-It checks saved credential references and pauses for any required manual
-registration or configuration. `--full-upgrade` opts into
-the saved broad package-manager upgrade behavior.
+`upgrade-leos-profiles [--full-upgrade] [--yes] [--verify-signatures]` needs a
+saved setup (it says so before touching the checkout), a branch with an
+upstream, and no tracked or non-ignored untracked checkout changes (`local/`
+remains intentionally ignored). It fetches that configured upstream (official
+or otherwise), lists the incoming commits (`git log --oneline HEAD..@{u}`) and
+asks before fast-forwarding to them; without a terminal it requires `--yes`.
+The new commits then run, with sudo, as `install.sh reconcile`, so read the
+list. `--verify-signatures` fast-forwards only over commits with good
+signatures Git can check: set `gpg.ssh.allowedSignersFile` for SSH-signed
+commits, or have gpg and the signer's key. Reconcile installs missing selected
+packages and repairs locked tools, plugins, configuration, fonts, and the
+selected Node runtime without a full host upgrade. It checks saved credential
+references and pauses for any required manual registration or configuration.
+`--full-upgrade` opts into the saved broad package-manager upgrade behavior.
+
+`leos-doctor` checks the saved setup without changing anything: it runs
+`install.sh inspect --saved` and lists each component as ok, NEEDED or
+skipped, with any warnings, conflicts, pending migrations and shadowed tools,
+and says how to repair.
 
 A full upgrade—here and in `bye`'s package checkups—upgrades installed packages
 within the current OS release only (`apt-get upgrade`, `dnf upgrade`,
@@ -384,9 +483,11 @@ Python interpreter in isolated mode, but executes the script from this
 user-owned checkout. Trust changes to the checkout before running maintenance
 with sudo.
 
-`brew-china-enable` remains an explicitly confirmed USTC mirror option; its
-flag now lives under `local/flags/`. `brew-china-disable` restores the official
-Homebrew remote and environment.
+`brew-china-enable` remains an explicitly confirmed USTC mirror option (the
+installer's `--brew-mirror china` sets the same flag); the mirror serves
+Homebrew's own code (brew.git) as well as metadata and bottles. Its flag lives
+under `local/flags/`. `brew-china-disable` restores the official Homebrew
+remote and environment.
 
 ## Support and validation matrix
 
@@ -394,7 +495,9 @@ Homebrew remote and environment.
   [Tier 1 support](https://docs.brew.sh/Support-Tiers). macOS 14 and Intel
   Macs are unsupported: Homebrew no longer publishes bottles there for
   packages this setup installs (node, python, ruby), so installs fail or build
-  from source for hours.
+  from source for hours. `inspect` reports such a Mac with an
+  `unsupported-platform` warning and apply repeats it; there is no locked uv
+  for Intel Macs.
 - Ubuntu 22.04, 24.04, and 26.04 LTS on x86_64 and arm64, aligned with
   [Canonical's standard-support lifecycle](https://ubuntu.com/about/release-cycle).
 - Debian 12 and 13 on x86_64 and arm64, following Debian's
@@ -426,6 +529,13 @@ coverage. The weekly workflow repeats these checks. See the
 [`res/adblock-hosts`](./res/adblock-hosts) remains a vendored convenience list.
 It is not automatically applied or updated and its original provenance is not
 recorded; review it before use and keep a backup.
+
+`bash install.sh inventory` lists everything the installer creates or manages,
+with its path and whether it is present: the managed blocks and their
+backups, the `~/.local/bin` executables, the npm prefix, plugin checkouts,
+pyenv/rbenv roots, the font directory, the init cache, `local/` files and
+flags, and the global Git settings it may write (`--tsv` for typed records).
+It, and `remove-blocks`, also run on hosts the installer does not support.
 
 To stop loading the profile, run `bash install.sh remove-blocks` (add
 `--dry-run` to preview). It deletes only the managed blocks from `.zshrc`,

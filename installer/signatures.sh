@@ -2,17 +2,40 @@
 # Per-component signature material, dispatched through registry.sh.
 # shellcheck disable=SC2034
 
-signature_bins() {
-  local material="" asset
-  material+="|$RPATOOL_URL|$RPATOOL_SHA256"
-  printf '%s' "$material"
+# artifact_signature <name>: what a locked artifact contributes to its
+# component's signature: "|<version>|<url><TAB><sha256>", or "|<url>|<sha256>"
+# for a versionless single file.
+artifact_signature() {
+  local asset url sha
+  asset=$(platform_asset "$1")
+  if [[ -z $(artifact_version "$1") ]]; then
+    IFS=$'\t' read -r url sha <<< "$asset"
+    printf '|%s|%s' "$url" "$sha"
+  else
+    printf '|%s|%s' "$(artifact_version "$1")" "$asset"
+  fi
+}
+
+signature_bins() { artifact_signature rpatool; }
+
+# join_lines <items...>: the items separated by newlines, with no trailing
+# newline. Explicit, so a signature never depends on the caller's IFS, and
+# byte-identical to the signatures recorded while the installer ran with
+# IFS=$'\n\t' (whose "${array[*]}" joined with a newline).
+join_lines() {
+  (( $# )) || return 0
+  printf '%s' "$1"
+  shift
+  (( $# )) || return 0
+  printf '\n%s' "$@"
 }
 
 signature_packages() {
-  local material="" asset
   collect_selected_packages
-  material+="|$SELECTED_GROUPS|${SELECTED_PACKAGES[*]}"
-  printf '%s' "$material"
+  printf '|%s|' "$SELECTED_GROUPS"
+  # An empty selection (--package-groups none) must not trip `set -u` under
+  # Bash 3.2, which treats an empty array as unset (ONB-14).
+  join_lines ${SELECTED_PACKAGES[@]+"${SELECTED_PACKAGES[@]}"}
 }
 
 signature_pyenv() {
@@ -27,12 +50,9 @@ signature_rbenv() {
   printf '%s' "$material"
 }
 
-signature_bun() {
-  local material="" asset
-  asset=$(platform_asset bun)
-  material+="|$BUN_VERSION|$asset"
-  printf '%s' "$material"
-}
+signature_bun() { artifact_signature bun; }
+
+signature_uv() { artifact_signature uv; }
 
 signature_yarn() {
   local material="" asset
@@ -47,22 +67,19 @@ signature_pnpm() {
 }
 
 signature_fnm() {
-  local material="" asset
-  asset=$(platform_asset fnm)
-  material+="|$FNM_VERSION|$asset|$NODE_POLICY|${RESOLVED_NODE_VERSION:-unresolved}"
-  printf '%s' "$material"
+  artifact_signature fnm
+  printf '|%s|%s' "$NODE_POLICY" "${RESOLVED_NODE_VERSION:-unresolved}"
 }
 
 signature_plugins() {
-  local material="" asset
-  asset=$(platform_asset starship)
-  material+="|$TARGET|$STARSHIP_VERSION|$asset|$ZSH_AUTOSUGGESTIONS_COMMIT|$ZSH_SYNTAX_HIGHLIGHTING_COMMIT|$ZSH_COMPLETIONS_COMMIT|$FZF_TAB_COMMIT"
-  printf '%s' "$material"
+  printf '|%s' "$TARGET"
+  artifact_signature starship
+  printf '|%s|%s|%s|%s' "$ZSH_AUTOSUGGESTIONS_COMMIT" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT" "$ZSH_COMPLETIONS_COMMIT" "$FZF_TAB_COMMIT"
 }
 
 signature_fonts() {
   local material="" asset
-  material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_COMMIT"
+  material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_VERSION|$NERD_FONTS_CHECKSUMS_SHA256"
   printf '%s' "$material"
 }
 

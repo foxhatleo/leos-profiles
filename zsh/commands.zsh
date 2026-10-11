@@ -159,17 +159,43 @@ bye() {
   fi
 }
 
-# Fast-forward the configured profile upstream, then run the newly pulled
-# deterministic reconciler against the saved local profile.
+# Fetch the configured profile upstream, show what it would bring in, and
+# after confirmation fast-forward to it and run the newly pulled reconciler
+# against the saved local profile.
+#
+#   --full-upgrade        pass --full-upgrade to reconcile
+#   --yes                 apply without asking (required without a terminal)
+#   --verify-signatures   only fast-forward when every new commit carries a
+#                         good signature Git can verify: SSH signatures need
+#                         gpg.ssh.allowedSignersFile, GPG ones need gpg and
+#                         the signer's key in your keyring
 upgrade-leos-profiles() {
-  local branch upstream
-  local -a reconcile_args
+  local branch upstream incoming answer arg yes=0 verify=0
+  local -a reconcile_args merge_args
   reconcile_args=(reconcile --yes)
-  if (( $# > 1 )) || [[ $# == 1 && $1 != --full-upgrade ]]; then
-    puts-err "Usage: upgrade-leos-profiles [--full-upgrade]"
-    return 2
+  merge_args=(merge --ff-only)
+  for arg in "$@"; do
+    case $arg in
+      --full-upgrade) reconcile_args+=(--full-upgrade) ;;
+      --yes) yes=1 ;;
+      --verify-signatures) verify=1 ;;
+      *) puts-err "Usage: upgrade-leos-profiles [--full-upgrade] [--yes] [--verify-signatures]"; return 2 ;;
+    esac
+  done
+  # Without a saved setup there is nothing to reconcile: say so before
+  # changing the checkout, not after (MI-12).
+  if [[ ! -f $LEOS_PROFILES/local/install-profile.tsv ]]; then
+    puts-err "No saved setup in $LEOS_PROFILES/local/install-profile.tsv, so there is nothing to reconcile. Set up first (QUICK-INSTALL.md, or bash $LEOS_PROFILES/install.sh apply --yes); to update only the checkout, use git -C $LEOS_PROFILES pull --ff-only."
+    return 1
   fi
-  [[ ${1:-} != --full-upgrade ]] || reconcile_args+=(--full-upgrade)
+  if (( verify )); then
+    if [[ -z $(git -C "$LEOS_PROFILES" config --get gpg.ssh.allowedSignersFile 2>/dev/null) ]] &&
+        ! whence -p gpg >/dev/null; then
+      puts-err "--verify-signatures needs a way to check signatures: set gpg.ssh.allowedSignersFile for SSH-signed commits, or install gpg with the signer's public key."
+      return 1
+    fi
+    merge_args+=(--verify-signatures)
+  fi
   branch=$(git -C "$LEOS_PROFILES" symbolic-ref --quiet --short HEAD) || {
     puts-err "The profile checkout must be on a branch."
     return 1
@@ -179,12 +205,69 @@ upgrade-leos-profiles() {
     return 1
   }
   if [[ -n $(git -C "$LEOS_PROFILES" status --porcelain --untracked-files=normal) ]]; then
-    puts-err "Refusing to pull because the profile checkout has local changes. Commit or stash them first."
+    puts-err "Refusing to update because the profile checkout has local changes. Commit or stash them first."
     return 1
   fi
-  git -C "$LEOS_PROFILES" pull --ff-only || return $?
-  puts "Updated $LEOS_PROFILES from $upstream; reconciling the saved setup."
+  git -C "$LEOS_PROFILES" fetch --quiet || return $?
+  # Review before running anything new: these commits are about to run with
+  # sudo through reconcile (SEC-3).
+  incoming=$(git -C "$LEOS_PROFILES" log --oneline 'HEAD..@{upstream}') || return $?
+  if [[ -z $incoming ]]; then
+    puts "$LEOS_PROFILES is up to date with $upstream; reconciling the saved setup."
+  else
+    puts "Incoming commits from $upstream:"
+    print -r -- "$incoming"
+    if (( ! yes )); then
+      if [[ -t 0 ]]; then
+        read -r "answer?Fast-forward to these commits and reconcile? [y/N] "
+        [[ $answer == [yY] || $answer == [yY][eE][sS] ]] || { puts "Cancelled; nothing was changed."; return 1; }
+      else
+        puts-err "Not a terminal: review the commits above, then run upgrade-leos-profiles --yes to apply them."
+        return 1
+      fi
+    fi
+    git -C "$LEOS_PROFILES" "${merge_args[@]}" '@{upstream}' || return $?
+    puts "Updated $LEOS_PROFILES from $upstream; reconciling the saved setup."
+  fi
   command bash "$LEOS_PROFILES/install.sh" "${reconcile_args[@]}"
+}
+
+# A read-only health check of the saved setup: runs `install.sh inspect
+# --saved` and summarises its postconditions, warnings and conflicts (MI-14).
+leos-doctor() {
+  local out rc=0 line needed=0
+  local -a fields
+  if (( $# )); then
+    puts-err "Usage: leos-doctor"
+    return 2
+  fi
+  out=$(command bash "$LEOS_PROFILES/install.sh" inspect --saved) || rc=$?
+  if (( rc )); then
+    puts-err "leos-doctor: install.sh inspect --saved failed (exit $rc); see the message above."
+    return $rc
+  fi
+  puts "Leo's Profiles at $LEOS_PROFILES"
+  for line in "${(@f)out}"; do
+    fields=("${(@ps:\t:)line}")
+    case $fields[1] in
+      postcondition)
+        case $fields[3] in
+          verified) print -r -- "  ok       $fields[2]" ;;
+          skipped) print -r -- "  skipped  $fields[2] (an existing installation is kept)" ;;
+          *) print -r -- "  NEEDED   $fields[2]"; needed=1 ;;
+        esac ;;
+      warning) print -r -- "  warning  $fields[2]: $fields[3]" ;;
+      conflict) print -r -- "  conflict $fields[2]: $fields[3] ($fields[4])" ;;
+      migration) print -r -- "  pending  migration: $fields[2] ${fields[3]:-}" ;;
+      shadow) print -r -- "  note     $fields[3] is shadowed by the pinned $fields[4]" ;;
+      existing) print -r -- "  note     $fields[2] at $fields[3]: $fields[4]" ;;
+    esac
+  done
+  if (( needed )); then
+    puts "Repair with: upgrade-leos-profiles (pulls first), or bash $LEOS_PROFILES/install.sh reconcile --yes"
+    return 1
+  fi
+  puts "Everything the saved setup installs is in place."
 }
 
 # Update only installed AI coding CLIs using their supported native updaters.

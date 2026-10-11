@@ -6,6 +6,9 @@ set -Eeuo pipefail
 ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=../installer/credentials.sh
 source "$ROOT/installer/credentials.sh"
+# pkg_install and the root prefix used by the credential prerequisites.
+# shellcheck source=../installer/packages.sh
+source "$ROOT/installer/packages.sh"
 fixture=$(mktemp -d /tmp/leos-credentials.XXXXXX)
 trap 'rm -rf -- "$fixture"' EXIT
 export HOME="$fixture/home"
@@ -13,6 +16,7 @@ export TMPDIR="$fixture"
 mkdir -p "$HOME" "$fixture/local"
 LOCAL_DIR="$fixture/local"
 PROFILE_FILE="$LOCAL_DIR/profile"
+TARGET="$fixture/profile"
 DRY_RUN=0 COMMAND=apply SSH_MODE=reuse SSH_PASSPHRASE_MODE=empty
 GPG_MODE=reuse GPG_PASSPHRASE_MODE=empty
 SSH_KEY_PATH="$fixture/custom-key"

@@ -43,6 +43,8 @@ printf '%s\n' 'echo user rc' 'if [[ -o interactive ]]; then' \
 printf '%s\n' 'export USER_ENV=1' '# leos-profiles zshenv' 'typeset -U path' \
   'path=("$HOME/.local/bin" $path)' 'export PATH' > "$FIXTURE_HOME/.zshenv"
 printf '%s\n' 'legacy' > "$FIXTURE_HOME/.lp-no-gnu"
+# Existing setups inspect discloses (oh-my-zsh, nvm).
+mkdir -p "$FIXTURE_HOME/.oh-my-zsh" "$FIXTURE_HOME/.nvm"
 mkdir -p "$FIXTURE_HOME/.local/state/leos-profiles"
 printf 'packages\t%064d\t2020-01-01T00:00:00Z\t\n' 0 > "$FIXTURE_HOME/.local/state/leos-profiles/install-state.tsv"
 printf '%s\t%s\n' schema 1 groups zsh-config,fnm package-groups shell full-upgrade no \
@@ -74,6 +76,9 @@ case "$name" in
   pacman)
     case "$1" in -Q*) exit 1 ;; esac ;;
   curl|wget|fnm|node) exit 7 ;;
+  # The preflight's credential probe changes nothing; answer as a host where
+  # sudo needs a password.
+  sudo) [ "$*" = '-n true' ] && exit 1 ;;
 esac
 printf 'MUTATION %s %s\n' "$name" "$*" >> "$LEOS_READONLY_CALLS"
 exit 97
@@ -91,13 +96,15 @@ for name in "${fakes[@]}"; do ln -s fake "$FAKEBIN/$name"; done
 
 # Run the CLI with only the fixture environment. The interpreter running this
 # test also runs the installer (macOS CI runs both under the system Bash 3.2).
+# No terminal on stdin, as when an AI agent runs the installer. No USER either:
+# the installer must find the account itself (ONB-12).
 installer() {
-  env -i HOME="$FIXTURE_HOME" USER="${USER:-$(id -un)}" LANG=C \
+  env -i HOME="$FIXTURE_HOME" LANG=C \
     PATH="$FAKEBIN:/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$SCRATCH_TMP" \
     XDG_STATE_HOME="$FIXTURE_HOME/.local/state" XDG_CONFIG_HOME="$FIXTURE_HOME/.config" \
     XDG_CACHE_HOME="$FIXTURE_HOME/.cache" XDG_DATA_HOME="$FIXTURE_HOME/.local/share" \
-    GIT_CONFIG_NOSYSTEM=1 LEOS_READONLY_CALLS="$CALLS" \
-    "${BASH:-bash}" "$PROFILE/install.sh" "$@"
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$FIXTURE_HOME/.gitconfig" LEOS_READONLY_CALLS="$CALLS" \
+    "${BASH:-bash}" "$PROFILE/install.sh" "$@" </dev/null
 }
 
 # Type, permissions, size and mtime of every entry (directory mtimes catch a
@@ -130,6 +137,7 @@ COLUMNS_SPEC=$(documented_columns | tr '\n' ' ')
 
 check_tsv() {
   local label=$1 output=$2
+  [[ -n $output ]] || fail "$label printed no records"
   awk -F '\t' -v spec="$COLUMNS_SPEC" -v label="$label" '
     BEGIN {
       n = split(spec, items, " ")
@@ -175,6 +183,8 @@ grep -qxF $'migration\tlegacy-loader\t'"$FIXTURE_HOME/.zshrc"$'\tloader' <<< "$O
 grep -qxF $'migration\tlegacy-environment\t'"$FIXTURE_HOME/.zshenv"$'\tenvironment' <<< "$OUTPUT" ||
   fail 'inspect did not report the legacy .zshenv snippet'
 grep -qxF $'file\tzshrc\t'"$FIXTURE_HOME/.zshrc" <<< "$OUTPUT" || fail 'inspect did not disclose the .zshrc path'
+grep -q $'^existing\toh-my-zsh\t'"$FIXTURE_HOME/.oh-my-zsh"$'\t' <<< "$OUTPUT" || fail 'inspect did not disclose oh-my-zsh'
+grep -q $'^existing\tnvm\t'"$FIXTURE_HOME/.nvm"$'\t' <<< "$OUTPUT" || fail 'inspect did not disclose nvm'
 if [[ $(uname -s) == Darwin ]]; then
   grep -qxF $'file\tzprofile\t'"$FIXTURE_HOME/.zprofile" <<< "$OUTPUT" || fail 'inspect did not disclose the .zprofile path'
 fi
@@ -196,5 +206,41 @@ grep -q 'Would remove the legacy unmarked leos-profiles loader' <<< "$OUTPUT" ||
 
 run_read_only 'reconcile --dry-run' 0 reconcile --yes --dry-run
 grep -q 'Profile reconciliation complete' <<< "$OUTPUT" || fail 'dry-run reconcile did not complete'
+
+# inspect --saved: the saved profile's selection, as reconcile would use it.
+run_read_only 'inspect --saved' 0 inspect --saved
+check_tsv 'inspect --saved' "$OUTPUT"
+grep -qxF $'policy\tselection\tsaved' <<< "$OUTPUT" || fail 'inspect --saved did not say it used the saved selection'
+grep -qxF $'group\tcomponent\tfnm\tselected' <<< "$OUTPUT" || fail 'inspect --saved did not use the saved components'
+! grep -q $'^group\tcomponent\tpyenv\t' <<< "$OUTPUT" || fail 'inspect --saved used the default selection'
+
+# inventory, in both formats.
+run_read_only 'inventory --tsv' 0 inventory --tsv
+check_tsv 'inventory --tsv' "$OUTPUT"
+grep -qxF $'item\tlocal\tinstall-profile.tsv\t'"$PROFILE/local/install-profile.tsv"$'\tpresent' <<< "$OUTPUT" ||
+  fail 'inventory did not list the saved profile'
+run_read_only 'inventory' 0 inventory
+grep -q '^present  local  ' <<< "$OUTPUT" || fail 'human inventory did not list present items'
+
+# An existing non-Git ~/.pyenv: disclosed, and apply stops before any change
+# unless asked to keep it (ONB-5).
+mkdir -p "$FIXTURE_HOME/.pyenv"
+run_read_only 'inspect (existing ~/.pyenv)' 0 inspect --groups pyenv
+check_tsv 'inspect (existing ~/.pyenv)' "$OUTPUT"
+grep -qxF $'conflict\tpyenv\t'"$FIXTURE_HOME/.pyenv"$'\tnot-a-git-checkout' <<< "$OUTPUT" ||
+  fail 'inspect did not report the existing ~/.pyenv'
+run_read_only 'apply --dry-run (existing ~/.pyenv)' 1 apply --yes --dry-run --groups pyenv
+grep -q -- '--skip-existing-version-managers' "$FIXTURE/stderr" || fail 'the pyenv conflict did not name the option'
+run_read_only 'apply --dry-run --skip-existing-version-managers' 0 apply --yes --dry-run --groups pyenv --skip-existing-version-managers
+grep -q 'Skipping pyenv: keeping the existing installation' <<< "$OUTPUT" || fail 'the existing pyenv was not kept'
+rmdir "$FIXTURE_HOME/.pyenv"
+
+# Without a terminal, a choice that must prompt stops before any change with
+# the exact command to run yourself (ONB-1).
+run_read_only 'apply without a terminal' 3 apply --yes --groups zsh-config --package-groups none \
+  --default-shell no --ssh generate --ssh-passphrase prompt
+grep -q $'^manual-action\trun-in-terminal\t\tbash '"$PROFILE"'/install.sh apply --yes ' <<< "$OUTPUT" ||
+  fail "no run-in-terminal action: $OUTPUT"
+[[ ! -e $PROFILE/local/.install.lock ]] || fail 'the stopped run left its lock'
 
 printf 'read-only inspect/dry-run (%s): PASS\n' "$(uname -s)"

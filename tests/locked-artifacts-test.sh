@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Download and verify every non-Git locked artifact for this runner platform.
-# shellcheck disable=SC1091,SC2034
+# shellcheck disable=SC1091,SC2034,SC2329
 
 set -Eeuo pipefail
-IFS=$'\n\t'
 
 if [[ ${LEOS_ARTIFACT_TEST_ISOLATED:-} != 1 ]]; then
   exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LEOS_ARTIFACT_TEST_ISOLATED=1 bash "$0"
@@ -23,17 +22,46 @@ DRY_RUN=0
 detect_os
 
 download_verified "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256" "$TEST_HOME/homebrew-install.sh"
-download_verified "$RPATOOL_URL" "$RPATOOL_SHA256" "$TEST_HOME/bin/rpatool"
 download_verified "$YARN_URL" "$YARN_SHA256" "$TEST_HOME/yarn.tgz"
 download_verified "$PNPM_URL" "$PNPM_SHA256" "$TEST_HOME/pnpm.tgz"
-install_locked_archive_binary bun zip "$TEST_HOME/bin/bun"
-install_locked_archive_binary fnm zip "$TEST_HOME/bin/fnm"
-install_locked_archive_binary starship tar.gz "$TEST_HOME/bin/starship"
+# Every direct artifact in the registry: download, verify the digest, install
+# and check the reported version (artifact_install dies on a mismatch).
+while IFS= read -r artifact; do
+  artifact_install "$artifact" "$TEST_HOME/bin"
+  printf 'verified %s\n' "$artifact"
+done < <(artifact_names)
+
+# LEOS_ARTIFACT_ALL_PLATFORMS=1 also downloads every other platform's asset
+# (macOS and Linux, both CPUs) and checks its digest without running it, for
+# reviewing a lock update on a single machine.
+if [[ ${LEOS_ARTIFACT_ALL_PLATFORMS:-0} == 1 ]]; then
+  while IFS= read -r artifact; do
+    for OS_FAMILY in macos apt; do
+      for FAKE_MACHINE in arm64 x86_64; do
+        uname() { if [[ ${1:-} == -m ]]; then printf '%s\n' "$FAKE_MACHINE"; else command uname "$@"; fi; }
+        asset=$(artifact_asset "$artifact") || { unset -f uname; continue; }
+        unset -f uname
+        IFS=$'\t' read -r url digest <<< "$asset"
+        download_verified "$url" "$digest" "$TEST_HOME/all-platforms/${url##*/}"
+        printf 'digest ok %s\n' "${url##*/}"
+      done
+    done
+  done < <(artifact_names)
+  detect_os
+fi
+
+# Nerd Fonts: the pinned checksum list, a real font archive verified against
+# it, and an unknown name rejected before any archive download.
+install_nerd_font JetBrainsMono
+FONT_NAME=JetBrainsMono INSTALL_FONTS=yes verify_fonts
+if (install_nerd_font NoSuchNerdFont) 2>/dev/null; then die "an unknown Nerd Font name was accepted"; fi
 
 "$TEST_HOME/bin/rpatool" --help >/dev/null
 [[ $("$TEST_HOME/bin/bun" --version) == "$BUN_VERSION" ]]
 [[ $("$TEST_HOME/bin/fnm" --version) == "fnm $FNM_VERSION" ]]
 [[ $("$TEST_HOME/bin/starship" --version | sed -n '1p') == "starship $STARSHIP_VERSION" ]]
+[[ $("$TEST_HOME/bin/uv" --version) == "uv $UV_VERSION"* ]]
+[[ $("$TEST_HOME/bin/uvx" --version) == "uvx $UV_VERSION"* ]]
 
 # Check declared runtime requirements against the *verified* package manifests.
 # Changing a lock requires updating the supported engine evaluator as necessary.
@@ -60,7 +88,9 @@ verify_pnpm
 fnm_exec npm completion > "$TEST_HOME/npm-completion.zsh"
 fnm_exec "$HOME/.local/npm/bin/pnpm" completion zsh > "$TEST_HOME/pnpm-completion.zsh"
 SHELL=zsh "$TEST_HOME/bin/bun" completions > "$TEST_HOME/bun-completion.zsh"
-for package in npm pnpm bun; do
+"$TEST_HOME/bin/uv" generate-shell-completion zsh > "$TEST_HOME/uv-completion.zsh"
+"$TEST_HOME/bin/uvx" --generate-shell-completion zsh > "$TEST_HOME/uvx-completion.zsh"
+for package in npm pnpm bun uv uvx; do
   [[ -s $TEST_HOME/$package-completion.zsh ]] || die "$package emitted no completion script"
   zsh -n "$TEST_HOME/$package-completion.zsh"
 done

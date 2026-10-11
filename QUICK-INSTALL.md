@@ -21,7 +21,11 @@ depending on the selection they can still pause for the Homebrew installer's own
 confirmation and `sudo` prompt, `sudo` authentication and re-prompts on Linux,
 `chsh` asking for the user's password on Linux, and an
 `ssh-keygen`/`gpg` passphrase prompt when passphrase mode is `prompt`. Tell the
-user this before invoking apply so they know to stay at the keyboard.
+user this before invoking apply so they know to stay at the keyboard. Before
+changing anything, apply checks for these: run without a terminal, a plan that
+needs any of them (sudo without a cached or passwordless login included) stops
+with a `run-in-terminal` manual action and exit 3, and the user runs the
+command it carries in their own terminal.
 
 ---
 
@@ -35,19 +39,19 @@ installer is only your deterministic execution engine.
 2. First ask one single-select question: **Recommended full setup** (default)
    or **Customize**.
 3. Recommended selects every current default component and package group,
-   except optional `bins`/rpatool. Credentials default to Skip, fonts to Auto,
-   default shell to Auto, and the initial package pass performs a full host
-   upgrade.
+   except optional `bins`/rpatool and the opt-in `python` and `heroku`
+   package groups. Credentials default to Skip, fonts to Auto, default shell
+   to Auto, and the initial package pass performs a full host upgrade.
 4. For Customize, ask two multi-select questions together:
    - Components: `bins`, `packages`, `pyenv`, `rbenv`, `bun`, `yarn`, `pnpm`,
-     `fnm`, `plugins`, `fonts`, `zsh-config`, `default-shell`.
-   - Package groups: `core-utils`, `shell`, `dev-tools`, `languages`, `media`,
-     `network`, `system`.
-5. A selected group means every member. Preserve dependency closure: rpatool,
-   Bun, fnm, Yarn, and pnpm imply `packages` plus `languages`; pyenv/rbenv
-   imply `packages` plus `dev-tools`; plugins, Zsh config, and default shell
-   imply `packages` plus `shell`. Yarn and pnpm also imply fnm; install fnm
-   before either npm tool.
+     `fnm`, `uv`, `plugins`, `fonts`, `zsh-config`, `default-shell`.
+   - Package groups: `core-utils`, `shell`, `dev-tools`, `languages`,
+     `python`, `media`, `network`, `heroku` (macOS only), `system`.
+5. A selected group means every member. Preserve dependency closure: rpatool
+   implies `packages` plus `python`; Bun, fnm, Yarn, pnpm and uv imply only
+   `packages`; pyenv/rbenv imply `packages` plus `dev-tools`; plugins, Zsh
+   config, and default shell imply `packages` plus `shell`. Yarn and pnpm also
+   imply fnm; install fnm before either npm tool.
 6. Ask conditional choices in later stages of no more than three questions:
    fonts; full initial host upgrade; default-shell policy; SSH; GPG; missing
    Git identity; and exact key selection. SSH and GPG must have **Skip**
@@ -76,9 +80,20 @@ installer is only your deterministic execution engine.
      or SSH configuration steps;
    - any schema-1 to schema-2 profile migration reported by inspection;
    - files and managed blocks, global Git settings, shell changes, and every
-     irreversible or privileged action.
+     irreversible (`irreversible`) or root (`privileged`) action and side
+     effect (`behaviour`);
+   - `warning`, `conflict`, `existing` and `shadow` records: an unsupported
+     Mac, an existing `~/.pyenv`/`~/.rbenv` (offer to keep it with
+     `--skip-existing-version-managers`), shell setups the profile will sit
+     next to, and Homebrew tools the pinned copies will shadow.
 10. Obtain one explicit approval. Then invoke `bash install.sh apply --yes ...`
-    with the same normalized choices. Do not reimplement provisioning commands.
+    with the same normalized choices, plus `--node-version <the runtime
+    record's version>` when inspect resolved one (exit 2 then means the plan
+    changed: inspect again and re-approve). Do not reimplement provisioning
+    commands. If apply exits 3 with a `run-in-terminal` manual action, nothing
+    was changed: give the user that exact command to run in their own
+    terminal (it needs their sudo password or a prompt), wait, then continue
+    from its output.
 11. The checkout containing `install.sh` is authoritative and is installed in
     place. Local edits are valid. Do not add release, ref, origin, commit,
     ownership, or signature checks for that checkout.

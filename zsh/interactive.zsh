@@ -175,6 +175,7 @@ autoload -Uz compinit compaudit
 entry "path/heroku"
 entry "path/fzf"
 entry "path/zoxide"
+entry "path/uv"
 
 # fzf-tab must load after compinit but BEFORE plugins that wrap ZLE widgets.
 _leos_plugin fzf-tab/fzf-tab.plugin.zsh
