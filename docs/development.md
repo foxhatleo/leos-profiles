@@ -60,16 +60,16 @@ update it together with the emitter in `install.sh`.
 | `policy` | 3 | `node`, `full-upgrade` or `selection`, value | Node selection policy; `yes`/`no` host upgrade; `saved` when `inspect --saved` read the selection from the saved profile |
 | `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
 | `migration` | 4 | `profile-schema`, `1`, `2`; or `legacy-loader` / `legacy-environment`, file path, managed marker | Pending profile migration; or a legacy unmarked loader (`.zshrc`) or zshenv snippet (`.zshenv`) that `zsh-config` and `remove-blocks` remove |
-| `group` | 4 | category, name, status | Selected, implied or internal group |
-| `package` | 3 | OS family, name | Exact OS package member |
-| `action` | 3 | step, description | Planned effect of a step or bootstrap |
+| `group` | 4 | category, name, status | Selected, implied or internal group; `credential` groups are `ssh` (`skip`/`reuse`/`generate`/`agent`), `gpg` (`skip`/`reuse`/`generate`) and `signing` (`skip`/`ssh`/`gpg`) |
+| `package` | 3 | OS family, name | Exact OS package member; also the pinentry package GPG signing installs |
+| `action` | 3 | step, description | Planned effect of a step or bootstrap; credentials add `ssh`, `ssh-config` (`--ssh-config yes`), `gpg`, `signing` (`--signing ssh`) and `pinentry` |
 | `artifact` | 5 | source kind, name, URL/repository, digest/commit | Locked executable dependency; the digest of a Nerd Font archive is `SHA-256.txt`, read from the pinned checksum list at apply time |
 | `external` | 3 | service, description or URL | External service the plan contacts |
-| `file` | 3 | name, path | File the plan reads or writes; `zshrc`, `zshenv` and (macOS) `zprofile` give the resolved zsh startup files |
-| `global` | 3 | `git`, keys | Global Git settings the plan configures |
+| `file` | 3 | name, path | File the plan reads or writes; `zshrc`, `zshenv` and (macOS) `zprofile` give the resolved zsh startup files; credentials add `ssh-known-hosts`, `ssh-reference` (a key file), `ssh-agent-public-key`, `ssh-config`, `allowed-signers` and `gpg-agent-conf` |
+| `global` | 3 | `git`, keys | Global Git settings the plan configures: `user.signingkey,gpg.format,commit.gpgsign` (`--signing gpg`), plus `gpg.ssh.allowedSignersFile` (`--signing ssh`); none for `--signing skip` |
 | `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone: `host-upgrade` (package upgrades), `login-shell` (chsh) |
 | `privileged` | 3 | action, command or description | An action run as root (through sudo, or directly when root): `homebrew-bootstrap`, `bootstrap`, `package-manager`, `repository`, `dnf-swap`, `pacman-sync`, `credential-packages`, `etc-shells`, `login-shell` |
-| `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`) |
+| `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `ssh-agent` (`--ssh agent` lists the agent's keys), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`) |
 | `conflict` | 4 | component, path, reason | An existing installation in the way of `pyenv`/`rbenv`: `not-a-git-checkout`, `unexpected-origin`, `local-changes` (apply stops unless `--skip-existing-version-managers`), or `homebrew-install` (informational) |
 | `existing` | 4 | name, path, effect | A shell framework or version manager the profile coexists with: `oh-my-zsh`, `powerlevel10k`, `nvm`, `conda`, `asdf`, `mise` |
 | `shadow` | 4 | executable, other copy, pinned copy | A Homebrew copy of a locked artifact that the pinned `~/.local/bin` copy will shadow |
@@ -80,17 +80,39 @@ update it together with the emitter in `install.sh`.
 
 A runtime preview may report `unresolved` / `resolve-during-apply`.
 
-Manual-action names cover registration, login, email-read scope, key selection,
-SSH identity configuration, `run-in-terminal` (the destination is the exact
+Manual-action names cover registration (`register-ssh-key`,
+`register-gpg-key`, `register-ssh-signing-key`), login (`github-login`),
+read scopes (`github-email-scope`; `github-key-scope`, whose destination is the
+exact `gh auth refresh -h github.com -s ...` command naming the
+`read:public_key`, `read:gpg_key` and `read:ssh_signing_key` scopes the
+selected modes need), key selection (`select-ssh-key`, `select-gpg-key`), SSH
+verification and configuration (`verify-ssh-key`, `configure-ssh-key`),
+`run-in-terminal` (the destination is the exact
 command to run in a terminal; see "Apply flow" below), `set-login-shell`
-(chsh is missing) and `install-windows-font` (WSL). An empty public-path field is valid for actions
+(chsh is missing) and `install-windows-font` (WSL). gh exits 1 for every API
+failure; `github_list` maps an HTTP 403/404 whose message names a scope (or a
+fine-grained token's "Resource not accessible") to a scope action and keeps
+every other failure (network, 5xx, rate limit) an error. An empty public-path field is valid for actions
 such as login. Only public artifacts are referenced: never emit private key
 contents, tokens or passphrases. On registration pauses, save the explicit
 reference first and retain the public artifact after EXIT cleanup. Reconciliation
 must never generate a replacement. Pending initial generation resumes the
 originally approved apply; API/network failures must not be interpreted as
-missing registration. Enabling global GPG commit signing follows successful
-local signing and confirmed GitHub registration.
+missing registration. Enabling global commit signing (GPG or SSH) follows a
+successful local test signature (SSH: also `git verify-commit`) and confirmed
+GitHub registration; `--signing skip` changes no signing setting.
+
+Credentials are not registry components and record no state: every apply and
+reconcile re-runs and re-verifies them, so a changed `--signing`,
+`--ssh-config` or key takes effect on the next run without a signature
+handler. Their optional profile keys (`signing`, `ssh-config`, `gpg-expiry`)
+may be missing from older profiles: `signing` then resolves to `gpg` when a GPG
+key is selected, else `skip`, the same rule as a command line without
+`--signing`. A `--gpg generate` is refused in preflight while the profile's
+saved `gpg-key` is still in the keyring. Tests stub gh, ssh, ssh-add,
+ssh-keygen, gpg, gpgconf and git in `tests/credentials-test.sh` (toggles for
+each refusal and manual-action branch); its real-key block signs and verifies
+real SSH and GPG commits in a disposable HOME, GNUPGHOME and Git config.
 
 ## Apply flow
 
@@ -101,13 +123,13 @@ and `detect_os`; `inspect` stops here. Apply and reconcile then warn about an
 unsupported platform, capture the existing Node, and run `preflight`; only
 after it do they take the lock, migrate local state, write the profile, apply
 the Homebrew mirror, bootstrap, resolve Node, run each component, compile the
-Zsh sources, and last provision credentials. `finish_manual_actions` prints
+Zsh sources, and last provision credentials (the SSH key, the GPG key, then SSH signing). `finish_manual_actions` prints
 every queued `manual-action` and exits 3; a credential pause calls it at
 once.
 
 `preflight` (installer/plan.sh) changes nothing. It stops on a blocking
 pyenv/rbenv conflict (unless `--skip-existing-version-managers`), checks
-`--node-version` against a live resolution (exit 2 when they differ), and
+`--node-version` against a live resolution (exit 2 when they differ), refuses a second `--gpg generate` and an `--ssh agent` without an agent socket, and
 collects what the run needs from the user: when stdin is not a terminal, a
 passphrase prompt, chsh's password prompt (Linux, non-root) or a sudo password
 (`privileged_plan` is not empty and `sudo -n true` fails) ends the run with

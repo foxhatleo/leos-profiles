@@ -197,6 +197,18 @@ check_tsv 'inspect (credentials and every component)' "$OUTPUT"
 for record in artifact external file global irreversible runtime; do
   grep -q "^$record"$'\t' <<< "$OUTPUT" || fail "full inspect emitted no $record record"
 done
+grep -q $'^file\tgpg-agent-conf\t' <<< "$OUTPUT" || fail 'GPG signing did not disclose gpg-agent.conf'
+
+# The other credential choices: an agent key, SSH signing and the opt-in
+# ~/.ssh/config block (no agent is running; inspect must not need one).
+run_read_only 'inspect (agent key, SSH signing, ssh config)' 0 inspect --groups none --package-groups none \
+  --ssh agent --ssh-key SHA256:fixture --signing ssh --ssh-config yes --gpg generate --gpg-expiry 1y \
+  --gpg-passphrase prompt --git-name 'Fixture User' --git-email fixture@example.invalid
+check_tsv 'inspect (agent key, SSH signing, ssh config)' "$OUTPUT"
+for record in $'group\tcredential\tsigning\tssh' $'file\tallowed-signers\t' $'file\tssh-config\t' \
+  $'behaviour\tssh-agent\t' $'action\tpinentry\t'; do
+  grep -q "^$record" <<< "$OUTPUT" || fail "inspect did not disclose ${record//$'\t'/ }"
+done
 
 run_read_only 'apply --dry-run' 0 apply --yes --dry-run
 grep -q 'Profile apply complete' <<< "$OUTPUT" || fail 'dry-run apply did not complete'

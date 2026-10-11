@@ -248,8 +248,11 @@ report_behaviour() {
   if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" core-utils; then
     printf 'behaviour\tgnu-tools\tinteractive shells put the GNU coreutils, findutils, sed, tar, grep, awk and which ahead of the BSD tools; disable-gnu (local/flags/no-gnu) keeps BSD\n'
   fi
-  if [[ $GPG_MODE != skip ]]; then
+  if [[ $GPG_MODE != skip || $SIGNING_MODE == ssh ]]; then
     printf 'behaviour\tgit-identity\twrites global user.name and user.email when either is unset (from --git-name/--git-email)\n'
+  fi
+  if [[ $SSH_MODE == agent ]]; then
+    printf 'behaviour\tssh-agent\tlists the running agent'"'"'s keys (ssh-add -L through SSH_AUTH_SOCK) and uses the one --ssh-key names; no private-key file is read\n'
   fi
   if [[ $OS_FAMILY == macos && $(brew_mirror_effective) == china ]]; then
     printf 'behaviour\tbrew-mirror\tHomebrew'"'"'s own code (brew.git), metadata and bottles come from the USTC mirror in this run and later shells\n'
@@ -294,6 +297,11 @@ preflight() {
     done < <(version_manager_conflicts "$tool")
   done
   check_approved_node_version
+  gpg_generation_guard
+  # --ssh agent runs last, after the components: find a missing agent now.
+  if [[ $SSH_MODE == agent ]] && [[ -z ${SSH_AUTH_SOCK:-} || ! -S ${SSH_AUTH_SOCK:-} ]]; then
+    die "--ssh agent needs a running SSH agent: SSH_AUTH_SOCK is $([[ -n ${SSH_AUTH_SOCK:-} ]] && printf 'not a socket (%s)' "$SSH_AUTH_SOCK" || printf 'not set'). Start or unlock your agent (ssh-agent, 1Password, Secretive) in this shell, then rerun."
+  fi
   if ! stdin_is_terminal; then
     if [[ $SSH_MODE == generate && $SSH_PASSPHRASE_MODE == prompt ]]; then
       reasons+="ssh-keygen must ask for the new SSH key's passphrase (--ssh-passphrase prompt). "
@@ -393,6 +401,22 @@ inventory_records() {
     fi
     item backup "${file##*/}" - "$file.leos-profiles.bak"
   done
+  # The credential blocks: ~/.ssh/config (--ssh-config yes) and the GPG
+  # pinentry in gpg-agent.conf.
+  for marker in ssh-config pinentry; do
+    case $marker in
+      ssh-config) file="$HOME/.ssh/config" ;;
+      pinentry) file="${GNUPGHOME:-$HOME/.gnupg}/gpg-agent.conf" ;;
+    esac
+    block_markers "$marker"
+    if [[ -f $file ]] && grep -qxF "$BLOCK_BEGIN" "$(resolve_config_path "$file")" 2>/dev/null; then
+      item managed-block "$marker" - "$file" present
+    else
+      item managed-block "$marker" - "$file" absent
+    fi
+  done
+  item local ssh-agent-key.pub - "$LOCAL_DIR/ssh-agent-key.pub"
+  item local allowed_signers - "$LOCAL_DIR/allowed_signers"
   while IFS= read -r name; do
     artifact_row "$name"
     for file in $ARTIFACT_EXECUTABLES; do
@@ -422,7 +446,7 @@ inventory_records() {
     [[ -e $file ]] || continue
     item local "${file##*/}" - "$file"
   done
-  for name in user.name user.email user.signingkey gpg.format commit.gpgsign; do
+  for name in user.name user.email user.signingkey gpg.format gpg.ssh.allowedSignersFile commit.gpgsign; do
     if git config --global --get "$name" >/dev/null 2>&1; then
       printf 'item\tgit-global\t%s\t%s\tpresent\n' "$name" "${GIT_CONFIG_GLOBAL:-~/.gitconfig}"
     else

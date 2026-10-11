@@ -11,7 +11,8 @@ default workstation selection and performs a full package-manager/host upgrade.
 It can write shell configuration, install packages and tools, prepare credentials
 for manual GitHub registration, and change the login shell. Optional rpatool
 (`bins`) and the opt-in `python` and `heroku` package groups are excluded;
-SSH and GPG default to Skip; fonts and the Zsh default-shell policy are Auto.
+SSH, GPG and commit signing default to Skip; fonts and the Zsh default-shell
+policy are Auto.
 
 ## Start here
 
@@ -93,8 +94,10 @@ second wizard and never asks setup questions.
 The entire ignored `local/` directory is machine-owned:
 
 - `local/install-profile.tsv` records the normalized groups, upgrade/font/shell
-  policies, Git identity, selected SSH path, GPG fingerprint, and moving-tool
-  channel choices. Schema 2 records `node-policy=preserve-compatible`; an
+  policies, Git identity, selected SSH path (or agent key fingerprint), GPG
+  fingerprint and expiry, signing method, the `~/.ssh/config` opt-in, and
+  moving-tool channel choices. Keys added later (`signing`, `ssh-config`,
+  `gpg-expiry`, `version-managers`) are optional, so older profiles still read. Schema 2 records `node-policy=preserve-compatible`; an
   existing schema-1 profile migrates on approved apply/reconcile. Inspection
   reports the migration without writing it.
 - `local/install-state.tsv` records verified step signatures, timestamps, and
@@ -105,6 +108,8 @@ The entire ignored `local/` directory is machine-owned:
   overrides.
 - `local/flags/` stores GNU preference, Homebrew mirror, and optional-tool
   warning choices.
+- `local/allowed_signers` (SSH signing) and `local/ssh-agent-key.pub` (an
+  agent key's public half) are managed public files.
 
 The installer stores no passphrases, tokens, private keys, or exported
 secret-key material there. User-managed `private.zsh` may contain secrets.
@@ -187,30 +192,95 @@ already-compatible default merely because another LTS exists. Yarn/pnpm install
 and verification commands run through explicit `fnm exec`, so they do not depend
 on an interactive shell's PATH.
 
-SSH/GPG default to Skip. Reuse requires a specifically selected SSH private-key
-path or full GPG fingerprint; existing keys are never silently chosen. New SSH
-keys default to `~/.ssh/id_ed25519`, or an explicitly chosen unused absolute
-path. Existing files are not replaced. Both `empty` and `prompt` passphrase
-policies are supported; `empty` is the default and is warned about explicitly.
+SSH, GPG and signing default to Skip. Reuse requires a specifically selected
+SSH private-key path or full GPG fingerprint; existing keys are never silently
+chosen. New SSH keys default to `~/.ssh/id_ed25519`, or an explicitly chosen
+unused absolute path. Existing files are not replaced, and a GPG key an earlier
+run generated stops a second `--gpg generate` (select it with `--gpg reuse
+--gpg-key <fingerprint>`). Both `empty` and `prompt` passphrase policies are
+supported. **Prefer `prompt`**: `empty` (the default) leaves the private key
+readable by anything running as you, and is warned about explicitly. New GPG
+keys expire after `--gpg-expiry` (default `2y`; `Ny`, `Nm`, `Nw`, `Nd`, or an
+explicit `0`/`never`); extend one later with `gpg --quick-set-expire
+<fingerprint> 2y` and upload the public key to GitHub again.
 
-GitHub operations are read-only. The installer never uploads keys, logs into
-GitHub for you, or changes SSH identity configuration or GitHub CLI's Git
-protocol. Missing registration produces a `manual-action` TSV record and exits
-with status **3**, including the public-key file and destination URL. The
-selected reference is saved first, and a public GPG export remains available
-after cleanup. Register it yourself, then run the guided reconciliation again.
-Missing login, email-read permission, or ordinary SSH configuration similarly
-produces manual guidance. A network/API failure remains an error, not evidence
-that a key is missing.
+`--ssh agent --ssh-key <selector>` uses a key held only by the running SSH
+agent (`ssh-agent`, 1Password, Secretive; found through `SSH_AUTH_SOCK`). The
+selector is the key's `SHA256:` fingerprint, its comment, or its public key as
+`ssh-add -L` prints it, and must match exactly one key. No private-key file is
+read: the public key is saved as `local/ssh-agent-key.pub` for registration,
+the profile records the fingerprint, and verification goes through the agent.
 
-SSH derives matching public material, compares GitHub host keys with the API,
-and verifies both the selected identity and ordinary SSH against the same
-GitHub account. GPG requires a verified email, signs a real temporary commit,
-and enables global **commit** signing only after registration is confirmed.
-The independent `tag.gpgsign` preference is preserved. Reconciliation never
-generates credentials. If an initial run paused before another requested key
-was generated, resume the originally approved apply choices while reusing keys
-already created; do not expect reconciliation to create the pending key.
+### Commit signing
+
+`--signing ssh|gpg` turns on Git commit signing; `skip` leaves every signing
+setting as it is. **SSH signing is the simpler choice** (GitHub's own
+recommendation): it uses the SSH key you already selected, needs no GPG, and
+works with agent keys. Git signs with `gpg.format ssh` and
+`user.signingkey` (the key's `.pub`, or `key::<public key>` for an agent key),
+and verifies with `gpg.ssh.allowedSignersFile`, the managed
+`local/allowed_signers` file. GitHub shows the commits as verified once the
+same key is also registered as a **signing** key (`gh ssh-key add <pub> --type
+signing`, or Key type "Signing Key" in the settings), a separate registration
+from the authentication key. `gpg` signs with the GPG key, as before. Profiles
+saved before `--signing` existed that select a GPG key keep signing with it
+(they read as `signing gpg`); a command line with `--gpg` but no `--signing`
+means the same. Either method first signs a commit in a throwaway repository
+(SSH also checks it with `git verify-commit`), and enables global **commit**
+signing only after GitHub registration is confirmed. The independent
+`tag.gpgsign` preference is preserved.
+
+For GPG signing, or any `prompt` GPG passphrase, the installer sets up a
+pinentry so commits from an IDE, a GUI or an agent can still ask for the
+passphrase: `pinentry-mac` (Homebrew) on macOS, `pinentry-gnome3` in a Linux
+desktop session, `pinentry-curses` otherwise, selected in a managed block of
+`${GNUPGHOME:-~/.gnupg}/gpg-agent.conf` (gpg-agent restarts when it changes).
+A `pinentry-program` you set yourself is kept.
+
+### GitHub access
+
+GitHub operations are read-only. The installer never uploads keys or logs into
+GitHub for you. GitHub CLI's default login lacks the read scopes the key checks
+need; grant only those for your choices:
+
+| Choice | Scope |
+| --- | --- |
+| `--ssh` | `read:public_key` |
+| `--gpg` | `read:gpg_key` |
+| `--signing ssh` | `read:ssh_signing_key` |
+| `--gpg`, `--signing ssh` (verified email) | `user:email` |
+
+for example `gh auth refresh -h github.com -s
+read:public_key,read:ssh_signing_key,user:email`. A missing key scope is a
+`manual-action github-key-scope` whose destination is exactly that command (a
+missing email scope is `github-email-scope`). Registering a key with `gh
+ssh-key add` / `gh gpg-key add` yourself needs the `admin:` scopes instead.
+
+Missing registration produces a `manual-action` TSV record and exits with
+status **3**, including the public-key file and destination URL. The selected
+reference is saved first, and a public GPG export remains available after
+cleanup. Register it yourself, then run the guided reconciliation again.
+Missing login or ordinary SSH configuration similarly produces manual
+guidance. A network/API failure (or a rate limit) remains an error, not
+evidence that a key is missing.
+
+SSH derives matching public material, refreshes GitHub's host keys in
+`known_hosts` from the API (dropping stale `github.com` entries, and writing
+through a symlinked file), and verifies both the selected identity and
+ordinary SSH against the same GitHub account. The checks run with
+`BatchMode=yes`, so they never wait for input, except that a
+passphrase-protected key file run from a terminal may ask. GPG requires a
+verified email. Reconciliation never generates credentials. If an initial run
+paused before another requested key was generated, resume the originally
+approved apply choices while reusing keys already created; do not expect
+reconciliation to create the pending key.
+
+The installer changes no SSH configuration unless you opt in with
+`--ssh-config yes`. That appends a managed `Host github.com` block to
+`~/.ssh/config` with `AddKeysToAgent yes`, on macOS `UseKeychain yes` (a
+`prompt` passphrase is then asked for once and kept in the Keychain), and
+`IdentityFile` for a key file (not for an agent key). Your own earlier
+settings for `github.com` take precedence; `remove-blocks` removes it.
 
 ## Existing setups
 
@@ -539,7 +609,9 @@ It, and `remove-blocks`, also run on hosts the installer does not support.
 
 To stop loading the profile, run `bash install.sh remove-blocks` (add
 `--dry-run` to preview). It deletes only the managed blocks from `.zshrc`,
-`.zshenv` and (macOS) `.zprofile`, plus any legacy unmarked loader, and leaves
+`.zshenv` and (macOS) `.zprofile`, plus any legacy unmarked loader, and the
+credential blocks from `~/.ssh/config` (`--ssh-config yes`) and
+`gpg-agent.conf` (the pinentry; gpg-agent is restarted), and leaves
 the rest of those files untouched, which is safer than
 restoring `*.leos-profiles.bak`: that backup is written only the first time a
 block is installed, so any later edits are not in it. Then start a fresh shell,
