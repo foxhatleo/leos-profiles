@@ -475,7 +475,7 @@ leos-refresh-init-cache() {
 # A .zwc is written only into a directory this user owns that nobody else can
 # write, through a private temporary directory, and only for regular files
 # this user owns. Plugin checkouts get `*.zwc` in .git/info/exclude first, so
-# they stay clean for the installer's pinned-checkout verification; a plugin
+# they stay clean for the installer's checkout verification; a plugin
 # whose exclude file cannot be updated is left uncompiled.
 __leos_zcompile_profile() {
   emulate -L zsh

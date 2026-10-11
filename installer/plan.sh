@@ -51,7 +51,7 @@ homebrew_prefixes() {
 }
 
 # version_manager_conflicts <pyenv|rbenv>: "<path><TAB><reason>" for each
-# existing installation the pinned checkout would collide with (ONB-5).
+# existing installation the profile's checkout would collide with (ONB-5).
 # Blocking reasons stop apply in preflight unless
 # --skip-existing-version-managers keeps the existing installation:
 #   not-a-git-checkout  the root exists but is no Git checkout (a Homebrew
@@ -59,7 +59,7 @@ homebrew_prefixes() {
 #   unexpected-origin   a checkout of another repository
 #   local-changes       a checkout with uncommitted changes
 # homebrew-install (a Homebrew pyenv/rbenv) is informational: both would be
-# installed, and the profile prefers the pinned checkout.
+# installed, and the profile prefers its own checkout.
 version_manager_conflicts() {
   local tool=$1 root="$HOME/.$1" repository prefix origin
   if [[ $tool == pyenv ]]; then repository=$PYENV_REPOSITORY; else repository=$RBENV_REPOSITORY; fi
@@ -154,12 +154,14 @@ report_existing_setups() {
 }
 
 # ---------------------------------------------------------------------------
-# Pinned artifacts that will shadow a Homebrew copy of the same tool (MI-3):
-# ~/.local/bin comes first on PATH, so `brew upgrade <tool>` no longer changes
-# what the shell runs.
+# Linux: release artifacts in ~/.local/bin that will shadow a Homebrew
+# (Linuxbrew) copy of the same tool (MI-3): ~/.local/bin comes first on PATH,
+# so `brew upgrade <tool>` no longer changes what the shell runs. macOS takes
+# these tools from Homebrew itself.
 report_shadowed_artifacts() {
   local name executable prefix
   local -a executables=()
+  [[ $OS_FAMILY != macos ]] || return 0
   while IFS= read -r name; do
     artifact_row "$name"
     has_csv_item "$SELECTED_STEPS" "$ARTIFACT_COMPONENT" || continue
@@ -173,6 +175,44 @@ report_shadowed_artifacts() {
       done < <(homebrew_prefixes)
     done
   done < <(artifact_names)
+}
+
+# ---------------------------------------------------------------------------
+# What this run moves off the pinned layout used before 2026-10: on macOS,
+# ~/.local/bin and ~/.local/npm copies that Homebrew's formulae replace, and
+# Git checkouts detached at a pinned commit, which move onto their default
+# branch.
+report_tool_migrations() {
+  local name path step directory label
+  if [[ $OS_FAMILY == macos ]]; then
+    while IFS= read -r name; do
+      artifact_row "$name"
+      has_csv_item "$SELECTED_STEPS" "$ARTIFACT_COMPONENT" || continue
+      while IFS= read -r path; do
+        printf 'migration\tlocal-bin\t%s\tremoved: Homebrew'"'"'s %s formula replaces it\n' "$path" "$ARTIFACT_FORMULA"
+      done < <(legacy_local_copy "$name")
+    done < <(artifact_names)
+    for step in yarn pnpm; do
+      has_csv_item "$SELECTED_STEPS" "$step" || continue
+      if [[ -e $HOME/.local/npm/bin/$step ]]; then
+        printf 'migration\tnpm-prefix\t%s\tremoved: Homebrew'"'"'s %s formula replaces it\n' "$HOME/.local/npm/bin/$step" "$step"
+      fi
+    done
+  fi
+  while IFS='|' read -r step directory label; do
+    has_csv_item "$SELECTED_STEPS" "$step" || continue
+    [[ -d $directory/.git ]] || continue
+    git -C "$directory" symbolic-ref --quiet HEAD >/dev/null 2>&1 && continue
+    printf 'migration\tgit-checkout\t%s\t%s moves from a pinned commit to origin'"'"'s default branch\n' "$directory" "$label"
+  done <<EOF
+pyenv|$HOME/.pyenv|pyenv
+rbenv|$HOME/.rbenv|rbenv
+rbenv|$HOME/.rbenv/plugins/ruby-build|ruby-build
+plugins|$TARGET/zsh/plugins/zsh-autosuggestions|zsh-autosuggestions
+plugins|$TARGET/zsh/plugins/zsh-syntax-highlighting|zsh-syntax-highlighting
+plugins|$TARGET/zsh/plugins/zsh-completions|zsh-completions
+plugins|$TARGET/zsh/plugins/fzf-tab|fzf-tab
+EOF
 }
 
 # ---------------------------------------------------------------------------
@@ -348,22 +388,22 @@ NODE_VERSION_APPROVED=""
 check_approved_node_version() {
   [[ -n $NODE_VERSION_APPROVED ]] || return 0
   has_csv_item "$SELECTED_STEPS" fnm || die "--node-version applies only when fnm is selected"
+  local kept
+  if kept=$(node_default_kept); then
+    [[ $kept == "$NODE_VERSION_APPROVED" ]] && return 0
+    printf '%s\n' "ERROR: the approved plan uses Node $NODE_VERSION_APPROVED, but this run keeps the installed default $kept. Nothing was changed; run inspect again and approve the new plan." >&2
+    exit 2
+  fi
   if resolve_node_version; then
     if [[ $RESOLVED_NODE_VERSION != "$NODE_VERSION_APPROVED" ]]; then
-      if [[ $NODE_SELECTION == current-lts ]]; then
-        printf '%s\n' "ERROR: the approved plan uses Node $NODE_VERSION_APPROVED, but the current LTS is now $RESOLVED_NODE_VERSION. Nothing was changed; run inspect again and approve the new plan." >&2
-      else
-        printf '%s\n' "ERROR: the approved plan uses Node $NODE_VERSION_APPROVED, but this run would use $RESOLVED_NODE_VERSION ($NODE_SELECTION). Nothing was changed; run inspect again and approve the new plan." >&2
-      fi
+      printf '%s\n' "ERROR: the approved plan uses Node $NODE_VERSION_APPROVED, but the current LTS is now $RESOLVED_NODE_VERSION. Nothing was changed; run inspect again and approve the new plan." >&2
       exit 2
     fi
     return 0
   fi
-  # Offline: the approved LTS is still a reviewed, compatible choice.
-  node_version_compatible "$NODE_VERSION_APPROVED" ||
-    die "Node $NODE_VERSION_APPROVED does not satisfy the selected tools' engine ranges"
+  # Offline: the approved LTS is still the reviewed choice.
   RESOLVED_NODE_VERSION=$NODE_VERSION_APPROVED
-  NODE_SELECTION=current-lts
+  NODE_SELECTION="current-lts"
 }
 
 # ---------------------------------------------------------------------------

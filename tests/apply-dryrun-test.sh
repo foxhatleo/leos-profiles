@@ -3,7 +3,7 @@
 # run_step loop, install_os_packages command construction, and every install_*
 # step's dry-run path. This is the only test that runs the real entrypoint end
 # to end. Dry-run performs no mutations and needs no network (every mutating
-# command is echoed by run(), and resolve_node_lts / downloads / git are all
+# command is echoed by run(), and resolve_node_version / downloads / git are all
 # guarded), so it is safe on any CI runner for the detected OS family.
 #
 # It runs against a fixture HOME/XDG state and a temporary copy of the public

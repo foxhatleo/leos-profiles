@@ -134,8 +134,10 @@ jobs:
         run: bash tests/node-test.sh
       - name: Test runtime cache and completion integration
         run: zsh tests/runtime-cache-test.zsh
-      - name: Verify locked Linux artifacts and digests
-        run: bash tests/locked-artifacts-test.sh
+      - name: Install the latest Linux releases and check their digests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash tests/release-artifacts-test.sh
       - name: Syntax-check installer modules and shell tests
         run: |
           for script in install.sh installer/*.sh tests/*.sh; do
@@ -160,8 +162,8 @@ jobs:
           done
           rm -f blk-*.sh
           exit "$rc"
-      - name: Clone locked plugins and source their combined Zsh integration
-        run: bash tests/locked-plugins-test.sh
+      - name: Clone the plugins' default branches and source their combined Zsh integration
+        run: bash tests/plugins-test.sh
       - name: Smoke-test the deterministic apply in dry-run (apt)
         run: bash tests/apply-dryrun-test.sh
       - name: Prove inspect and dry-run apply are read-only (apt)
@@ -191,8 +193,10 @@ jobs:
           exit 1
       - name: Verify mapped formula availability
         run: bash tests/package-map-availability.sh macos
-      - name: Verify locked macOS artifacts and digests
-        run: bash tests/locked-artifacts-test.sh
+      - name: Check Homebrew formulae, Linux release assets and pinned digests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash tests/release-artifacts-test.sh
       # A fresh Mac runs the installer with the system Bash 3.2, not the
       # Homebrew Bash that hosted runners put first on PATH.
       - name: Run deterministic installer tests (system Bash 3.2)
@@ -209,8 +213,8 @@ jobs:
       # so test it with exactly that interpreter rather than setup-python's.
       - name: Test metadata utility with the system Python
         run: /usr/bin/python3 --version && /usr/bin/python3 -I tests/rmdsstore_test.py
-      - name: Clone locked plugins and source their combined Zsh integration
-        run: bash tests/locked-plugins-test.sh
+      - name: Clone the plugins' default branches and source their combined Zsh integration
+        run: bash tests/plugins-test.sh
       - name: Smoke-test the deterministic apply in dry-run (macOS, system Bash 3.2)
         run: /bin/bash tests/apply-dryrun-test.sh
       - name: Prove inspect and dry-run apply are read-only (macOS, system Bash 3.2)
@@ -291,8 +295,8 @@ jobs:
             '
           fi
 
-  locked-linux-arm64:
-    name: Locked Linux arm64 artifacts (gating)
+  release-linux-arm64:
+    name: Linux arm64 release artifacts (gating)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     steps:
@@ -301,8 +305,10 @@ jobs:
           persist-credentials: false
       - name: Install completion verification dependency
         run: sudo apt-get update && sudo apt-get install -y zsh
-      - name: Verify every locked Linux arm64 binary and digest
-        run: bash tests/locked-artifacts-test.sh
+      - name: Install the latest Linux arm64 releases and check their digests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash tests/release-artifacts-test.sh
 
   # Informational: hosted-runner timing is noisy and the runners carry few of
   # the tools a workstation initializes, so this reports numbers in the job

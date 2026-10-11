@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Clone the actual locked plugin commits and source the combined Zsh stack.
+# Clone each plugin's default branch and source the combined Zsh stack.
 # shellcheck disable=SC1091,SC2034
 
 set -Eeuo pipefail
@@ -24,7 +24,7 @@ mkdir -p "$TARGET/zsh" "$HOME" "$TEMP_ROOT/bin"
 cp "$ROOT"/zsh/*.zsh "$ROOT"/zsh/*.toml "$TARGET/zsh/"
 cp -R "$ROOT/zsh/path" "$TARGET/zsh/path"
 printf '\n__leos_rehash_daily() { :; }\n__leos_fnm_prune_daily() { :; }\n' >> "$TARGET/zsh/cache.zsh"
-# Exercise real locked plugin code, without invoking host initialization tools
+# Exercise real plugin code, without invoking host initialization tools
 # or falling back to an absolute Homebrew installation outside the fixture.
 for tool in brew starship pyenv rbenv fnm npm pnpm bun direnv zoxide heroku; do
   printf '%s\n' '#!/bin/sh' 'printf ":\n"' > "$TEMP_ROOT/bin/$tool"
@@ -37,6 +37,7 @@ install_plugins
 for plugin in zsh-autosuggestions zsh-syntax-highlighting zsh-completions fzf-tab; do
   [[ -d $TARGET/zsh/plugins/$plugin/.git ]]
   [[ -z $(git -C "$TARGET/zsh/plugins/$plugin" status --porcelain) ]]
+  git_checkout_follows "$TARGET/zsh/plugins/$plugin" "$(git -C "$TARGET/zsh/plugins/$plugin" remote get-url origin)"
 done
 
 HOME="$HOME" LEOS_PROFILES_HOME="$TARGET" TERM=xterm-256color zsh -dfc '
@@ -58,4 +59,4 @@ HOME="$HOME" LEOS_PROFILES_HOME="$TARGET" TERM=xterm-256color zsh -dfc '
   [[ $widgets[self-insert] == user:_zsh_autosuggest_bound_1_self-insert ]]
 '
 
-printf '%s\n' 'locked plugin integration: PASS'
+printf '%s\n' 'plugin integration: PASS'

@@ -259,7 +259,7 @@ leos-doctor() {
       warning) print -r -- "  warning  $fields[2]: $fields[3]" ;;
       conflict) print -r -- "  conflict $fields[2]: $fields[3] ($fields[4])" ;;
       migration) print -r -- "  pending  migration: $fields[2] ${fields[3]:-}" ;;
-      shadow) print -r -- "  note     $fields[3] is shadowed by the pinned $fields[4]" ;;
+      shadow) print -r -- "  note     $fields[3] is shadowed by the profile's $fields[4]" ;;
       existing) print -r -- "  note     $fields[2] at $fields[3]: $fields[4]" ;;
     esac
   done

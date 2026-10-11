@@ -8,28 +8,35 @@ The implementation stays compatible with macOS Bash 3.2.
 
 | File | Responsibility |
 | --- | --- |
-| `installer/registry.sh` | Ordered component registry, dependency closure, handler validation, and the direct-artifact table |
+| `installer/registry.sh` | Ordered component registry, dependency closure, handler validation, the tool-artifact table, and which steps a full upgrade re-runs |
 | `installer/state.sh` | Saved profiles, schema migration, state signatures, locking and cleanup |
 | `installer/packages.sh` | Platform bootstrap, package maps and package-manager operations |
-| `installer/tools.sh` | Locked tools, dependency checkouts and Node selection/activation |
+| `installer/tools.sh` | Tool installs (Homebrew formulae, latest GitHub releases, npm), default-branch checkouts and Node LTS activation |
 | `installer/config.sh` | Managed shell blocks, symlink-aware rewrites and default-shell changes |
 | `installer/credentials.sh` | Local key preparation, read-only GitHub checks and manual-action pauses |
 | `installer/verification.sh` | Component postconditions |
 | `installer/signatures.sh` | Inputs that invalidate each component's recorded state |
-| `installer/lock.sh` | Reviewed versions, URLs, commits, digests and npm engine requirements |
+| `installer/sources.sh` | Upstream repositories and Linux release asset names, plus the two pinned downloads (Homebrew's installer, rpatool) |
 | `installer/plan.sh` | Disclosure records beyond the selection, the preflight before any change, and the inventory |
 
 Add a component to the registry and supply its install, verification and
 signature handlers. Registry validation rejects missing handlers or unknown
-dependencies. A tool downloaded as a pinned file or archive into `~/.local/bin`
-is one row in `artifact_registry` (owning component, lock prefix, archive kind,
-executables, expected `--version` line) plus its `<PREFIX>_VERSION` and
-per-platform `<PREFIX>_<DARWIN|LINUX>_<AARCH64|X64>_URL`/`_SHA256` values in
-`lock.sh`; its handlers then just call `artifact_install`, `artifact_verify`
-and `artifact_signature`, and inspect, the inventory, the shadow check and
-`tests/locked-artifacts-test.sh` pick it up from the table. Tests should check behavior and repair, not just matching names.
-A recorded successful step is only a hint: verification must detect a missing,
-wrong-version, or damaged artifact before skipping it.
+dependencies. A tool the installer puts on PATH itself is one row in
+`artifact_registry` (owning component, source prefix, archive kind,
+executables, expected `--version` line, Homebrew formula) plus its
+`<PREFIX>_REPOSITORY` and `<PREFIX>_LINUX_<AARCH64|X64>_ASSET` values in
+`sources.sh`. On macOS it installs as the formula; on Linux as the latest
+GitHub release, checked against the SHA-256 digest GitHub publishes for the
+asset. A `file` row is the exception: a pinned `<PREFIX>_URL`/`_SHA256`. Its
+handlers then just call `artifact_install`, `artifact_verify` and
+`artifact_signature`, and inspect, the inventory, the shadow and migration
+checks and `tests/release-artifacts-test.sh` pick it up from the table. Add a
+component that follows upstream to `step_follows_upstream`, so a full upgrade
+moves it forward. Tests should check behavior and repair, not just matching
+names. A recorded successful step is only a hint: verification must detect a
+missing or damaged artifact before skipping it. Signatures record where a tool
+comes from, never its version, so a new upstream release does not by itself
+make a step look undone.
 
 Use `LEOS_PROFILES_INSTALL_LIB_ONLY=1` when sourcing the engine for isolated
 unit tests. Stub package managers, credential APIs and host-changing commands;
@@ -39,10 +46,11 @@ Clean up using the original fixture variable, never `rm -rf "$HOME"`.
 ## State and TSV contract
 
 Inspection format and saved profile schema are independently versioned. The
-inspection stream uses `meta<TAB>schema<TAB>1`. Saved profiles use schema 2 and
-include `node-policy<TAB>preserve-compatible` and the `current-lts` fallback
-channel. Schema-1 profiles remain readable and are migrated by an approved
-apply/reconcile. Inspection and dry-run must not write the migration.
+inspection stream uses `meta<TAB>schema<TAB>1`. Saved profiles use schema 3 and
+include `node-policy<TAB>current-lts` and the `current-lts` channel. Schema-1
+and schema-2 (`preserve-compatible`) profiles remain readable and are migrated
+by an approved apply/reconcile. Inspection and dry-run must not write the
+migration.
 
 The parser must preserve empty TSV columns and dispatch by record type; it must
 not treat prose progress output during apply as inspection records. Every
@@ -55,15 +63,15 @@ update it together with the emitter in `install.sh`.
 | --- | --- | --- | --- |
 | `meta` | 3 | `schema`, `1` | Inspection format version |
 | `platform` | 3 | `family`, value | Selected OS package family |
-| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-locked-artifact` (no locked build for this platform), `node-version` (the given `--node-version` is not what the plan resolves now) |
+| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now) |
 | `profile` | 3 | `root`, path | Authoritative local checkout |
 | `policy` | 3 | `node`, `full-upgrade` or `selection`, value | Node selection policy; `yes`/`no` host upgrade; `saved` when `inspect --saved` read the selection from the saved profile |
 | `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
-| `migration` | 4 | `profile-schema`, `1`, `2`; or `legacy-loader` / `legacy-environment`, file path, managed marker | Pending profile migration; or a legacy unmarked loader (`.zshrc`) or zshenv snippet (`.zshenv`) that `zsh-config` and `remove-blocks` remove |
+| `migration` | 4 | `profile-schema`, old schema, `3`; `legacy-loader` / `legacy-environment`, file path, managed marker; or `local-bin` / `npm-prefix` / `git-checkout`, path, what happens | Pending profile migration; a legacy unmarked loader (`.zshrc`) or zshenv snippet (`.zshenv`) that `zsh-config` and `remove-blocks` remove; or a copy from the pinned layout: a macOS `~/.local/bin` or `~/.local/npm` copy removed once Homebrew's formula is in place, or a checkout detached at a pinned commit that moves onto its default branch |
 | `group` | 4 | category, name, status | Selected, implied or internal group |
 | `package` | 3 | OS family, name | Exact OS package member |
 | `action` | 3 | step, description | Planned effect of a step or bootstrap |
-| `artifact` | 5 | source kind, name, URL/repository, digest/commit | Locked executable dependency; the digest of a Nerd Font archive is `SHA-256.txt`, read from the pinned checksum list at apply time |
+| `artifact` | 5 | source kind, name, source, revision | Where a tool comes from. `formula`: Homebrew formula, `latest`; `release`: `github.com/<repo>` and the asset name (for a Nerd Font, its archive URL and `SHA-256.txt`, the list its digest is read from); `npm`: registry package, `latest`; `git`: repository, `default-branch`; `direct`: pinned URL and SHA-256 |
 | `external` | 3 | service, description or URL | External service the plan contacts |
 | `file` | 3 | name, path | File the plan reads or writes; `zshrc`, `zshenv` and (macOS) `zprofile` give the resolved zsh startup files |
 | `global` | 3 | `git`, keys | Global Git settings the plan configures |
@@ -72,8 +80,8 @@ update it together with the emitter in `install.sh`.
 | `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`) |
 | `conflict` | 4 | component, path, reason | An existing installation in the way of `pyenv`/`rbenv`: `not-a-git-checkout`, `unexpected-origin`, `local-changes` (apply stops unless `--skip-existing-version-managers`), or `homebrew-install` (informational) |
 | `existing` | 4 | name, path, effect | A shell framework or version manager the profile coexists with: `oh-my-zsh`, `powerlevel10k`, `nvm`, `conda`, `asdf`, `mise` |
-| `shadow` | 4 | executable, other copy, pinned copy | A Homebrew copy of a locked artifact that the pinned `~/.local/bin` copy will shadow |
-| `runtime` | 4 | `node`, version, origin | `preserved-fnm`, `adopted-existing`, or `current-lts` |
+| `shadow` | 4 | executable, other copy, profile copy | Linux: a Homebrew copy of a tool that the profile's `~/.local/bin` copy will shadow |
+| `runtime` | 4 | `node`, version, origin | `current-lts` (what fnm will install), `installed` (a working default kept without a full upgrade), or `unresolved`/`resolve-during-apply` |
 | `postcondition` | 3 | component, status | Current `verified` or `needed` result; `skipped` when `--skip-existing-version-managers` keeps an existing pyenv/rbenv |
 | `manual-action` | 4 | action, public path, destination | Manual intervention required; process exits 3 |
 | `item` | 5 | kind, name, path, `present`/`absent` | `inventory --tsv` only: something the installer creates or manages |
@@ -113,8 +121,8 @@ passphrase prompt, chsh's password prompt (Linux, non-root) or a sudo password
 (`privileged_plan` is not empty and `sudo -n true` fails) ends the run with
 `manual-action run-in-terminal` carrying the exact command line, exit 3, before
 the lock exists. With a terminal, `sudo -v` asks once up front. Dry runs never
-call sudo; they report what would stop. Last, it downloads the pinned Nerd
-Fonts checksum list and rejects an unknown font name. Tests stub
+call sudo; they report what would stop. Last, it downloads the latest Nerd
+Fonts release's checksum list and rejects an unknown font name. Tests stub
 `stdin_is_terminal`, `sudo` and `privileged_plan`.
 
 A component that needs the user (a missing chsh) calls `queue_manual_action`
@@ -151,16 +159,15 @@ line becomes a `:` no-op so an enclosing block still parses.
 
 ## Node and package invariants
 
-Yarn and pnpm each depend on fnm. Preserve a compatible existing fnm default;
-otherwise adopt the exact version of compatible Node on PATH into fnm. Resolve
-one current LTS only when no compatible existing runtime is available. Record
-and verify the actual selected version, including the default fnm executable.
-Run npm tool installation and verification with explicit `fnm exec` so a
-non-interactive installer does not accidentally use an older system Node.
-
-Compatibility uses the selected locked package manifests. Current ranges are
-Yarn `>=4.0.0` and pnpm `>=22.13`; when both are selected, satisfy both.
-A newer available LTS alone does not invalidate a compatible saved default.
+Yarn and pnpm each depend on fnm. Node policy is `current-lts`: installing fnm
+resolves the current LTS (from `index.tab`, or `fnm list-remote --lts`),
+installs it and makes it the default; another Node on PATH is not adopted.
+Verification only requires a working default, so a newer LTS alone does not
+make the step look undone: a full upgrade re-runs the step and moves the
+default, while a repair leaves it. The state file's diagnostic column records
+the version installed. Run npm tool installation and verification with
+explicit `fnm exec --using=default` so a non-interactive installer does not
+accidentally use an older system Node.
 
 `--no-full-upgrade` requests only missing selected OS packages, while normal
 package-manager dependency resolution can still upgrade dependencies. Keep
@@ -220,17 +227,20 @@ permission to create its local agent socket; a restrictive sandbox can block
 that part. The fixture cleans up its own agent and keys. These tests neither
 upload keys nor use the developer's GitHub account.
 
-Network-backed checks verify pinned dependencies and package availability:
+Network-backed checks resolve upstream sources and package availability:
 
 ```bash
-bash tests/locked-plugins-test.sh
-bash tests/locked-artifacts-test.sh
+bash tests/plugins-test.sh
+GITHUB_TOKEN=$(gh auth token) bash tests/release-artifacts-test.sh
 bash tests/package-map-availability.sh macos  # or apt, fedora, arch
 ```
 
-The artifact checks execute downloaded binaries appropriate to the host and
-verify npm package engine declarations. Plugin checks load the combined real
-Zsh plugin integration. CI also checks TOML and fenced Bash in the runbook.
+The release check resolves every Linux release asset for both CPUs (from any
+host), verifies the two pinned digests and the latest Nerd Fonts archive, and
+then, on Linux, installs and runs each latest release (a second install must
+find it current) plus npm's Yarn and pnpm on the current LTS; on macOS it
+checks that each Homebrew formula exists. Plugin checks clone each default
+branch and load the combined real Zsh plugin integration. CI also checks TOML and fenced Bash in the runbook.
 None of these alone substitutes for actual package installation.
 
 ## CI layout
@@ -240,7 +250,7 @@ Two workflows split fast feedback from real provisioning:
 - `.github/workflows/ci.yml` runs on every push to `master`, every pull request
   and on demand: Zsh syntax and profile tests, lint (ShellCheck, actionlint,
   zizmor, ruff; shfmt informational), installer/credential/Node/cache/util
-  suites, locked artifacts, package-map availability on macOS, apt and
+  suites, release artifacts, package-map availability on macOS, apt and
   containers, the dry-run smoke test and the read-only test. The macOS jobs run
   the Bash suites under `/bin/bash` (3.2) and `rmdsstore_test.py` under
   `/usr/bin/python3 -I`, the interpreters the installer and `rmdsstore`
@@ -258,6 +268,9 @@ Two workflows split fast feedback from real provisioning:
   the other macOS runners set `LEOS_CI_FULL_UPGRADE=0`, which makes
   `tests/provisioning-test.sh` pass `--no-full-upgrade` for that scenario.
   Linux containers keep the full upgrade. These jobs are not required checks.
+  Jobs that look up GitHub releases get the workflow's read-only
+  `GITHUB_TOKEN`, so many jobs behind one address stay under the API's
+  anonymous rate limit.
 
 Both workflows cancel superseded pull-request runs but never cancel runs on
 `master`. Actions are pinned by commit SHA with the exact release in a comment,
@@ -281,9 +294,11 @@ runners (Homebrew Tier 1; macOS 14 and Intel Macs are unsupported). Those images
 matrix does not establish factory-fresh macOS bootstrap coverage.
 
 Scenarios exercise minimal Zsh setup, pnpm-only dependency resolution,
-Yarn/pnpm execution, recommended provisioning, repeat reconciliation, repair
-(of bun, Starship, the `.zshenv` managed block, a drifted plugin checkout and
-the font) and the refusal to discard a locally edited plugin.
+Yarn/pnpm execution, recommended provisioning, repeat reconciliation, a
+full-upgrade reconcile that re-runs the tools and finds them current (Linux),
+repair (of bun, Starship, the `.zshenv` managed block, a plugin checkout left
+detached as the pinned installs did, and the font) and the refusal to discard
+a locally edited plugin.
 They skip credentials, disable login-shell changes, and explicitly install
 fonts. Unit and credential fixture tests cover the excluded interactive flows;
 manual end-to-end GitHub registration remains outside automated CI.
@@ -293,30 +308,24 @@ only with that run's evidence, and report failures or unexecuted jobs separately
 See [the provisioning workflow](../.github/workflows/provision.yml) for exact
 runner labels and triggers.
 
-## Updating dependencies
+## Upstream sources
 
-1. Read upstream release metadata and the exact candidate artifact's manifest.
-   Update URLs, versions, immutable commits and SHA-256 digests together in
-   `installer/lock.sh`. Download candidates for verification; do not execute an
-   unverified replacement installer. GitHub publishes each release asset's
-   SHA-256: `gh api repos/<owner>/<repo>/releases/tags/<tag> --jq
-   '.assets[]|[.name,.digest]|@tsv'`. For Nerd Fonts, pin the release and the
-   digest of its `SHA-256.txt`; font archives are checked against that list.
-   `LEOS_ARTIFACT_ALL_PLATFORMS=1 bash tests/locked-artifacts-test.sh`
-   downloads and digest-checks every platform's artifact from one machine.
-2. For Yarn/pnpm, compare `package.json`'s `engines.node` with the declared lock
-   range. Update engine requirements and selection tests together. Do not infer
-   runtime support solely from the package's major version.
-3. Verify each OS/architecture artifact and the real executable's version.
-   Test locked plugins together, not just their Git revisions. Preserve dirty
-   dependency-checkout refusal and equivalent trusted-origin normalization.
-4. Run focused regressions and the real provisioning matrix. When changing
-   dependency closure, verify the minimal selection that newly implies a tool.
-   Reconciliation must repair removed artifacts without unnecessary reinstalls.
-5. Include the source metadata, platform coverage and any remaining validation
-   gaps in the change description. OS package channels and Node's fallback LTS
-   channel remain moving dependencies; do not describe the whole machine as
-   reproducibly locked.
+Tools are not pinned, so there is no routine dependency bump. What needs care:
+
+1. A renamed release asset, a dropped CPU build or a project that moves breaks
+   installs. `tests/release-artifacts-test.sh` resolves every asset for both
+   Linux CPUs on every CI run; fix `installer/sources.sh` when it fails.
+2. GitHub must publish a SHA-256 digest for the asset (it does for every asset
+   uploaded since mid-2025); the installer refuses an asset without one.
+3. Keep the version line in `artifact_registry` matching what the tool prints;
+   verification accepts any version but checks that shape.
+4. The two pinned downloads change deliberately: update the URL and SHA-256
+   together in `installer/sources.sh` (Homebrew's installer at a reviewed
+   commit; rpatool's repository is archived, so it should never change).
+5. Behaviour changes upstream (a new major pnpm, a Node LTS that a tool does
+   not support yet) reach users on their next full upgrade. Run the real
+   provisioning matrix when a failure points there, and say in the change
+   description which upstream versions it was tested with.
 
 ## Startup benchmark
 

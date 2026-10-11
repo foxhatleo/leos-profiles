@@ -174,9 +174,11 @@ test_tar_archive_install_creates_extraction_directory() {
   tar -czf "$TEST_ARCHIVE" -C "$temp/source" starship
   HOME="$temp/home"
   DRY_RUN=0
-  platform_asset() { printf '%s\t%s\n' 'https://example.invalid/starship.tar.gz' deadbeef; }
-  download_verified() { mkdir -p "$(dirname -- "$3")"; cp "$TEST_ARCHIVE" "$3"; }
-  install_locked_archive_binary starship tar.gz "$HOME/.local/bin/starship"
+  download_verified() {
+    assert_equals "$1:$2" "https://example.invalid/starship.tar.gz:deadbeef"
+    mkdir -p "$(dirname -- "$3")"; cp "$TEST_ARCHIVE" "$3"
+  }
+  install_archive_binary starship tar.gz https://example.invalid/starship.tar.gz deadbeef "$HOME/.local/bin/starship"
   [[ -x $HOME/.local/bin/starship ]] || fail "tar archive binary was not installed"
   rm -rf "$temp"
 }
@@ -186,26 +188,31 @@ test_tar_archive_install_creates_extraction_directory() {
 test_uv_artifact_installs_uv_and_uvx() {
   local temp name
   temp=$(mktemp -d)
-  mkdir -p "$temp/source/uv-aarch64-apple-darwin" "$temp/home"
+  mkdir -p "$temp/source/uv-aarch64-unknown-linux-musl" "$temp/home"
   for name in uv uvx; do
-    printf '#!/bin/sh\nprintf "%%s %%s (fixture 2026-10-01)\\n" "%s" "%s"\n' "$name" "$UV_VERSION" > "$temp/source/uv-aarch64-apple-darwin/$name"
-    chmod 755 "$temp/source/uv-aarch64-apple-darwin/$name"
+    printf '#!/bin/sh\nprintf "%%s %%s (fixture 2026-10-01)\\n" "%s" "0.9.1"\n' "$name" > "$temp/source/uv-aarch64-unknown-linux-musl/$name"
+    chmod 755 "$temp/source/uv-aarch64-unknown-linux-musl/$name"
   done
   TEST_ARCHIVE="$temp/uv.tar.gz"
-  tar -czf "$TEST_ARCHIVE" -C "$temp/source" uv-aarch64-apple-darwin
+  tar -czf "$TEST_ARCHIVE" -C "$temp/source" uv-aarch64-unknown-linux-musl
   HOME="$temp/home"
   DRY_RUN=0
-  OS_FAMILY=macos
+  OS_FAMILY=apt
+  github_latest_asset() {
+    assert_equals "$1 $2" "astral-sh/uv uv-aarch64-unknown-linux-musl.tar.gz"
+    printf '0.9.1\thttps://github.com/astral-sh/uv/releases/download/0.9.1/%s\t%s\n' "$2" "$(printf x | hash_text)"
+  }
   download_verified() { mkdir -p "$(dirname -- "$3")"; cp "$TEST_ARCHIVE" "$3"; }
   uname() { if [[ ${1:-} == -m ]]; then printf 'arm64\n'; else command uname "$@"; fi; }
-  install_uv
+  install_uv >/dev/null
   [[ -x $HOME/.local/bin/uv && -x $HOME/.local/bin/uvx ]] || fail "uv and uvx were not both installed"
   verify_step uv || fail "the installed uv did not verify"
   rm "$HOME/.local/bin/uvx"
   ! verify_step uv || fail "uv verified without uvx"
-  assert_contains "$(platform_asset uv)" "uv-aarch64-apple-darwin.tar.gz"
-  OS_FAMILY=apt
-  assert_contains "$(platform_asset uv)" "uv-aarch64-unknown-linux-musl.tar.gz"
+  assert_equals "$(artifact_release_asset uv)" $'astral-sh/uv\tuv-aarch64-unknown-linux-musl.tar.gz'
+  OS_FAMILY=macos
+  assert_equals "$(artifact_source uv)" formula
+  assert_equals "$(artifact_path uv)" "$(brew_prefix)/bin/uv"
   rm -rf "$temp"
 }
 
@@ -217,22 +224,44 @@ test_linux_artifacts_use_static_musl_builds() {
   for tool in starship uv; do
     for machine in aarch64 x86_64; do
       FAKE_MACHINE=$machine
-      assert_contains "$(platform_asset "$tool")" "$tool-$machine-unknown-linux-musl.tar.gz"$'\t'
+      assert_contains "$(artifact_release_asset "$tool")" $'\t'"$tool-$machine-unknown-linux-musl.tar.gz"
     done
   done
 }
 
-test_platform_assets_are_locked() {
-  OS_FAMILY=macos
-  local asset expected
-  asset=$(platform_asset bun)
-  assert_contains "$asset" "bun-darwin"
-  if [[ $(machine_arch) == aarch64 ]]; then
-    expected=$BUN_DARWIN_AARCH64_SHA256
-  else
-    expected=$BUN_DARWIN_X64_SHA256
-  fi
-  assert_contains "$asset" "$expected"
+# Each artifact's source by platform: Homebrew's formula on macOS, the latest
+# GitHub release on Linux (an asset per CPU, none for others), and the one
+# pinned file everywhere. Only the pinned sources name a digest.
+test_artifact_sources_follow_the_platform() {
+  local name family
+  uname() { if [[ ${1:-} == -m ]]; then printf '%s\n' "$FAKE_MACHINE"; else command uname "$@"; fi; }
+  FAKE_MACHINE=x86_64
+  for family in macos apt fedora arch; do
+    OS_FAMILY=$family
+    assert_equals "$(artifact_source rpatool)" pinned
+    assert_equals "$(artifact_pinned_asset rpatool)" "$RPATOOL_URL"$'\t'"$RPATOOL_SHA256"
+    for name in bun fnm starship uv; do
+      if [[ $family == macos ]]; then
+        assert_equals "$(artifact_source "$name")" formula
+      else
+        assert_equals "$(artifact_source "$name")" release
+      fi
+    done
+  done
+  OS_FAMILY=apt
+  assert_equals "$(artifact_release_asset bun)" $'oven-sh/bun\tbun-linux-x64.zip'
+  assert_equals "$(artifact_release_asset fnm)" $'Schniz/fnm\tfnm-linux.zip'
+  FAKE_MACHINE=aarch64
+  assert_equals "$(artifact_release_asset bun)" $'oven-sh/bun\tbun-linux-aarch64.zip'
+  assert_equals "$(artifact_release_asset fnm)" $'Schniz/fnm\tfnm-arm64.zip'
+  FAKE_MACHINE=riscv64
+  ! artifact_release_asset bun >/dev/null || fail "an unsupported CPU resolved a release asset"
+  [[ $RPATOOL_URL == https://raw.githubusercontent.com/Shizmob/rpatool/*/rpatool && $RPATOOL_SHA256 =~ ^[0-9a-f]{64}$ ]] ||
+    fail "rpatool is not pinned to a commit and digest"
+  [[ $HOMEBREW_INSTALL_URL == https://raw.githubusercontent.com/Homebrew/install/*/install.sh && $HOMEBREW_INSTALL_SHA256 =~ ^[0-9a-f]{64}$ ]] ||
+    fail "Homebrew's installer is not pinned to a commit and digest"
+  assert_equals "$(component_handler plugins artifacts)" starship
+  assert_equals "$(component_handler zsh-config artifacts)" ""
 }
 
 test_package_maps_cover_every_supported_os() {
@@ -287,18 +316,14 @@ test_dev_tools_cover_ruby_build_dependencies() {
   done
 }
 
-# Version literals live only in lock.sh; restating them here would just make
-# every dependency bump edit two files. Check the shape of the locked data.
-test_default_font_policy_and_npm_artifacts_are_locked() {
+test_default_font_policy_and_npm_tool_sources() {
   OS_FAMILY=macos
   INSTALL_FONTS=auto
   FONT_NAME=""
   font_should_install || fail "automatic font policy should install a font on desktop macOS"
-  [[ $YARN_URL == *"/yarn-$YARN_VERSION.tgz" && $PNPM_URL == *"/pnpm-$PNPM_VERSION.tgz" ]] ||
-    fail "npm tarball URLs do not match their locked versions"
-  [[ $YARN_URL == https://registry.npmjs.org/yarn/-/* ]] || fail "Yarn tarball URL is not locked"
-  [[ $PNPM_URL == https://registry.npmjs.org/pnpm/-/* ]] || fail "pnpm tarball URL is not locked"
-  [[ $YARN_SHA256 =~ ^[0-9a-f]{64}$ && $PNPM_SHA256 =~ ^[0-9a-f]{64}$ ]] || fail "npm tarball digest is invalid"
+  assert_equals "$(inspect_npm_tool yarn)" $'artifact\tformula\tyarn\tyarn\tlatest'
+  OS_FAMILY=apt
+  assert_equals "$(inspect_npm_tool pnpm)" $'artifact\tnpm\tpnpm\tregistry.npmjs.org/pnpm\tlatest'
 }
 
 test_macos_package_verification_batches_brew_calls() {
@@ -617,7 +642,7 @@ test_node_lts_and_download_curl_policy() {
   record_curl_argv "$temp/curl-argv"
   SELECTED_STEPS=fnm
   RESOLVED_NODE_VERSION=""
-  resolve_node_lts
+  resolve_node_version
   assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
   argv=$(cat "$temp/curl-argv")
   assert_contains "$argv" '<--proto><=https><--tlsv1.2>'
@@ -807,7 +832,7 @@ test_bootstrap_skips_present_tools_on_linux() {
     assert_contains "$out" "already present"
     [[ $out != *"apt-get"* ]] || fail "bootstrap ran the package manager with all tools present"
   else
-    # unzip is what install_locked_archive_binary needs for bun and fnm.
+    # unzip is what install_archive_binary needs for bun and fnm on Linux.
     assert_contains "$out" "apt-get"
   fi
 }
@@ -818,7 +843,7 @@ test_bootstrap_installs_unzip_when_missing() {
   package_installed() { return 0; }
   DRY_RUN=1
   # unzip is in no package group, so the bootstrap is the only thing that can
-  # provide it — and install_locked_archive_binary needs it for bun and fnm.
+  # provide it — and install_archive_binary needs it for bun and fnm on Linux.
   command() {
     if [[ ${2:-} == unzip ]]; then return 1; fi
     builtin command "$@"
@@ -848,6 +873,118 @@ test_equivalent_github_origins() {
   github_origins_equivalent 'git@github.com:Owner/Repo.git' 'https://github.com/owner/repo' || fail "SSH/HTTPS origins were not normalized"
   github_origins_equivalent 'ssh://git@github.com/OWNER/REPO' 'https://github.com/owner/repo.git' || fail "ssh URL origin was not normalized"
   ! github_origins_equivalent 'https://github.com/owner/other' 'https://github.com/owner/repo' || fail "different origins were accepted"
+}
+
+# fixture_git <args...>: git with a fixture identity and none of the
+# developer's configuration (signing, hooks, default branch).
+fixture_git() {
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+    GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid command git "$@"
+}
+
+# fixture_commit <checkout> <message>: commit a change and print its hash.
+fixture_commit() {
+  printf '%s\n' "$2" >> "$1/history"
+  fixture_git -C "$1" add history
+  fixture_git -C "$1" commit -q -m "$2"
+  fixture_git -C "$1" rev-parse HEAD
+}
+
+# Git sources follow their default branch: a missing checkout is cloned, a
+# checkout detached at a pinned commit (installs before 2026-10) moves onto
+# the branch, and an existing branch fast-forwards. Local bare repositories
+# stand in for GitHub; the origin check compares their paths.
+test_follow_default_branch_moves_detached_checkouts_onto_the_branch() {
+  local temp upstream work first third head out
+  temp=$(mktemp -d)
+  upstream="$temp/upstream.git"
+  work="$temp/work"
+  git() { fixture_git "$@"; }
+  github_origins_equivalent() { [[ $1 == "$2" ]]; }
+  DRY_RUN=0
+  fixture_git init -q --bare -b trunk "$upstream"
+  fixture_git init -q -b trunk "$work"
+  first=$(fixture_commit "$work" first)
+  fixture_commit "$work" second >/dev/null
+  fixture_git -C "$work" push -q "$upstream" trunk
+  # A missing checkout is cloned onto the default branch.
+  follow_default_branch "$upstream" "$temp/plugins/tool" tool >/dev/null
+  assert_equals "$(git -C "$temp/plugins/tool" symbolic-ref --short HEAD)" trunk
+  git_checkout_follows "$temp/plugins/tool" "$upstream" || fail "a fresh clone did not follow its default branch"
+  # A pinned (detached) checkout is reported, then moved onto the branch.
+  git -C "$temp/plugins/tool" checkout -q --detach "$first"
+  ! git_checkout_follows "$temp/plugins/tool" "$upstream" || fail "a detached checkout was accepted"
+  third=$(fixture_commit "$work" third)
+  fixture_git -C "$work" push -q "$upstream" trunk
+  out=$(follow_default_branch "$upstream" "$temp/plugins/tool" tool)
+  assert_contains "$out" "checkout --quiet -B trunk origin/trunk"
+  assert_equals "$(git -C "$temp/plugins/tool" symbolic-ref --short HEAD)" trunk
+  assert_equals "$(git -C "$temp/plugins/tool" rev-parse HEAD)" "$third"
+  git_checkout_follows "$temp/plugins/tool" "$upstream" || fail "the moved checkout did not follow its default branch"
+  # On the branch: a new upstream commit fast-forwards it.
+  head=$(fixture_commit "$work" fourth)
+  fixture_git -C "$work" push -q "$upstream" trunk
+  out=$(follow_default_branch "$upstream" "$temp/plugins/tool" tool)
+  assert_contains "$out" "merge --quiet --ff-only origin/trunk"
+  assert_equals "$(git -C "$temp/plugins/tool" rev-parse HEAD)" "$head"
+  # A dry run fetches nothing.
+  fixture_commit "$work" fifth >/dev/null
+  fixture_git -C "$work" push -q "$upstream" trunk
+  DRY_RUN=1
+  out=$(follow_default_branch "$upstream" "$temp/plugins/tool" tool)
+  assert_contains "$out" "Would fast-forward tool"
+  assert_equals "$(git -C "$temp/plugins/tool" rev-parse HEAD)" "$head"
+  DRY_RUN=0
+  # Local work is never overwritten: uncommitted changes, or commits that
+  # are not on the default branch, stop the step.
+  printf 'local\n' >> "$temp/plugins/tool/history"
+  out=$( (follow_default_branch "$upstream" "$temp/plugins/tool" tool) 2>&1 ) && fail "a dirty checkout was updated"
+  assert_contains "$out" "tool checkout has local changes"
+  git -C "$temp/plugins/tool" checkout -q -- history
+  fixture_commit "$temp/plugins/tool" local >/dev/null
+  out=$( (follow_default_branch "$upstream" "$temp/plugins/tool" tool) 2>&1 ) && fail "a diverged checkout was updated"
+  assert_contains "$out" "tool has commits that are not on origin/trunk"
+  # Anything else at the destination is refused.
+  mkdir -p "$temp/plugins/plain"
+  out=$( (follow_default_branch "$upstream" "$temp/plugins/plain" plain) 2>&1 ) && fail "a non-Git directory was taken over"
+  assert_contains "$out" "plain exists but is not a Git checkout"
+  rm -rf "$temp"
+}
+
+# git_checkout_follows: a clean checkout of the expected repository, on a
+# branch. verify_pyenv uses it, so a pinned checkout is repaired by the step.
+test_git_checkout_follows_rejects_detached_and_foreign_checkouts() {
+  local temp first
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  git() { fixture_git "$@"; }
+  mkdir -p "$HOME"
+  ! git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a missing checkout was accepted"
+  fixture_git init -q -b master "$HOME/.pyenv"
+  mkdir -p "$HOME/.pyenv/bin"
+  printf '#!/bin/sh\n' > "$HOME/.pyenv/bin/pyenv"
+  chmod +x "$HOME/.pyenv/bin/pyenv"
+  fixture_git -C "$HOME/.pyenv" add bin/pyenv
+  fixture_git -C "$HOME/.pyenv" commit -q -m first
+  first=$(fixture_commit "$HOME/.pyenv" second)
+  ! git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout without an origin was accepted"
+  git -C "$HOME/.pyenv" remote add origin git@github.com:PyEnv/pyenv.git
+  git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "an equivalent origin on a branch was rejected"
+  verify_pyenv || fail "verify_pyenv rejected a checkout on its branch"
+  git -C "$HOME/.pyenv" checkout -q --detach "$first"
+  ! git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a detached HEAD was accepted"
+  ! verify_pyenv || fail "verify_pyenv accepted a pinned (detached) checkout"
+  OS_FAMILY=apt
+  SELECTED_STEPS=pyenv
+  TARGET="$temp/profile"
+  assert_equals "$(report_tool_migrations)" $'migration\tgit-checkout\t'"$HOME/.pyenv"$'\tpyenv moves from a pinned commit to origin\'s default branch'
+  git -C "$HOME/.pyenv" checkout -q master
+  printf 'local\n' >> "$HOME/.pyenv/history"
+  ! git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout with local changes was accepted"
+  git -C "$HOME/.pyenv" checkout -q -- history
+  git -C "$HOME/.pyenv" remote set-url origin https://github.com/example/not-pyenv.git
+  ! git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout of another repository was accepted"
+  rm -rf "$temp"
 }
 
 test_recommended_and_whole_group_closure() {
@@ -897,15 +1034,16 @@ test_node_lts_is_resolved_once_per_run() {
   curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv22.1.0\tx\tx\tx\tx\tx\tx\tx\tx\tIron\tfalse\n'; }
   SELECTED_STEPS=fnm
   RESOLVED_NODE_VERSION=""
-  resolve_node_lts
+  resolve_node_version
   assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
-  curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv24.2.0\tx\tx\tx\tx\tx\tx\tx\tx\tKrypton\tfalse\n'; }
-  resolve_node_lts
+  curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv25.0.0\tx\tx\tx\tx\tx\tx\tx\tx\t-\tfalse\nv24.2.0\tx\tx\tx\tx\tx\tx\tx\tx\tKrypton\tfalse\n'; }
+  resolve_node_version
   assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
   SELECTED_STEPS=fnm
   RESOLVED_NODE_VERSION=""
-  resolve_node_lts
-  assert_equals "$RESOLVED_NODE_VERSION" v24.2.0
+  # The newest LTS line, never a newer Current release.
+  resolve_node_version
+  assert_equals "$RESOLVED_NODE_VERSION:$NODE_SELECTION" v24.2.0:current-lts
   rm -rf "$temp"
 }
 
@@ -918,10 +1056,9 @@ test_node_verifier_checks_the_real_executable() {
     'case "$1" in' \
     '  --version) printf "fnm 1.39.0\\n" ;;' \
     '  default) printf "v22.14.0\\n" ;;' \
-    '  exec) printf "%s\\n" "${FAKE_NODE_VERSION:-v22.14.0}" ;;' \
+    '  exec) [ "$2" = --using=default ] && printf "%s\\n" "${FAKE_NODE_VERSION:-v22.14.0}" ;;' \
     'esac' > "$HOME/.local/bin/fnm"
   chmod +x "$HOME/.local/bin/fnm"
-  RESOLVED_NODE_VERSION=v22.14.0
   verify_step fnm || fail "valid default Node executable was rejected"
   export FAKE_NODE_VERSION=v20.0.0
   ! verify_step fnm || fail "wrong actual Node executable version was accepted"
@@ -937,7 +1074,6 @@ test_inspection_schema_and_membership() {
   REQUESTED_GROUPS=$SELECTED_GROUPS
   normalise_dependencies
   order_selected_steps
-  resolve_node_lts() { RESOLVED_NODE_VERSION=v22.1.0; }
   verify_step() { return 1; }
   output=$(inspect_tsv)
   assert_contains "$output" $'meta\tschema\t1'
@@ -946,7 +1082,7 @@ test_inspection_schema_and_membership() {
   assert_contains "$output" $'group\tpackage\tcore-utils\tselected'
   [[ $output != *$'group\tpackage\tlanguages'* ]] || fail "bun implied the languages group"
   assert_contains "$output" $'package\tmacos\tcoreutils'
-  assert_contains "$output" $'artifact\tdirect\tbun\t'
+  assert_contains "$output" $'artifact\tformula\tbun\tbun\tlatest'
 }
 
 test_empty_custom_selection_is_inspectable() {
@@ -999,8 +1135,8 @@ test_node_lts_returns_nonzero_when_unresolvable() {
   curl() { return 1; }                  # network unavailable
   fnm() { return 1; }                   # fnm on PATH but list-remote fails
   RESOLVED_NODE_VERSION=""
-  if resolve_node_lts; then fail "resolve_node_lts must return nonzero (not die) when unresolvable"; fi
-  [[ -z $RESOLVED_NODE_VERSION ]] || fail "resolve_node_lts set a version despite failing"
+  if resolve_node_version; then fail "resolve_node_version must return nonzero (not die) when unresolvable"; fi
+  [[ -z $RESOLVED_NODE_VERSION ]] || fail "resolve_node_version set a version despite failing"
   rm -rf "$temp"
 }
 
@@ -1034,6 +1170,38 @@ test_packages_full_upgrade_rerun_has_no_false_warning() {
   DRY_RUN=1
   err=$(run_step packages 2>&1 >/dev/null)
   [[ $err != *"failed verification"* ]] || fail "packages full-upgrade re-run emitted a false verification warning"
+  rm -rf "$temp"
+}
+
+# A full upgrade re-runs every step that follows upstream even when it is
+# recorded and verifies, so tools and checkouts move forward; the pinned file
+# (bins), fonts and configuration stay as they are. A repair re-runs none.
+test_full_upgrade_reruns_steps_that_follow_upstream() {
+  local temp step out
+  temp=$(mktemp -d)
+  RUN_LOG="$temp/runs"
+  : > "$RUN_LOG"
+  DRY_RUN=1
+  state_done() { return 0; }
+  verify_step() { return 0; }
+  component_handler() { printf 'record_step_run\n'; }
+  record_step_run() { printf '%s\n' "$step" >> "$RUN_LOG"; }
+  local -a steps=()
+  csv_split steps "$CANONICAL_STEPS"
+  FULL_UPGRADE=1
+  for step in "${steps[@]}"; do
+    out=$(run_step "$step" 2>&1)
+    if step_follows_upstream "$step"; then
+      assert_contains "$out" "Re-running $step (a full upgrade brings it up to date)"
+    else
+      assert_contains "$out" "Skipping $step (recorded complete and verified)"
+    fi
+  done
+  assert_equals "$(paste -sd, - < "$RUN_LOG")" packages,pyenv,rbenv,bun,fnm,yarn,pnpm,uv,plugins
+  : > "$RUN_LOG"
+  FULL_UPGRADE=0
+  for step in "${steps[@]}"; do run_step "$step" >/dev/null 2>&1; done
+  [[ ! -s $RUN_LOG ]] || fail "a repair re-ran verified steps: $(paste -sd, - < "$RUN_LOG")"
   rm -rf "$temp"
 }
 
@@ -1514,58 +1682,49 @@ test_login_shell_lookup_ignores_unset_user() {
   assert_equals "$(current_login_shell)" /usr/bin/zsh
 }
 
-# The per-tool lookup the artifact registry replaced (CQ-8), kept here as the
-# reference the registry must reproduce exactly.
-legacy_platform_asset() {
-  local tool=$1 arch=$2
-  case "$tool:$OS_FAMILY:$arch" in
-    bun:macos:aarch64) printf '%s\t%s\n' "$BUN_DARWIN_AARCH64_URL" "$BUN_DARWIN_AARCH64_SHA256" ;;
-    bun:macos:x64) printf '%s\t%s\n' "$BUN_DARWIN_X64_URL" "$BUN_DARWIN_X64_SHA256" ;;
-    bun:*:aarch64) printf '%s\t%s\n' "$BUN_LINUX_AARCH64_URL" "$BUN_LINUX_AARCH64_SHA256" ;;
-    bun:*:x64) printf '%s\t%s\n' "$BUN_LINUX_X64_URL" "$BUN_LINUX_X64_SHA256" ;;
-    fnm:macos:*) printf '%s\t%s\n' "$FNM_DARWIN_URL" "$FNM_DARWIN_SHA256" ;;
-    fnm:*:aarch64) printf '%s\t%s\n' "$FNM_LINUX_AARCH64_URL" "$FNM_LINUX_AARCH64_SHA256" ;;
-    fnm:*:x64) printf '%s\t%s\n' "$FNM_LINUX_X64_URL" "$FNM_LINUX_X64_SHA256" ;;
-    starship:macos:aarch64) printf '%s\t%s\n' "$STARSHIP_DARWIN_AARCH64_URL" "$STARSHIP_DARWIN_AARCH64_SHA256" ;;
-    starship:macos:x64) printf '%s\t%s\n' "$STARSHIP_DARWIN_X64_URL" "$STARSHIP_DARWIN_X64_SHA256" ;;
-    starship:*:aarch64) printf '%s\t%s\n' "$STARSHIP_LINUX_AARCH64_URL" "$STARSHIP_LINUX_AARCH64_SHA256" ;;
-    starship:*:x64) printf '%s\t%s\n' "$STARSHIP_LINUX_X64_URL" "$STARSHIP_LINUX_X64_SHA256" ;;
-    rpatool:*) printf '%s\t%s\n' "$RPATOOL_URL" "$RPATOOL_SHA256" ;;
-  esac
-}
-
-# Same assets, and byte-identical signatures, for every family and CPU, so
-# recorded state stays valid across the refactor.
-test_artifact_registry_matches_legacy_lookup() {
-  local family machine arch tool expected
+# Signatures name where each component comes from, never a version: a new
+# upstream release, or a new Node LTS, leaves recorded state valid, while a
+# change of source (formula, release asset, pinned file) invalidates it.
+test_artifact_signatures_name_the_source_not_a_version() {
+  local family
   TARGET=/fixture/profile
-  NODE_POLICY=preserve-compatible
-  RESOLVED_NODE_VERSION=""
+  NODE_POLICY=current-lts
   uname() { if [[ ${1:-} == -m ]]; then printf '%s\n' "$FAKE_MACHINE"; else command uname "$@"; fi; }
+  FAKE_MACHINE=arm64
   for family in macos apt fedora arch; do
     OS_FAMILY=$family
-    for machine in arm64 x86_64; do
-      FAKE_MACHINE=$machine
-      if [[ $machine == arm64 ]]; then arch=aarch64; else arch=x64; fi
-      for tool in rpatool bun fnm starship; do
-        assert_equals "$(platform_asset "$tool")" "$(legacy_platform_asset "$tool" "$arch")"
-      done
-      assert_equals "$(signature_bins)" "|$RPATOOL_URL|$RPATOOL_SHA256"
-      assert_equals "$(signature_bun)" "|$BUN_VERSION|$(legacy_platform_asset bun "$arch")"
-      assert_equals "$(signature_fnm)" "|$FNM_VERSION|$(legacy_platform_asset fnm "$arch")|preserve-compatible|unresolved"
-      expected="|$TARGET|$STARSHIP_VERSION|$(legacy_platform_asset starship "$arch")"
-      expected+="|$ZSH_AUTOSUGGESTIONS_COMMIT|$ZSH_SYNTAX_HIGHLIGHTING_COMMIT|$ZSH_COMPLETIONS_COMMIT|$FZF_TAB_COMMIT"
-      assert_equals "$(signature_plugins)" "$expected"
-    done
+    assert_equals "$(signature_bins)" "|$RPATOOL_URL"$'\t'"$RPATOOL_SHA256"
   done
+  OS_FAMILY=macos
+  assert_equals "$(signature_bun)" '|formula|bun'
+  assert_equals "$(signature_uv)" '|formula|uv'
+  RESOLVED_NODE_VERSION=""
+  assert_equals "$(signature_fnm)" '|formula|fnm|current-lts'
+  RESOLVED_NODE_VERSION=v24.2.0
+  assert_equals "$(signature_fnm)" '|formula|fnm|current-lts'
+  assert_equals "$(signature_plugins)" "|$TARGET|formula|starship|$ZSH_AUTOSUGGESTIONS_REPOSITORY|$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY|$ZSH_COMPLETIONS_REPOSITORY|$FZF_TAB_REPOSITORY|default-branch"
+  assert_equals "$(signature_pyenv)" "|$PYENV_REPOSITORY|default-branch"
+  assert_equals "$(signature_rbenv)" "|$RBENV_REPOSITORY|$RUBY_BUILD_REPOSITORY|default-branch"
+  OS_FAMILY=apt
+  assert_equals "$(signature_bun)" $'|release|oven-sh/bun\tbun-linux-aarch64.zip'
+  assert_equals "$(signature_fnm)" $'|release|Schniz/fnm\tfnm-arm64.zip|current-lts'
+  FAKE_MACHINE=x86_64
+  assert_equals "$(signature_uv)" $'|release|astral-sh/uv\tuv-x86_64-unknown-linux-musl.tar.gz'
   FAKE_MACHINE=riscv64
-  ! artifact_asset bun >/dev/null || fail "an unsupported CPU resolved a locked asset"
-  assert_equals "$(component_handler plugins artifacts)" starship
-  assert_equals "$(component_handler zsh-config artifacts)" ""
+  assert_equals "$(signature_bun)" '|release|unsupported'
+  # The step signature hashes that material, so it holds across versions too.
+  FAKE_MACHINE=arm64
+  RESOLVED_NODE_VERSION=v22.1.0
+  local first
+  first=$(step_signature fnm)
+  RESOLVED_NODE_VERSION=v24.2.0
+  assert_equals "$(step_signature fnm)" "$first"
+  OS_FAMILY=macos
+  [[ $(step_signature fnm) != "$first" ]] || fail "a change of source kept the fnm signature"
 }
 
-# Verification checks the version line (archives) or the digest (files), and
-# every executable the registry lists.
+# Verification checks every executable the registry lists, and the version
+# line (release artifacts, any version) or the digest (pinned files).
 test_artifact_verification_checks_version_and_digest() {
   local temp
   temp=$(mktemp -d)
@@ -1573,39 +1732,310 @@ test_artifact_verification_checks_version_and_digest() {
   OS_FAMILY=apt
   mkdir -p "$HOME/.local/bin"
   fake_tool() { printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$2" > "$HOME/.local/bin/$1"; chmod +x "$HOME/.local/bin/$1"; }
-  fake_tool bun "$BUN_VERSION"
-  artifact_verify bun || fail "the locked bun version was rejected"
+  ! artifact_verify bun || fail "a missing bun was accepted"
+  fake_tool bun 1.3.0
+  artifact_verify bun || fail "an installed bun was rejected"
   verify_step bun || fail "verify_bun disagrees with the registry"
-  fake_tool bun 0.0.1
-  ! artifact_verify bun || fail "a wrong bun version was accepted"
-  fake_tool starship "starship $STARSHIP_VERSION"
-  artifact_verify starship || fail "the locked starship version was rejected"
-  fake_tool starship "starship ${STARSHIP_VERSION}9"
-  ! artifact_verify starship || fail "a longer version string was accepted as the locked one"
-  fake_tool fnm "fnm $FNM_VERSION"
-  artifact_verify fnm || fail "the locked fnm version was rejected"
+  fake_tool bun 'error: not bun'
+  ! artifact_verify bun || fail "an executable that reports no bun version was accepted"
+  fake_tool starship "starship 1.23.0"
+  artifact_verify starship || fail "an installed starship was rejected"
+  fake_tool starship "starship"
+  ! artifact_verify starship || fail "a starship that reports no version was accepted"
+  fake_tool fnm "fnm 1.39.0"
+  artifact_verify fnm || fail "an installed fnm was rejected"
+  fake_tool uv "uv 0.9.1 (fixture 2026-10-01)"
+  ! artifact_verify uv || fail "uv verified without uvx"
+  fake_tool uvx "uvx 0.9.1 (fixture 2026-10-01)"
+  artifact_verify uv || fail "an installed uv and uvx were rejected"
   printf 'rpatool body' > "$HOME/.local/bin/rpatool"
   chmod 700 "$HOME/.local/bin/rpatool"
   ! artifact_verify rpatool || fail "rpatool with the wrong digest was accepted"
-  artifact_asset() { printf '%s\t%s\n' https://example.invalid/rpatool "$(printf 'rpatool body' | hash_text)"; }
-  artifact_verify rpatool || fail "rpatool with the locked digest was rejected"
+  artifact_pinned_asset() { printf '%s\t%s\n' https://example.invalid/rpatool "$(printf 'rpatool body' | hash_text)"; }
+  artifact_verify rpatool || fail "rpatool with the pinned digest was rejected"
   rm -rf "$temp"
 }
 
+# artifact_version_ok: with a version, exactly that one (build details may
+# follow after a space); without one, any version in the registry's line.
+test_artifact_version_ok_accepts_any_version_without_one() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp"
+  mkdir -p "$HOME/.local/bin"
+  fake_tool() { printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$2" > "$HOME/.local/bin/$1"; chmod +x "$HOME/.local/bin/$1"; }
+  fake_tool starship "starship 1.23.0"
+  artifact_version_ok starship "$HOME/.local/bin/starship" || fail "any-version mode rejected starship 1.23.0"
+  artifact_version_ok starship "$HOME/.local/bin/starship" 1.23.0 || fail "the exact version was rejected"
+  ! artifact_version_ok starship "$HOME/.local/bin/starship" 1.23 || fail "a version prefix was accepted as the version"
+  ! artifact_version_ok starship "$HOME/.local/bin/starship" 1.22.0 || fail "an older version was accepted as the given one"
+  fake_tool starship "starship 1.23.09"
+  ! artifact_version_ok starship "$HOME/.local/bin/starship" 1.23.0 || fail "a longer version string was accepted as the given one"
+  fake_tool uv "uv 0.9.1 (fixture 2026-10-01)"
+  artifact_version_ok uv "$HOME/.local/bin/uv" 0.9.1 || fail "build details after the version were rejected"
+  artifact_version_ok uv "$HOME/.local/bin/uv" || fail "any-version mode rejected build details"
+  fake_tool bun 1.3.0
+  artifact_version_ok bun "$HOME/.local/bin/bun" || fail "any-version mode rejected a bare bun version"
+  fake_tool bun "hello"
+  ! artifact_version_ok bun "$HOME/.local/bin/bun" || fail "any-version mode accepted a line without a version"
+  fake_tool fnm "starship 1.23.0"
+  ! artifact_version_ok fnm "$HOME/.local/bin/fnm" || fail "another tool's version line was accepted"
+  ! artifact_version_ok fnm "$HOME/.local/bin/missing" || fail "a missing executable was accepted"
+  rm -rf "$temp"
+}
+
+# One artifact record per selected tool, naming its source: the formula on
+# macOS, the GitHub release asset on Linux, the URL and digest of a pinned
+# file, the default branch of a Git source and npm's latest release.
 test_inspect_lists_every_selected_registry_artifact() {
-  local output name url digest
+  local output temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME"
   OS_FAMILY=macos
-  SELECTED_STEPS=bins,bun,plugins
+  SELECTED_STEPS=bins,bun,pyenv,yarn,plugins
   SELECTED_GROUPS=""
   REQUESTED_STEPS=$SELECTED_STEPS
   REQUESTED_GROUPS=""
   verify_step() { return 1; }
   output=$(inspect_tsv)
-  for name in rpatool bun starship; do
-    IFS=$'\t' read -r url digest <<< "$(platform_asset "$name")"
-    assert_contains "$output" $'artifact\tdirect\t'"$name"$'\t'"$url"$'\t'"$digest"
-  done
-  [[ $output != *$'artifact\tdirect\tfnm\t'* ]] || fail "an unselected artifact was listed"
+  assert_contains "$output" $'artifact\tdirect\trpatool\t'"$RPATOOL_URL"$'\t'"$RPATOOL_SHA256"
+  assert_contains "$output" $'artifact\tformula\tbun\tbun\tlatest'
+  assert_contains "$output" $'artifact\tformula\tstarship\tstarship\tlatest'
+  assert_contains "$output" $'artifact\tformula\tyarn\tyarn\tlatest'
+  assert_contains "$output" $'artifact\tgit\tpyenv\t'"$PYENV_REPOSITORY"$'\tdefault-branch'
+  assert_contains "$output" $'artifact\tgit\tfzf-tab\t'"$FZF_TAB_REPOSITORY"$'\tdefault-branch'
+  [[ $output != *$'\tfnm\t'* ]] || fail "an unselected artifact was listed"
+  OS_FAMILY=apt
+  uname() { if [[ ${1:-} == -m ]]; then printf 'aarch64\n'; else command uname "$@"; fi; }
+  output=$(inspect_tsv)
+  assert_contains "$output" $'artifact\tdirect\trpatool\t'"$RPATOOL_URL"$'\t'"$RPATOOL_SHA256"
+  assert_contains "$output" $'artifact\trelease\tbun\tgithub.com/oven-sh/bun\tbun-linux-aarch64.zip'
+  assert_contains "$output" $'artifact\trelease\tstarship\tgithub.com/starship/starship\tstarship-aarch64-unknown-linux-musl.tar.gz'
+  assert_contains "$output" $'artifact\tnpm\tyarn\tregistry.npmjs.org/yarn\tlatest'
+  [[ $output != *$'artifact\tformula\t'* ]] || fail "Linux listed a Homebrew formula"
+  SELECTED_STEPS=fonts
+  REQUESTED_STEPS=fonts
+  INSTALL_FONTS=yes
+  FONT_NAME=Fixture
+  output=$(inspect_tsv)
+  assert_contains "$output" $'artifact\trelease\tnerd-font\t'"$NERD_FONTS_RELEASE_URL/Fixture.tar.xz"$'\tSHA-256.txt'
+  rm -rf "$temp"
+}
+
+# GitHub's release JSON, as the API serves it: the asset's name comes before
+# the uploader object, its digest and its download URL. Its digest is null
+# for assets uploaded before GitHub computed digests.
+release_json_fixture() {
+  cat <<'JSON'
+{
+  "url": "https://api.github.com/repos/fixture/tool/releases/1",
+  "tag_name": "v1.4.2",
+  "name": "Tool 1.4.2, with fixes",
+  "author": { "login": "fixture", "id": 1, "type": "User" },
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/fixture/tool/releases/assets/10",
+      "id": 10,
+      "name": "tool-linux-x64.tar.gz",
+      "label": "",
+      "uploader": { "login": "fixture-bot", "id": 2, "type": "Bot", "site_admin": false },
+      "content_type": "application/gzip",
+      "state": "uploaded",
+      "size": 1234,
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "download_count": 5,
+      "browser_download_url": "https://github.com/fixture/tool/releases/download/v1.4.2/tool-linux-x64.tar.gz"
+    },
+    {
+      "url": "https://api.github.com/repos/fixture/tool/releases/assets/11",
+      "id": 11,
+      "name": "tool-linux-arm64.tar.gz",
+      "label": null,
+      "uploader": { "login": "fixture-bot", "id": 2, "type": "Bot", "site_admin": false },
+      "size": 1200,
+      "digest": null,
+      "browser_download_url": "https://github.com/fixture/tool/releases/download/v1.4.2/tool-linux-arm64.tar.gz"
+    },
+    {"url":"https://api.github.com/repos/fixture/tool/releases/assets/12","id":12,"name":"tool-sha512.tar.gz","uploader":{"login":"fixture-bot"},"digest":"sha512:abcd","browser_download_url":"https://github.com/fixture/tool/releases/download/v1.4.2/tool-sha512.tar.gz"},
+    {"id":13,"name":"tool-mirror.tar.gz","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","browser_download_url":"https://mirror.example.invalid/tool-mirror.tar.gz"}
+  ],
+  "body": "Changes: faster, smaller."
+}
+JSON
+}
+
+test_github_release_asset_record_parses_release_json() {
+  local a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  assert_equals "$(release_json_fixture | github_release_asset_record tool-linux-x64.tar.gz)" \
+    $'v1.4.2\thttps://github.com/fixture/tool/releases/download/v1.4.2/tool-linux-x64.tar.gz\tsha256:'"$a"
+  assert_equals "$(release_json_fixture | github_release_asset_record tool-linux-arm64.tar.gz)" \
+    $'v1.4.2\thttps://github.com/fixture/tool/releases/download/v1.4.2/tool-linux-arm64.tar.gz\tnull'
+  # Compact JSON (one line) parses the same.
+  assert_equals "$(release_json_fixture | tr -d '\n' | github_release_asset_record tool-sha512.tar.gz)" \
+    $'v1.4.2\thttps://github.com/fixture/tool/releases/download/v1.4.2/tool-sha512.tar.gz\tsha512:abcd'
+  ! release_json_fixture | github_release_asset_record tool-linux-riscv64.tar.gz >/dev/null ||
+    fail "an asset the release does not have produced a record"
+  ! printf '{"message": "Not Found"}' | github_release_asset_record tool-linux-x64.tar.gz >/dev/null ||
+    fail "an API error body produced a record"
+}
+
+# github_latest_asset fetches the latest release over HTTPS and accepts only
+# a GitHub download with a SHA-256 digest; GITHUB_TOKEN, when set, is sent.
+test_github_latest_asset_requires_a_sha256_digest() {
+  local temp out a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  temp=$(mktemp -d)
+  CURL_LOG="$temp/curl-argv"
+  curl() { printf '<%s>' "$@" >> "$CURL_LOG"; printf '\n' >> "$CURL_LOG"; release_json_fixture; }
+  unset GITHUB_TOKEN
+  out=$(github_latest_asset fixture/tool tool-linux-x64.tar.gz) || fail "a published SHA-256 digest was refused"
+  assert_equals "$out" $'v1.4.2\thttps://github.com/fixture/tool/releases/download/v1.4.2/tool-linux-x64.tar.gz\t'"$a"
+  assert_contains "$(cat "$CURL_LOG")" '<--proto><=https><--tlsv1.2>'
+  assert_contains "$(cat "$CURL_LOG")" '<https://api.github.com/repos/fixture/tool/releases/latest>'
+  [[ $(cat "$CURL_LOG") != *Authorization* ]] || fail "an Authorization header was sent without GITHUB_TOKEN"
+  : > "$CURL_LOG"
+  GITHUB_TOKEN=fixture-token github_latest_asset fixture/tool tool-linux-x64.tar.gz >/dev/null
+  assert_contains "$(cat "$CURL_LOG")" '<-H><Authorization: Bearer fixture-token>'
+  out=$( (github_latest_asset fixture/tool tool-linux-arm64.tar.gz) 2>&1 ) && fail "an asset with a null digest was accepted"
+  assert_contains "$out" "GitHub publishes no SHA-256 digest for tool-linux-arm64.tar.gz in fixture/tool v1.4.2"
+  out=$( (github_latest_asset fixture/tool tool-sha512.tar.gz) 2>&1 ) && fail "a non-SHA-256 digest was accepted"
+  assert_contains "$out" "no SHA-256 digest"
+  out=$( (github_latest_asset fixture/tool tool-mirror.tar.gz) 2>&1 ) && fail "a download outside github.com was accepted"
+  assert_contains "$out" "Unexpected download URL"
+  out=$( (github_latest_asset fixture/tool tool-linux-riscv64.tar.gz) 2>&1 ) && fail "a missing asset was accepted"
+  assert_contains "$out" "The latest fixture/tool release has no tool-linux-riscv64.tar.gz"
+  curl() { return 22; }
+  out=$( (github_latest_asset fixture/tool tool-linux-x64.tar.gz) 2>&1 ) && fail "an API failure was accepted"
+  assert_contains "$out" "Could not read the latest fixture/tool release"
+  rm -rf "$temp"
+}
+
+test_release_version_strips_the_tag_prefix() {
+  assert_equals "$(release_version v1.39.0)" 1.39.0
+  assert_equals "$(release_version bun-v1.3.0)" 1.3.0
+  assert_equals "$(release_version 0.9.1)" 0.9.1
+}
+
+# A Linux release install downloads only when the installed version is not
+# the latest release, and checks the result reports that version.
+test_release_install_skips_the_installed_latest_version() {
+  local temp out
+  temp=$(mktemp -d)
+  # The stubs read RELEASE_FIXTURE: install_archive_binary has a local $temp.
+  RELEASE_FIXTURE=$temp
+  HOME="$temp/home"
+  mkdir -p "$HOME/.local/bin" "$temp/source"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  uname() { if [[ ${1:-} == -m ]]; then printf 'x86_64\n'; else command uname "$@"; fi; }
+  github_latest_asset() {
+    printf '%s %s\n' "$1" "$2" >> "$RELEASE_FIXTURE/latest.log"
+    printf 'v1.23.0\thttps://github.com/starship/starship/releases/download/v1.23.0/%s\t%s\n' "$2" "$(printf x | hash_text)"
+  }
+  download_verified() {
+    printf '%s %s\n' "$1" "$2" >> "$RELEASE_FIXTURE/download.log"
+    mkdir -p "$(dirname -- "$3")"; cp "$RELEASE_FIXTURE/starship.tar.gz" "$3"
+  }
+  fake_starship() {
+    printf '#!/bin/sh\nprintf "starship %s\\n"\n' "$2" > "$1"; chmod 755 "$1"
+  }
+  fake_starship "$temp/source/starship" 1.23.0
+  tar -czf "$temp/starship.tar.gz" -C "$temp/source" starship
+  # The latest version is installed: nothing is downloaded.
+  fake_starship "$HOME/.local/bin/starship" 1.23.0
+  out=$(artifact_install starship)
+  assert_contains "$out" "starship 1.23.0 is the latest release and already installed"
+  assert_equals "$(cat "$temp/latest.log")" "starship/starship starship-x86_64-unknown-linux-musl.tar.gz"
+  [[ ! -e $temp/download.log ]] || fail "the installed latest release was downloaded again"
+  # An older one is replaced with the verified latest.
+  fake_starship "$HOME/.local/bin/starship" 1.22.0
+  artifact_install starship >/dev/null
+  assert_equals "$(cat "$temp/download.log")" "https://github.com/starship/starship/releases/download/v1.23.0/starship-x86_64-unknown-linux-musl.tar.gz $(printf x | hash_text)"
+  assert_equals "$("$HOME/.local/bin/starship" --version)" "starship 1.23.0"
+  # A download that does not report the release's version fails the install.
+  fake_starship "$HOME/.local/bin/starship" 1.22.0
+  fake_starship "$temp/source/starship" 1.21.0
+  tar -czf "$temp/starship.tar.gz" -C "$temp/source" starship
+  out=$( (artifact_install starship) 2>&1 ) && fail "a download reporting another version was accepted"
+  assert_contains "$out" "starship does not report version 1.23.0 after installation"
+  # Dry-run names the source and contacts nothing.
+  : > "$temp/latest.log"
+  DRY_RUN=1
+  out=$(artifact_install starship)
+  assert_contains "$out" "Would install the latest starship release (starship-x86_64-unknown-linux-musl.tar.gz from github.com/starship/starship)"
+  [[ ! -s $temp/latest.log ]] || fail "a dry run asked GitHub for the latest release"
+  # A CPU upstream publishes no build for stops with that reason.
+  DRY_RUN=0
+  uname() { if [[ ${1:-} == -m ]]; then printf 'riscv64\n'; else command uname "$@"; fi; }
+  out=$( (artifact_install starship) 2>&1 ) && fail "an unsupported CPU installed starship"
+  assert_contains "$out" "starship publishes no Linux build for riscv64"
+  rm -rf "$temp"
+}
+
+# macOS takes the tools from Homebrew. Copies older installs left in
+# ~/.local/bin (ahead of Homebrew on PATH) are removed once the formula is
+# installed, but only files that report the tool's own version line.
+test_macos_legacy_local_copies_are_removed_only_when_they_are_the_tool() {
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  HOMEBREW_PREFIX="$temp/brew"
+  BREW_LOG="$temp/brew.log"
+  TARGET="$temp/profile"
+  mkdir -p "$HOME/.local/bin" "$HOMEBREW_PREFIX/bin"
+  : > "$BREW_LOG"
+  OS_FAMILY=macos
+  DRY_RUN=0
+  FULL_UPGRADE=0
+  ensure_brew() { :; }
+  brew() {
+    local IFS=' '
+    printf '%s\n' "$*" >> "$BREW_LOG"
+    case $1 in
+      list) cat "$temp/brew-installed" 2>/dev/null; return 0 ;;
+      outdated) [[ -n ${BREW_OUTDATED:-} ]] && printf '%s\n' "$BREW_OUTDATED"; return 0 ;;
+      install) printf '%s\n' "$2" >> "$temp/brew-installed" ;;
+    esac
+  }
+  fake_tool() { printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$2" > "$1"; chmod +x "$1"; }
+  fake_tool "$HOME/.local/bin/uv" "uv 0.8.0 (legacy 2025-01-01)"
+  fake_tool "$HOME/.local/bin/uvx" "uvx 0.8.0 (legacy 2025-01-01)"
+  fake_tool "$HOME/.local/bin/starship" "my own starship wrapper"
+  fake_tool "$HOMEBREW_PREFIX/bin/uv" "uv 0.9.1 (Homebrew 2026-10-01)"
+  fake_tool "$HOMEBREW_PREFIX/bin/uvx" "uvx 0.9.1 (Homebrew 2026-10-01)"
+  fake_tool "$HOMEBREW_PREFIX/bin/starship" "starship 1.23.0"
+  printf 'uv\nstarship\n' > "$temp/brew-installed"
+  assert_equals "$(legacy_local_copy uv)" "$HOME/.local/bin/uv"$'\n'"$HOME/.local/bin/uvx"
+  assert_equals "$(legacy_local_copy starship)" ""
+  assert_equals "$(legacy_local_copy rpatool)" ""
+  ! artifact_verify uv || fail "uv verified with the legacy copy ahead of the formula"
+  artifact_verify starship || fail "an unrelated ~/.local/bin/starship blocked the formula"
+  SELECTED_STEPS=uv,plugins
+  out=$(report_tool_migrations)
+  assert_contains "$out" $'migration\tlocal-bin\t'"$HOME/.local/bin/uv"$'\tremoved: Homebrew\'s uv formula replaces it'
+  assert_contains "$out" $'migration\tlocal-bin\t'"$HOME/.local/bin/uvx"$'\t'
+  [[ $out != *starship* ]] || fail "an unrelated starship was reported as a legacy copy"
+  artifact_install uv >/dev/null
+  [[ ! -e $HOME/.local/bin/uv && ! -e $HOME/.local/bin/uvx ]] || fail "the legacy uv copy was left in front of the formula"
+  ! grep -q '^install' "$BREW_LOG" || fail "an installed formula was installed again"
+  artifact_verify uv || fail "uv did not verify after the legacy copy was removed"
+  artifact_install starship >/dev/null
+  [[ -x $HOME/.local/bin/starship ]] || fail "an unrelated ~/.local/bin/starship was removed"
+  # Missing formulae are installed; a full upgrade upgrades outdated ones.
+  artifact_install bun >/dev/null
+  grep -qx 'install bun' "$BREW_LOG" || fail "a missing formula was not installed"
+  FULL_UPGRADE=1
+  : > "$BREW_LOG"
+  artifact_install uv >/dev/null
+  ! grep -q '^upgrade' "$BREW_LOG" || fail "an up-to-date formula was upgraded"
+  BREW_OUTDATED=uv
+  artifact_install uv >/dev/null
+  grep -qx 'upgrade uv' "$BREW_LOG" || fail "a full upgrade did not upgrade an outdated formula"
+  # Linux never treats ~/.local/bin as a legacy location: it is the install.
+  OS_FAMILY=apt
+  fake_tool "$HOME/.local/bin/uv" "uv 0.8.0"
+  assert_equals "$(legacy_local_copy uv)" ""
+  rm -rf "$temp"
 }
 
 test_retired_flags_are_rejected_everywhere() {
@@ -1648,7 +2078,6 @@ make_font_release() {
   [[ -n $digest ]] || digest=$(sha256 "$dir/Fixture.tar.xz")
   printf '%s  %s\n' "$digest" Fixture.tar.xz "$(printf other | hash_text)" Other.zip > "$dir/SHA-256.txt"
   NERD_FONTS_TEST_RELEASE_URL=https://example.invalid/release
-  NERD_FONTS_TEST_CHECKSUMS_SHA256=$(sha256 "$dir/SHA-256.txt")
   FONT_RELEASE_DIR=$dir
   curl() {
     [[ ${1:-} == --help ]] && return 0
@@ -1721,10 +2150,8 @@ test_nerd_font_archive_digest_mismatch_fails() {
   err=$( (install_nerd_font Fixture) 2>&1 ) && fail "a font archive with the wrong digest was installed"
   assert_contains "$err" "Digest mismatch"
   [[ -z $(find "$HOME" -name '*.ttf' 2>/dev/null) ]] || fail "fonts were installed despite the mismatch"
-  # A checksum list that is not the pinned one is rejected before it is read.
-  NERD_FONTS_TEST_CHECKSUMS_SHA256=$(printf tampered | hash_text)
-  err=$( (install_nerd_font Fixture) 2>&1 ) && fail "an unpinned checksum list was trusted"
-  assert_contains "$err" "Digest mismatch"
+  # The checksum list comes from the same (latest) release as the archive.
+  assert_equals "$(cat "$temp/release/curl.log")" "https://example.invalid/release/SHA-256.txt"$'\n'"https://example.invalid/release/Fixture.tar.xz"
   rm -rf "$temp"
 }
 
@@ -1738,7 +2165,7 @@ test_node_lts_lookup_honours_the_dist_mirror() {
   SELECTED_STEPS=fnm
   RESOLVED_NODE_VERSION=""
   FNM_NODE_DIST_MIRROR=https://mirror.example.invalid/node/
-  resolve_node_lts
+  resolve_node_version
   assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
   assert_contains "$(cat "$temp/curl-argv")" '<https://mirror.example.invalid/node/index.tab>'
   OS_FAMILY=apt
@@ -1948,6 +2375,7 @@ test_existing_setups_and_shadowed_artifacts_are_disclosed() {
   temp=$(mktemp -d)
   HOME="$temp/home"
   HOMEBREW_PREFIX="$temp/brew"
+  TARGET="$temp/profile"
   mkdir -p "$HOME/.oh-my-zsh" "$HOME/.nvm" "$HOME/miniconda3" "$HOMEBREW_PREFIX/bin" "$HOMEBREW_PREFIX/opt/powerlevel10k"
   printf '#!/bin/sh\n' > "$HOMEBREW_PREFIX/bin/starship"
   chmod +x "$HOMEBREW_PREFIX/bin/starship"
@@ -1959,10 +2387,22 @@ test_existing_setups_and_shadowed_artifacts_are_disclosed() {
   assert_contains "$out" $'existing\tpowerlevel10k\t'"$HOMEBREW_PREFIX/opt/powerlevel10k"$'\t'
   assert_contains "$out" $'existing\tnvm\t'"$HOME/.nvm"$'\t'
   assert_contains "$out" $'existing\tconda\t'"$HOME/miniconda3"$'\t'
+  # macOS installs the Homebrew formula itself: nothing is shadowed.
+  assert_equals "$(report_shadowed_artifacts)" ""
+  # Linux: the release copy in ~/.local/bin shadows a Linuxbrew one.
+  OS_FAMILY=apt
   out=$(report_shadowed_artifacts)
   assert_equals "$out" $'shadow\tstarship\t'"$HOMEBREW_PREFIX/bin/starship"$'\t'"$HOME/.local/bin/starship"
   SELECTED_STEPS=pyenv
   [[ -z $(report_shadowed_artifacts) ]] || fail "an unselected artifact was reported as shadowing"
+  # macOS: an npm-prefix yarn from an older install is reported for removal.
+  OS_FAMILY=macos
+  SELECTED_STEPS=yarn,pnpm
+  mkdir -p "$HOME/.local/npm/bin"
+  printf '#!/bin/sh\n' > "$HOME/.local/npm/bin/yarn"
+  assert_equals "$(report_tool_migrations)" $'migration\tnpm-prefix\t'"$HOME/.local/npm/bin/yarn"$'\tremoved: Homebrew\'s yarn formula replaces it'
+  OS_FAMILY=apt
+  assert_equals "$(report_tool_migrations)" ""
   rm -rf "$temp"
 }
 
@@ -2022,22 +2462,33 @@ test_unsupported_macs_are_warned_about() {
   assert_contains "$out" $'warning\tunsupported-platform\tIntel Mac'
   OS_FAMILY=apt
   ! platform_support_problem >/dev/null || fail "Linux was checked against macOS support"
-  # A platform the lock has no build for is a warning, not an inspect failure.
-  OS_FAMILY=macos
+  # A Linux CPU upstream publishes no build for is a warning, not an inspect
+  # failure. macOS takes the formula, whatever the CPU.
   SELECTED_STEPS=uv
   REQUESTED_STEPS=uv
-  uname() { if [[ ${1:-} == -m ]]; then printf 'x86_64\n'; else command uname "$@"; fi; }
+  uname() { if [[ ${1:-} == -m ]]; then printf 'riscv64\n'; else command uname "$@"; fi; }
   verify_step() { return 1; }
-  out=$(inspect_tsv) || fail "inspect failed without a locked uv build"
-  assert_contains "$out" $'warning\tno-locked-artifact\tuv has no locked build for macos on x86_64'
+  out=$(inspect_tsv) || fail "inspect failed without a uv build for this CPU"
+  assert_contains "$out" $'warning\tno-release-build\tuv publishes no Linux build for riscv64; the uv component cannot be installed here'
+  [[ $out != *$'artifact\trelease\tuv\t'* ]] || fail "a release asset was listed for an unsupported CPU"
+  OS_FAMILY=macos
+  out=$(inspect_tsv)
+  assert_contains "$out" $'artifact\tformula\tuv\tuv\tlatest'
+  [[ $out != *no-release-build* ]] || fail "macOS warned about a missing release build"
 }
 
 # --- --node-version (SEC-5) ------------------------------------------------
 test_approved_node_version_is_enforced() {
   local out status=0
   SELECTED_STEPS=fnm
-  select_existing_node() { return 1; }
-  resolve_node_lts() { RESOLVED_NODE_VERSION=$LIVE_LTS; NODE_SELECTION=current-lts; [[ -n $LIVE_LTS ]]; }
+  resolve_node_version() {
+    [[ -z $RESOLVED_NODE_VERSION ]] || return 0
+    [[ -n $LIVE_LTS ]] || return 1
+    RESOLVED_NODE_VERSION=$LIVE_LTS
+    NODE_SELECTION=current-lts
+  }
+  node_default_kept() { [[ -n $KEPT_NODE ]] && printf '%s\n' "$KEPT_NODE"; }
+  KEPT_NODE=""
   NODE_VERSION_APPROVED=v24.11.1
   LIVE_LTS=v24.11.1
   check_approved_node_version || fail "the approved, current LTS was refused"
@@ -2051,6 +2502,16 @@ test_approved_node_version_is_enforced() {
   LIVE_LTS=""
   check_approved_node_version
   assert_equals "$RESOLVED_NODE_VERSION:$NODE_SELECTION" v24.11.1:current-lts
+  # A run that keeps the installed default compares that, not the live LTS.
+  RESOLVED_NODE_VERSION=""
+  LIVE_LTS=v24.12.0
+  KEPT_NODE=v24.11.1
+  check_approved_node_version || fail "the approved, kept default was refused"
+  status=0
+  KEPT_NODE=v22.20.0
+  out=$( (check_approved_node_version) 2>&1 ) || status=$?
+  assert_equals "$status" 2
+  assert_contains "$out" "keeps the installed default v22.20.0"
   COMMAND=""
   out=$( (parse_args apply --node-version 24; validate_options) 2>&1 ) && fail "a malformed --node-version was accepted"
   assert_contains "$out" "--node-version must look like"
@@ -2071,6 +2532,8 @@ test_inspect_saved_uses_the_saved_selection() {
   out=$(run_cli "$temp/profile" "$temp/home" inspect --saved 2>&1) || fail "inspect --saved failed: $out"
   assert_contains "$out" $'policy\tselection\tsaved'
   assert_contains "$out" $'policy\tfull-upgrade\tno'
+  assert_contains "$out" $'policy\tnode\tcurrent-lts'
+  assert_contains "$out" $'migration\tprofile-schema\t2\t3'
   assert_contains "$out" $'group\tcomponent\tzsh-config\tselected'
   [[ $out != *$'group\tcomponent\tfnm'* ]] || fail "inspect --saved used the default selection"
   out=$(run_cli "$temp/profile" "$temp/home" inspect --saved --groups fnm 2>&1) || status=$?
@@ -2177,9 +2640,9 @@ TESTS=(
   test_managed_blocks_are_safe_and_reversible
   test_zsh_config_preserves_runtime_expansions
   test_tar_archive_install_creates_extraction_directory
-  test_platform_assets_are_locked
+  test_artifact_sources_follow_the_platform
   test_package_maps_cover_every_supported_os
-  test_default_font_policy_and_npm_artifacts_are_locked
+  test_default_font_policy_and_npm_tool_sources
   test_macos_package_verification_batches_brew_calls
   test_macos_install_batches_and_resolves_aliases
   test_compile_zsh_sources_is_best_effort
@@ -2214,6 +2677,8 @@ TESTS=(
   test_bootstrap_installs_unzip_when_missing
   test_concurrent_lock_rejection
   test_equivalent_github_origins
+  test_follow_default_branch_moves_detached_checkouts_onto_the_branch
+  test_git_checkout_follows_rejects_detached_and_foreign_checkouts
   test_recommended_and_whole_group_closure
   test_node_lts_is_resolved_once_per_run
   test_node_verifier_checks_the_real_executable
@@ -2224,6 +2689,7 @@ TESTS=(
   test_node_lts_returns_nonzero_when_unresolvable
   test_inspect_degrades_when_node_lts_unresolvable
   test_packages_full_upgrade_rerun_has_no_false_warning
+  test_full_upgrade_reruns_steps_that_follow_upstream
   test_stale_lock_fails_closed_with_guidance
   test_no_os_release_upgrade_tooling
   test_download_verified_rejects_bad_digest
@@ -2237,9 +2703,15 @@ TESTS=(
   test_pkg_install_uses_one_command_per_family
   test_root_runs_privileged_commands_without_sudo
   test_login_shell_lookup_ignores_unset_user
-  test_artifact_registry_matches_legacy_lookup
+  test_artifact_signatures_name_the_source_not_a_version
   test_artifact_verification_checks_version_and_digest
+  test_artifact_version_ok_accepts_any_version_without_one
   test_inspect_lists_every_selected_registry_artifact
+  test_github_release_asset_record_parses_release_json
+  test_github_latest_asset_requires_a_sha256_digest
+  test_release_version_strips_the_tag_prefix
+  test_release_install_skips_the_installed_latest_version
+  test_macos_legacy_local_copies_are_removed_only_when_they_are_the_tool
   test_retired_flags_are_rejected_everywhere
   test_heroku_is_an_opt_in_macos_group
   test_dev_tools_cover_ruby_build_dependencies

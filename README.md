@@ -37,9 +37,9 @@ branch checkout with a configured upstream, then uses `git pull --ff-only`.
 The dotfile surface here is deliberately tiny — two managed blocks (three on
 macOS) plus a `STARSHIP_CONFIG` pointer — so templating and symlink-farm tools solve very
 little of the actual problem. What `install.sh` mostly does is *machine
-provisioning*: OS packages across four distribution families, SHA-256-pinned
-bun/fnm/starship/uv/yarn/pnpm artifacts, commit-pinned pyenv/rbenv/plugin clones,
-local SSH/GPG preparation and read-only GitHub verification, a verified Nerd
+provisioning*: OS packages across four distribution families, bun/fnm/starship/uv/yarn/pnpm
+from Homebrew or their latest digest-checked releases, pyenv/rbenv/plugin clones
+that follow their default branch, local SSH/GPG preparation and read-only GitHub verification, a verified Nerd
 Fonts release archive, and `chsh`. chezmoi covers that only through `run_once_` escape hatches, which
 would leave the same amount of shell to maintain plus a second tool to learn.
 
@@ -94,9 +94,9 @@ The entire ignored `local/` directory is machine-owned:
 
 - `local/install-profile.tsv` records the normalized groups, upgrade/font/shell
   policies, Git identity, selected SSH path, GPG fingerprint, and moving-tool
-  channel choices. Schema 2 records `node-policy=preserve-compatible`; an
-  existing schema-1 profile migrates on approved apply/reconcile. Inspection
-  reports the migration without writing it.
+  channel choices. Schema 3 records `node-policy=current-lts`; an existing
+  schema-1 or schema-2 (`preserve-compatible`) profile migrates on approved
+  apply/reconcile. Inspection reports the migration without writing it.
 - `local/install-state.tsv` records verified step signatures, timestamps, and
   resolved moving versions such as Node LTS.
 - `local/private.zsh` contains private machine overrides and loads after public
@@ -126,9 +126,10 @@ action that runs as root (`privileged`: package-manager runs, Arch's
 `sudo chsh`), side effects (`behaviour`: Debian's fd/bat links, GNU tools ahead
 of BSD on macOS, global Git identity writes, the Homebrew mirror), effects that
 cannot be undone automatically (`irreversible`), existing installations in the
-way (`conflict`), shell setups the profile coexists with (`existing`), Homebrew
-copies the pinned tools will shadow (`shadow`), and `warning`s such as an
-unsupported Mac. `docs/development.md` lists every record type.
+way (`conflict`), shell setups the profile coexists with (`existing`), on Linux
+Homebrew copies the profile's tools will shadow (`shadow`), what moves off the
+old pinned layout (`migration`), and `warning`s such as an unsupported Mac.
+`docs/development.md` lists every record type.
 
 Before its first change, apply (and reconcile) checks what the run needs from
 you. Run without a terminal (as an AI agent does), a plan that needs a sudo
@@ -137,7 +138,7 @@ password, a passphrase prompt or chsh's password prompt stops at once with a
 status 3, having changed nothing: run that command in your own terminal. With
 passwordless sudo it proceeds. In a terminal, sudo asks once, up front. A
 mistyped Nerd Font name is rejected at this point too, and an existing
-`~/.pyenv` or `~/.rbenv` that is not the pinned Git checkout (for example
+`~/.pyenv` or `~/.rbenv` that is not the profile's Git checkout (for example
 Homebrew's pyenv root) stops the run unless `--skip-existing-version-managers`
 keeps it and skips that component; reconcile remembers the choice.
 
@@ -151,17 +152,42 @@ listed at the end, and the run exits 3.
 
 ## Installed channels and credentials
 
-Direct tool archives and managed plugin/dependency checkouts are locked to
-reviewed URLs, commits, and SHA-256 digests. Equivalent GitHub HTTPS/SSH origins
-are accepted and normalized; dirty installer-managed dependency checkouts are
-refused. This locked-direct-artifact promise intentionally excludes OS package
-manager channels and Node.
+Tools follow upstream rather than reviewed pins, so they stay current:
 
-uv and uvx install as one locked artifact into `~/.local/bin` (the static musl
-builds on Linux, as for Starship), with their completions cached like the
-other tools'. Nerd Fonts come from one font's archive in the pinned release,
-checked against that release's `SHA-256.txt`, whose own digest is pinned; an
-unknown font name is refused before anything is downloaded. Fonts go to
+| Source | macOS | Linux |
+|---|---|---|
+| bun, fnm, Starship, uv (and uvx) | Homebrew formula | latest GitHub release into `~/.local/bin`, checked against the SHA-256 digest GitHub publishes for the asset |
+| Yarn, pnpm | Homebrew formula | npm's latest into `~/.local/npm`, installed with fnm's Node |
+| pyenv, rbenv, ruby-build, Zsh plugins | Git checkout of the default branch | the same |
+| Nerd Fonts | latest release, checked against its `SHA-256.txt` | the same |
+
+On macOS, `brew upgrade` therefore keeps the formulae current. Everywhere, a
+full upgrade (apply's default, or `upgrade-leos-profiles --full-upgrade`)
+moves every one of them forward: it re-runs those steps, which install the
+latest release (skipping the download when it is already installed), upgrade
+an outdated formula, and fast-forward each checkout. Without a full upgrade a
+run only repairs what is missing or broken. Set `GITHUB_TOKEN` if many Linux
+runs share one address: the release lookup uses GitHub's API, which allows 60
+anonymous requests an hour.
+
+Two downloads stay pinned to a reviewed URL and SHA-256 digest, because there
+is nothing newer to follow: Homebrew's installer script (it runs once, on a
+Mac without Homebrew) and rpatool (its GitHub repository is archived).
+
+Equivalent GitHub HTTPS/SSH origins are accepted and normalized; dirty
+installer-managed checkouts, and checkouts with commits that are not on their
+default branch, are refused rather than overwritten.
+
+Machines set up before 2026-10 carry pinned copies. Inspect reports each
+as a `migration` record and the next approved run moves it: on macOS the
+`~/.local/bin` and `~/.local/npm` copies are removed once the Homebrew formula
+is installed (they come first on PATH and would shadow it), and checkouts
+detached at a pinned commit move onto their default branch.
+
+uv and uvx install as one artifact (the static musl builds on Linux, as for
+Starship), with their completions cached like the other tools'. Nerd Fonts
+come from one font's archive in the latest release; an unknown font name is
+refused before anything is downloaded. Fonts go to
 `~/Library/Fonts/NerdFonts` on macOS and
 `${XDG_DATA_HOME:-~/.local/share}/fonts/NerdFonts` on Linux (then `fc-cache`).
 After the run, set your terminal's font to that Nerd Font, or set
@@ -177,15 +203,13 @@ Homebrew mirror (Homebrew's own code, metadata and bottles) for the run,
 including a Homebrew bootstrap, and for later shells, exactly like
 `brew-china-enable`. `--brew-mirror none` turns it off again.
 
-Node uses the saved `preserve-compatible` policy. The installer first preserves
-a compatible fnm default; otherwise it adopts the exact version of a compatible
-Node already on PATH into fnm. Only if neither is compatible does it resolve
-one current LTS version from the `current-lts` fallback channel. Compatibility
-uses the selected locked tools' engine ranges: currently pnpm requires Node
-`>=22.13`, and Yarn requires `>=4.0.0`. A reconciliation does not advance an
-already-compatible default merely because another LTS exists. Yarn/pnpm install
-and verification commands run through explicit `fnm exec`, so they do not depend
-on an interactive shell's PATH.
+Node uses the saved `current-lts` policy: fnm installs the current Node LTS
+and makes it the default. A full upgrade moves the default to the newest LTS
+(older versions stay installed, so `fnm use` still reaches them); a run
+without one leaves a working default alone. Another Node on PATH is not
+adopted. Yarn/pnpm install and verification commands run through explicit
+`fnm exec --using=default`, so they do not depend on an interactive shell's
+PATH.
 
 SSH/GPG default to Skip. Reuse requires a specifically selected SSH private-key
 path or full GPG fingerprint; existing keys are never silently chosen. New SSH
@@ -233,13 +257,14 @@ The installer appends its loader to your `.zshrc`; it never rewrites the rest.
 - **asdf / mise**: their shims and fnm/pyenv/rbenv's all provide node, python
   and ruby, and whichever activates last wins. Use one manager per language,
   or skip the overlapping components (`fnm`, `pyenv`, `rbenv`).
-- **Homebrew copies of fnm, bun, Starship or uv**: the pinned copies in
-  `~/.local/bin` come first (`shadow` records), so `brew upgrade` of those no
-  longer changes what your shell runs; uninstall the Homebrew copies or keep
-  them for other users.
+- **Linuxbrew copies of fnm, bun, Starship or uv**: on Linux the profile's
+  copies in `~/.local/bin` come first (`shadow` records), so `brew upgrade` of
+  those no longer changes what your shell runs; uninstall the Homebrew copies
+  or keep them for other users. On macOS the profile uses Homebrew's.
 - **Homebrew pyenv/rbenv**: reported as `conflict … homebrew-install`. The
-  profile uses the pinned `~/.pyenv`/`~/.rbenv` when present and otherwise the
-  one on PATH; `--skip-existing-version-managers` keeps Homebrew's alone.
+  profile uses its own `~/.pyenv`/`~/.rbenv` checkout when present and
+  otherwise the one on PATH; `--skip-existing-version-managers` keeps
+  Homebrew's alone.
 
 ## Zsh runtime
 
@@ -436,10 +461,13 @@ The new commits then run, with sudo, as `install.sh reconcile`, so read the
 list. `--verify-signatures` fast-forwards only over commits with good
 signatures Git can check: set `gpg.ssh.allowedSignersFile` for SSH-signed
 commits, or have gpg and the signer's key. Reconcile installs missing selected
-packages and repairs locked tools, plugins, configuration, fonts, and the
-selected Node runtime without a full host upgrade. It checks saved credential
+packages and repairs tools, plugins, configuration, fonts, and the Node
+default without a full upgrade, which leaves installed versions where they
+are. It checks saved credential
 references and pauses for any required manual registration or configuration.
-`--full-upgrade` opts into the saved broad package-manager upgrade behavior.
+`--full-upgrade` also upgrades the host packages and moves every tool, plugin
+checkout and the Node default to their latest release, as described under
+[Installed channels](#installed-channels-and-credentials).
 
 `leos-doctor` checks the saved setup without changing anything: it runs
 `install.sh inspect --saved` and lists each component as ok, NEEDED or
@@ -496,8 +524,7 @@ remote and environment.
   Macs are unsupported: Homebrew no longer publishes bottles there for
   packages this setup installs (node, python, ruby), so installs fail or build
   from source for hours. `inspect` reports such a Mac with an
-  `unsupported-platform` warning and apply repeats it; there is no locked uv
-  for Intel Macs.
+  `unsupported-platform` warning and apply repeats it.
 - Ubuntu 22.04, 24.04, and 26.04 LTS on x86_64 and arm64, aligned with
   [Canonical's standard-support lifecycle](https://ubuntu.com/about/release-cycle).
 - Debian 12 and 13 on x86_64 and arm64, following Debian's
@@ -518,8 +545,8 @@ and Yarn/pnpm installation, repeated reconciliation, and repair after removing
 artifacts. Credentials are skipped, default-shell changes are disabled, and
 fonts are explicitly exercised. Separate isolated tests cover credentials.
 
-Package availability, locked digests, real plugin integration, unit tests, and
-syntax checks remain separate gates; availability alone is not installation
+Package availability, latest-release resolution and digests, real plugin
+integration, unit tests, and syntax checks remain separate gates; availability alone is not installation
 coverage. The weekly workflow repeats these checks. See the
 [workflow](./.github/workflows/ci.yml) for exact jobs and runner labels, and
 [development guide](./docs/development.md) for scope and reproduction.

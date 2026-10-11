@@ -25,25 +25,41 @@ github_origins_equivalent() {
   [[ $actual_slug == "$expected_slug" ]]
 }
 
-clone_pinned() {
-  local repository=$1 commit=$2 destination=$3 label=$4 origin
-  if [[ -d $destination ]]; then
-    [[ -d $destination/.git ]] || die "$label exists but is not a Git checkout: $destination"
-    origin=$(git -C "$destination" remote get-url origin 2>/dev/null || true)
-    github_origins_equivalent "$origin" "$repository" || die "$label checkout has an unexpected origin: $destination"
-    [[ -z $(git -C "$destination" status --porcelain) ]] || die "$label checkout has local changes: $destination"
-    if [[ $origin != "$repository" ]]; then
-      run git -C "$destination" remote set-url origin "$repository"
-    fi
-  else
+# follow_default_branch <repository> <destination> <label>: a checkout of the
+# repository's default branch. A missing one is cloned; an existing one must
+# be a clean checkout of the same repository, and is fast-forwarded to
+# origin's default branch. A detached checkout (installs before 2026-10 were
+# pinned to a commit) is moved onto that branch.
+follow_default_branch() {
+  local repository=$1 destination=$2 label=$3 origin remote_head branch current
+  if [[ ! -d $destination ]]; then
     run mkdir -p "$(dirname -- "$destination")"
-    run git clone "$repository" "$destination"
+    run git clone --quiet "$repository" "$destination"
+    return 0
   fi
-  if [[ $DRY_RUN -eq 0 ]] && ! git -C "$destination" cat-file -e "$commit^{commit}" 2>/dev/null; then
-    run git -C "$destination" fetch --depth 1 origin "$commit"
+  [[ -d $destination/.git ]] || die "$label exists but is not a Git checkout: $destination"
+  origin=$(git -C "$destination" remote get-url origin 2>/dev/null || true)
+  github_origins_equivalent "$origin" "$repository" || die "$label checkout has an unexpected origin: $destination"
+  [[ -z $(git -C "$destination" status --porcelain) ]] || die "$label checkout has local changes: $destination"
+  if [[ $origin != "$repository" ]]; then
+    run git -C "$destination" remote set-url origin "$repository"
   fi
-  run git -C "$destination" checkout --detach "$commit"
-  [[ $DRY_RUN -eq 1 ]] || [[ $(git -C "$destination" rev-parse HEAD) == "$commit" ]] || die "$label did not resolve pinned commit"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would fast-forward $label to the head of origin's default branch"
+    return 0
+  fi
+  run git -C "$destination" fetch --quiet --prune origin || die "Could not fetch $label from $repository"
+  git -C "$destination" remote set-head origin --auto >/dev/null || die "Could not read $label's default branch from $repository"
+  remote_head=$(git -C "$destination" symbolic-ref --short refs/remotes/origin/HEAD) ||
+    die "Could not read $label's default branch from $repository"
+  branch=${remote_head#origin/}
+  current=$(git -C "$destination" symbolic-ref --quiet --short HEAD || true)
+  if [[ $current == "$branch" ]]; then
+    run git -C "$destination" merge --quiet --ff-only "$remote_head" ||
+      die "$label has commits that are not on $remote_head: $destination"
+  else
+    run git -C "$destination" checkout --quiet -B "$branch" "$remote_head"
+  fi
 }
 
 install_local_bins() { artifact_install rpatool; }
@@ -59,22 +75,22 @@ compile_optional_extension() {
 }
 
 install_pyenv() {
-  clone_pinned "$PYENV_REPOSITORY" "$PYENV_COMMIT" "$HOME/.pyenv" pyenv
+  follow_default_branch "$PYENV_REPOSITORY" "$HOME/.pyenv" pyenv
   compile_optional_extension "$HOME/.pyenv" pyenv
 }
 
 install_rbenv() {
-  clone_pinned "$RBENV_REPOSITORY" "$RBENV_COMMIT" "$HOME/.rbenv" rbenv
-  clone_pinned "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT" "$HOME/.rbenv/plugins/ruby-build" ruby-build
+  follow_default_branch "$RBENV_REPOSITORY" "$HOME/.rbenv" rbenv
+  follow_default_branch "$RUBY_BUILD_REPOSITORY" "$HOME/.rbenv/plugins/ruby-build" ruby-build
   compile_optional_extension "$HOME/.rbenv" rbenv
 }
 
 install_plugins() {
   local directory="$TARGET/zsh/plugins"
-  clone_pinned "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT" "$directory/zsh-autosuggestions" zsh-autosuggestions
-  clone_pinned "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT" "$directory/zsh-syntax-highlighting" zsh-syntax-highlighting
-  clone_pinned "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT" "$directory/zsh-completions" zsh-completions
-  clone_pinned "$FZF_TAB_REPOSITORY" "$FZF_TAB_COMMIT" "$directory/fzf-tab" fzf-tab
+  follow_default_branch "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$directory/zsh-autosuggestions" zsh-autosuggestions
+  follow_default_branch "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$directory/zsh-syntax-highlighting" zsh-syntax-highlighting
+  follow_default_branch "$ZSH_COMPLETIONS_REPOSITORY" "$directory/zsh-completions" zsh-completions
+  follow_default_branch "$FZF_TAB_REPOSITORY" "$directory/fzf-tab" fzf-tab
 }
 
 is_desktop() {
@@ -110,18 +126,17 @@ nerd_font_archive_digest() {
   ' "$1"
 }
 
-# fetch_nerd_font_checksums <destination>: the release's SHA-256.txt, verified
-# against its pinned digest. The URL and digest can be overridden for tests.
+# fetch_nerd_font_checksums <destination>: the latest release's SHA-256.txt.
+# The release URL can be overridden for tests.
 fetch_nerd_font_checksums() {
-  download_verified "${NERD_FONTS_TEST_RELEASE_URL:-$NERD_FONTS_RELEASE_URL}/SHA-256.txt" \
-    "${NERD_FONTS_TEST_CHECKSUMS_SHA256:-$NERD_FONTS_CHECKSUMS_SHA256}" "$1"
+  download_file "${NERD_FONTS_TEST_RELEASE_URL:-$NERD_FONTS_RELEASE_URL}/SHA-256.txt" "$1"
 }
 
 # require_known_nerd_font <SHA-256.txt> <font>: die, before any font download,
 # when the release has no archive of that name.
 require_known_nerd_font() {
   nerd_font_archive_digest "$1" "$2" >/dev/null ||
-    die "Unknown Nerd Font: $2. Nerd Fonts $NERD_FONTS_VERSION has no $2.tar.xz; use a name from https://www.nerdfonts.com/font-downloads (for example JetBrainsMono)."
+    die "Unknown Nerd Font: $2. The latest Nerd Fonts release has no $2.tar.xz; use a name from https://www.nerdfonts.com/font-downloads (for example JetBrainsMono)."
 }
 
 # install_nerd_font <font> [verified SHA-256.txt]: download the font's release
@@ -160,7 +175,7 @@ install_fonts() {
   fi
   local font=${FONT_NAME:-JetBrainsMono}
   if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would download Nerd Fonts $NERD_FONTS_VERSION $font.tar.xz, verify it against the release's pinned SHA-256.txt and install it into $(nerd_font_directory)"
+    say "Would download $font.tar.xz from the latest Nerd Fonts release, verify it against the release's SHA-256.txt and install it into $(nerd_font_directory)"
     return 0
   fi
   install_nerd_font "$font" "${NERD_FONTS_CHECKSUMS_FILE:-}"
@@ -183,30 +198,47 @@ ensure_user_npm_prefix() {
   mkdir -p "$prefix"
 }
 
-install_locked_npm_package() {
-  local package=$1 url=$2 expected=$3 temp archive
-  ensure_user_npm_prefix
-  temp=$(mktemp -d)
-  track_temp "$temp"
-  archive="$temp/$package.tgz"
-  download_verified "$url" "$expected" "$archive"
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would install $package with the selected fnm Node runtime"
+# Yarn and pnpm: Homebrew formulae on macOS; on Linux the latest npm release,
+# installed into ~/.local/npm with fnm's default Node (npm checks the
+# registry's integrity hash). Either way they run on fnm's Node.
+npm_tool_path() {
+  if [[ $OS_FAMILY == macos ]]; then
+    printf '%s/bin/%s\n' "$(brew_prefix)" "$1"
   else
-    fnm_exec npm install --global --prefix "$HOME/.local/npm" "$archive"
+    printf '%s\n' "$HOME/.local/npm/bin/$1"
   fi
-  rm -rf "$temp"
 }
 
-install_yarn() {
-  install_locked_npm_package yarn "$YARN_URL" "$YARN_SHA256"
-  [[ $DRY_RUN -eq 1 ]] || fnm_exec "$HOME/.local/npm/bin/yarn" --version | grep -qx "$YARN_VERSION" || die "Yarn version verification failed"
+npm_tool_install() {
+  local package=$1
+  if [[ $OS_FAMILY == macos ]]; then
+    remove_legacy_npm_copy "$package"
+    brew_tool_install "$package"
+  else
+    ensure_user_npm_prefix
+    if [[ $DRY_RUN -eq 1 ]]; then
+      say "Would install the latest $package from npm with fnm's default Node"
+      return 0
+    fi
+    fnm_exec npm install --global --prefix "$HOME/.local/npm" "$package@latest"
+  fi
+  [[ $DRY_RUN -eq 1 ]] || npm_tool_verify "$package" || die "$package does not run after installation"
 }
 
-install_pnpm() {
-  install_locked_npm_package pnpm "$PNPM_URL" "$PNPM_SHA256"
-  [[ $DRY_RUN -eq 1 ]] || fnm_exec "$HOME/.local/npm/bin/pnpm" --version | grep -qx "$PNPM_VERSION" || die "pnpm version verification failed"
+npm_tool_verify() {
+  local package=$1 path
+  path=$(npm_tool_path "$package")
+  [[ -x $path ]] || return 1
+  if [[ $OS_FAMILY == macos ]]; then
+    [[ ! -e $HOME/.local/npm/bin/$package ]] || return 1
+    load_brew_formulae && brew_formula_installed "$package" || return 1
+  fi
+  fnm_exec "$path" --version >/dev/null 2>&1
 }
+
+install_yarn() { npm_tool_install yarn; }
+
+install_pnpm() { npm_tool_install pnpm; }
 
 machine_arch() {
   case $(uname -m) in
@@ -216,29 +248,135 @@ machine_arch() {
   esac
 }
 
-# platform_asset <artifact>: "<url><TAB><sha256>" for this platform, from the
-# artifact registry's lock lookup; dies when the lock has none.
-platform_asset() {
-  artifact_asset "$1" || die "No locked $1 artifact for $OS_FAMILY/$(uname -m)"
+brew_prefix() {
+  if [[ -n ${HOMEBREW_PREFIX:-} ]]; then
+    printf '%s\n' "$HOMEBREW_PREFIX"
+  elif command -v brew >/dev/null 2>&1; then
+    brew --prefix
+  else
+    printf '/opt/homebrew\n'
+  fi
 }
 
-# install_locked_archive_binary <tool> <zip|tar.gz> <destination> [extra...]:
+# brew_tool_install <formula>: install the formula, or on a full upgrade bring
+# it up to date (the packages step's `brew upgrade` covers this unless no
+# package group is selected).
+brew_tool_install() {
+  local formula=$1
+  ensure_brew
+  BREW_FORMULAE=""
+  if ! load_brew_formulae || ! brew_formula_installed "$formula"; then
+    run brew install "$formula"
+  elif [[ $FULL_UPGRADE -eq 1 && -n $(brew outdated --formula --quiet "$formula" 2>/dev/null) ]]; then
+    run brew upgrade "$formula"
+  fi
+  BREW_FORMULAE=""
+}
+
+# Installs before 2026-10 put these tools into ~/.local/bin and ~/.local/npm on
+# macOS too. Both come before Homebrew on PATH, so a copy left there would
+# shadow the formula; remove it once Homebrew's copy is in place.
+# legacy_local_copy <artifact>: print each of its executables in ~/.local/bin.
+# Only files that report the tool's own --version line count, so an unrelated
+# file of the same name is left alone.
+legacy_local_copy() {
+  local name=$1 executable
+  local -a executables=()
+  [[ $OS_FAMILY == macos ]] || return 0
+  artifact_row "$name"
+  [[ $ARTIFACT_ARCHIVE != file ]] || return 0
+  IFS=' ' read -r -a executables <<< "$ARTIFACT_EXECUTABLES"
+  artifact_version_ok "$name" "$HOME/.local/bin/${executables[0]}" || return 0
+  for executable in "${executables[@]}"; do
+    [[ ! -e $HOME/.local/bin/$executable ]] || printf '%s\n' "$HOME/.local/bin/$executable"
+  done
+}
+
+remove_legacy_local_copy() {
+  local path
+  while IFS= read -r path; do
+    run rm -f -- "$path"
+  done < <(legacy_local_copy "$1")
+}
+
+# remove_legacy_npm_copy <yarn|pnpm>: the package and the commands npm linked
+# for it in ~/.local/npm.
+remove_legacy_npm_copy() {
+  local package=$1 command prefix="$HOME/.local/npm"
+  [[ -e $prefix/bin/$package || -d $prefix/lib/node_modules/$package ]] || return 0
+  run rm -rf -- "$prefix/lib/node_modules/$package"
+  for command in "$package" yarnpkg pnpx; do
+    case $package:$command in
+      yarn:pnpx|pnpm:yarnpkg) continue ;;
+    esac
+    [[ ! -e $prefix/bin/$command && ! -L $prefix/bin/$command ]] || run rm -f -- "$prefix/bin/$command"
+  done
+}
+
+# github_latest_asset <owner/repo> <asset>: print "<tag><TAB><url><TAB><sha256>"
+# for the asset in the project's latest release. The digest is the one GitHub
+# computes for every release asset. GITHUB_TOKEN, when set, lifts the API's
+# anonymous limit of 60 requests an hour.
+github_latest_asset() {
+  local repository=$1 asset=$2 api json record tag url digest
+  local -a curl_args=(--fail --location --proto '=https' --tlsv1.2 --silent --show-error
+    --connect-timeout 15 --max-time 60 --retry 3 -H 'Accept: application/vnd.github+json')
+  api="https://api.github.com/repos/$repository/releases/latest"
+  if [[ -n ${GITHUB_TOKEN:-} ]] && json=$(curl "${curl_args[@]}" -H "Authorization: Bearer $GITHUB_TOKEN" "$api" 2>/dev/null); then
+    :
+  else
+    json=$(curl "${curl_args[@]}" "$api") || die "Could not read the latest $repository release from GitHub"
+  fi
+  record=$(github_release_asset_record "$asset" <<< "$json") ||
+    die "The latest $repository release has no $asset"
+  IFS=$'\t' read -r tag url digest <<< "$record"
+  [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || die "GitHub publishes no SHA-256 digest for $asset in $repository $tag"
+  [[ $url == https://github.com/* ]] || die "Unexpected download URL for $asset in $repository: $url"
+  printf '%s\t%s\t%s\n' "$tag" "$url" "${digest#sha256:}"
+}
+
+# github_release_asset_record <asset> < release.json: "<tag><TAB><url><TAB><digest>".
+# The release JSON is split into "key": value tokens; an asset's name comes
+# before its digest and download URL, and the uploader object between them
+# has none of those keys.
+github_release_asset_record() {
+  awk -v want="$1" '
+    function value(text) {
+      sub(/^"[^"]*"[ \t]*:[ \t]*"?/, "", text)
+      sub(/"$/, "", text)
+      return text
+    }
+    BEGIN { RS = "[],{}[]" }
+    {
+      gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "")
+      if ($0 ~ /^"tag_name"[ \t]*:/ && tag == "") tag = value($0)
+      else if ($0 ~ /^"name"[ \t]*:/) current = value($0)
+      else if (current == want && $0 ~ /^"digest"[ \t]*:/) digest = value($0)
+      else if (current == want && $0 ~ /^"browser_download_url"[ \t]*:/) url = value($0)
+    }
+    END {
+      if (tag == "" || url == "") exit 1
+      printf "%s\t%s\t%s\n", tag, url, digest
+    }
+  '
+}
+
+# release_version <tag>: the version in a release tag (bun-v1.2.3 -> 1.2.3).
+release_version() {
+  local tag=$1
+  printf '%s\n' "${tag#"${tag%%[0-9]*}"}"
+}
+
+# install_archive_binary <tool> <zip|tar.gz> <url> <sha256> <destination> [extra...]:
 # download the verified archive and install its <tool> executable at
 # <destination>, and each extra executable beside it.
-install_locked_archive_binary() {
-  local tool=$1 extension=$2 destination=$3 url sha temp archive binary asset extra
-  shift 3
-  asset=$(platform_asset "$tool")
-  IFS=$'\t' read -r url sha <<< "$asset"
+install_archive_binary() {
+  local tool=$1 extension=$2 url=$3 sha=$4 destination=$5 temp archive binary extra
+  shift 5
   temp=$(mktemp -d)
   track_temp "$temp"
   archive="$temp/$tool.$extension"
   download_verified "$url" "$sha" "$archive"
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would extract verified $tool to $destination"
-    rmdir "$temp" 2>/dev/null || true
-    return 0
-  fi
   mkdir -p "$temp/extract"
   case $extension in
     zip) unzip -q "$archive" -d "$temp/extract" ;;
@@ -257,69 +395,125 @@ install_locked_archive_binary() {
   rm -rf "$temp"
 }
 
-# artifact_version_ok <name> <executable>: the executable reports the locked
-# version on the first line of --version (the registry's expected line,
-# optionally followed by build details after a space).
+# artifact_version_ok <name> <executable> [version]: the executable reports
+# the registry's version line on the first line of --version (optionally
+# followed by build details after a space): for the given version, or any.
 artifact_version_ok() {
-  local name=$1 executable=$2 expected first
+  local name=$1 executable=$2 version=${3:-} expected first
   artifact_row "$name"
-  # shellcheck disable=SC2059  # the registry column is the format
-  printf -v expected "$ARTIFACT_VERSION_LINE" "$(artifact_version "$name")"
+  [[ -x $executable ]] || return 1
   first=$("$executable" --version 2>/dev/null | sed -n '1p') || return 1
-  [[ $first == "$expected" || $first == "$expected "* ]]
+  if [[ -n $version ]]; then
+    # shellcheck disable=SC2059  # the registry column is the format
+    printf -v expected "$ARTIFACT_VERSION_LINE" "$version"
+    [[ $first == "$expected" || $first == "$expected "* ]]
+  else
+    expected=${ARTIFACT_VERSION_LINE//%s/[0-9]*}
+    # shellcheck disable=SC2053  # a glob on purpose: any version
+    [[ $first == $expected ]]
+  fi
 }
 
-# artifact_install <name> [directory]: install a registry artifact into
-# ~/.local/bin (or the directory) and check the installed version.
+# artifact_path <name>: where its main executable is installed.
+artifact_path() {
+  local -a executables=()
+  artifact_row "$1"
+  IFS=' ' read -r -a executables <<< "$ARTIFACT_EXECUTABLES"
+  if [[ $(artifact_source "$1") == formula ]]; then
+    printf '%s/bin/%s\n' "$(brew_prefix)" "${executables[0]}"
+  else
+    printf '%s\n' "$HOME/.local/bin/${executables[0]}"
+  fi
+}
+
+# artifact_install <name> [directory]: install a registry artifact from its
+# source (artifact_source). Release and pinned artifacts go into ~/.local/bin,
+# or the directory.
 artifact_install() {
-  local name=$1 directory=${2:-$HOME/.local/bin} url sha main
+  local name=$1 directory=${2:-$HOME/.local/bin} url sha main record repository asset tag version present=1 executable
   local -a executables=()
   artifact_row "$name"
   IFS=' ' read -r -a executables <<< "$ARTIFACT_EXECUTABLES"
   main=${executables[0]}
-  if [[ $ARTIFACT_ARCHIVE == file ]]; then
-    IFS=$'\t' read -r url sha <<< "$(platform_asset "$name")"
-    download_verified "$url" "$sha" "$directory/$main"
-    [[ $DRY_RUN -eq 1 ]] || chmod 700 "$directory/$main"
-    return 0
-  fi
-  install_locked_archive_binary "$main" "$ARTIFACT_ARCHIVE" "$directory/$main" ${executables[1]+"${executables[@]:1}"}
-  [[ $DRY_RUN -eq 1 ]] || artifact_version_ok "$name" "$directory/$main" || die "$name version verification failed"
+  case $(artifact_source "$name") in
+    pinned)
+      IFS=$'\t' read -r url sha <<< "$(artifact_pinned_asset "$name")"
+      download_verified "$url" "$sha" "$directory/$main"
+      [[ $DRY_RUN -eq 1 ]] || chmod 700 "$directory/$main" ;;
+    formula)
+      brew_tool_install "$ARTIFACT_FORMULA"
+      remove_legacy_local_copy "$name" ;;
+    release)
+      record=$(artifact_release_asset "$name") || die "$name publishes no Linux build for $(uname -m)"
+      IFS=$'\t' read -r repository asset <<< "$record"
+      if [[ $DRY_RUN -eq 1 ]]; then
+        say "Would install the latest $name release ($asset from github.com/$repository), checked against GitHub's SHA-256 digest"
+        return 0
+      fi
+      record=$(github_latest_asset "$repository" "$asset") || exit 1
+      IFS=$'\t' read -r tag url sha <<< "$record"
+      version=$(release_version "$tag")
+      for executable in "${executables[@]}"; do
+        [[ -x $directory/$executable ]] || present=0
+      done
+      if (( present )) && artifact_version_ok "$name" "$directory/$main" "$version"; then
+        say "$name $version is the latest release and already installed"
+        return 0
+      fi
+      install_archive_binary "$main" "$ARTIFACT_ARCHIVE" "$url" "$sha" "$directory/$main" ${executables[1]+"${executables[@]:1}"}
+      artifact_version_ok "$name" "$directory/$main" "$version" || die "$name does not report version $version after installation" ;;
+  esac
 }
 
-# artifact_verify <name>: the installed copy in ~/.local/bin is the locked one:
-# the same digest for a single file, or every executable present with the
-# main one reporting the locked version.
+# artifact_verify <name>: the artifact is installed from its source: the
+# pinned digest for a pinned file; otherwise every executable present and the
+# main one reporting a version, and on macOS the formula installed with no
+# older ~/.local/bin copy in front of it.
 artifact_verify() {
-  local name=$1 directory="$HOME/.local/bin" executable asset url sha
+  local name=$1 directory="$HOME/.local/bin" executable url sha source
   local -a executables=()
   artifact_row "$name"
   IFS=' ' read -r -a executables <<< "$ARTIFACT_EXECUTABLES"
-  for executable in "${executables[@]}"; do
-    [[ -x $directory/$executable ]] || return 1
-  done
-  if [[ $ARTIFACT_ARCHIVE == file ]]; then
-    asset=$(artifact_asset "$name") || return 1
-    IFS=$'\t' read -r url sha <<< "$asset"
-    [[ $(sha256 "$directory/${executables[0]}") == "$sha" ]]
-  else
-    artifact_version_ok "$name" "$directory/${executables[0]}"
-  fi
+  source=$(artifact_source "$name")
+  case $source in
+    pinned)
+      [[ -x $directory/${executables[0]} ]] || return 1
+      IFS=$'\t' read -r url sha <<< "$(artifact_pinned_asset "$name")"
+      [[ $(sha256 "$directory/${executables[0]}") == "$sha" ]] ;;
+    formula)
+      load_brew_formulae && brew_formula_installed "$ARTIFACT_FORMULA" || return 1
+      [[ -z $(legacy_local_copy "$name") ]] || return 1
+      directory="$(brew_prefix)/bin"
+      for executable in "${executables[@]}"; do
+        [[ -x $directory/$executable ]] || return 1
+      done
+      artifact_version_ok "$name" "$directory/${executables[0]}" ;;
+    release)
+      for executable in "${executables[@]}"; do
+        [[ -x $directory/$executable ]] || return 1
+      done
+      artifact_version_ok "$name" "$directory/${executables[0]}" ;;
+  esac
 }
 
 install_bun() { artifact_install bun; }
 
+fnm_path() { artifact_path fnm; }
+
 install_fnm() {
+  local fnm
   artifact_install fnm
   if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would adopt a compatible existing Node into fnm, or install current LTS, and make it default"
+    say "Would install the current Node LTS with fnm and make it the default"
     return 0
   fi
-  resolve_node_version || die "Could not select a compatible Node version"
-  eval "$("$HOME/.local/bin/fnm" env --shell bash)"
-  run "$HOME/.local/bin/fnm" install "$RESOLVED_NODE_VERSION"
-  run "$HOME/.local/bin/fnm" default "$RESOLVED_NODE_VERSION"
-  run "$HOME/.local/bin/fnm" use "$RESOLVED_NODE_VERSION"
+  resolve_node_version || die "Could not resolve the current Node LTS"
+  say "Selected Node $RESOLVED_NODE_VERSION (current LTS)"
+  fnm=$(fnm_path)
+  eval "$("$fnm" env --shell bash)"
+  run "$fnm" install "$RESOLVED_NODE_VERSION"
+  run "$fnm" default "$RESOLVED_NODE_VERSION"
+  run "$fnm" use "$RESOLVED_NODE_VERSION"
 }
 
 node_version_ok() { [[ ${1:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
@@ -332,7 +526,10 @@ node_dist_index_url() {
   printf '%s/index.tab\n' "${base%/}"
 }
 
-resolve_node_lts() {
+# resolve_node_version: RESOLVED_NODE_VERSION becomes the current Node LTS.
+# Returns non-zero (does not die) so callers can degrade gracefully: `inspect`
+# falls back to "resolve-during-apply". install_fnm adds its own `|| die`.
+resolve_node_version() {
   [[ -z $RESOLVED_NODE_VERSION ]] || return 0
   local fnm_bin latest
   if command -v curl >/dev/null 2>&1; then
@@ -345,23 +542,34 @@ resolve_node_lts() {
       "$(node_dist_index_url)" 2>/dev/null | awk -F '\t' 'NR > 1 && $10 != "-" { print $1; exit }') || true
   fi
   if ! node_version_ok "${latest:-}"; then
-    if [[ -x $HOME/.local/bin/fnm ]]; then
-      fnm_bin="$HOME/.local/bin/fnm"
-    else
-      fnm_bin=$(command -v fnm 2>/dev/null || true)
-    fi
+    fnm_bin=$(fnm_path)
+    [[ -x $fnm_bin ]] || fnm_bin=$(command -v fnm 2>/dev/null || true)
     if [[ -n ${fnm_bin:-} ]]; then
       latest=$("$fnm_bin" list-remote --lts 2>/dev/null | tail -n 1 | awk '{print $1}') || true
     fi
   fi
-  # Return non-zero (do not die) so callers can degrade gracefully: `inspect`
-  # falls back to "resolve-during-apply" and verify_step reports "needed".
-  # Callers that genuinely require a version (install_fnm, apply's main) add
-  # their own `|| die`.
   node_version_ok "${latest:-}" || return 1
-  node_version_compatible "$latest" || return 1
   RESOLVED_NODE_VERSION=$latest
-  NODE_SELECTION=current-lts
+  NODE_SELECTION="current-lts"
+}
+
+# fnm_default_node: the version fnm's default alias points at, if it runs.
+fnm_default_node() {
+  local fnm version
+  fnm=$(fnm_path)
+  [[ -x $fnm ]] || return 1
+  version=$("$fnm" default 2>/dev/null) || return 1
+  node_version_ok "$version" || return 1
+  [[ $("$fnm" exec --using=default -- node --version 2>/dev/null) == "$version" ]] || return 1
+  printf '%s\n' "$version"
+}
+
+# node_default_kept: print the installed default when this run leaves it
+# alone: no full upgrade, and the fnm step is recorded and verifies, so it is
+# skipped. Otherwise the run installs the current LTS.
+node_default_kept() {
+  [[ $FULL_UPGRADE -eq 0 ]] && state_done fnm && verify_step fnm || return 1
+  fnm_default_node
 }
 
 install_starship() { artifact_install starship; }
@@ -369,65 +577,6 @@ install_starship() { artifact_install starship; }
 # uv and uvx; their Zsh completions are cached by zsh/path/uv.zsh (MI-13).
 install_uv() { artifact_install uv; }
 
-
-# The locked packages currently declare simple lower bounds. Refuse a new range
-# syntax until its evaluator is implemented instead of silently weakening it.
-node_satisfies_engine() {
-  local version=${1#v} engine=$2 minimum a b i
-  [[ $engine == \>=* ]] || die "Unsupported locked Node engine: $engine"
-  minimum=${engine#>=}
-  local -a actual_parts minimum_parts
-  IFS=. read -r -a actual_parts <<< "$version"
-  IFS=. read -r -a minimum_parts <<< "$minimum"
-  for i in 0 1 2; do
-    a=${actual_parts[$i]:-0}; b=${minimum_parts[$i]:-0}
-    [[ $a =~ ^[0-9]+$ && $b =~ ^[0-9]+$ ]] || return 1
-    (( 10#$a > 10#$b )) && return 0
-    (( 10#$a < 10#$b )) && return 1
-  done
-  return 0
-}
-
-node_version_compatible() {
-  node_version_ok "${1:-}" || return 1
-  if has_csv_item "$SELECTED_STEPS" yarn; then
-    node_satisfies_engine "$1" "$YARN_NODE_ENGINE" || return 1
-  fi
-  if has_csv_item "$SELECTED_STEPS" pnpm; then
-    node_satisfies_engine "$1" "$PNPM_NODE_ENGINE" || return 1
-  fi
-  return 0
-}
-
-select_existing_node() {
-  [[ -z $RESOLVED_NODE_VERSION ]] || return 0
-  local candidate fnm_bin
-  fnm_bin=$(command -v fnm 2>/dev/null || true)
-  [[ ! -x $HOME/.local/bin/fnm ]] || fnm_bin=$HOME/.local/bin/fnm
-  if [[ -n $fnm_bin ]]; then
-    candidate=$("$fnm_bin" default 2>/dev/null || true)
-    if node_version_compatible "$candidate" &&
-      [[ $("$fnm_bin" exec --using="$candidate" -- node --version 2>/dev/null) == "$candidate" ]]; then
-      RESOLVED_NODE_VERSION=$candidate
-      NODE_SELECTION=preserved-fnm
-      return 0
-    fi
-  fi
-  candidate=$(node --version 2>/dev/null || true)
-  if node_version_compatible "$candidate"; then
-    RESOLVED_NODE_VERSION=$candidate
-    NODE_SELECTION=adopted-existing
-    return 0
-  fi
-  return 1
-}
-
-resolve_node_version() {
-  [[ -z $RESOLVED_NODE_VERSION ]] || { node_version_compatible "$RESOLVED_NODE_VERSION"; return; }
-  select_existing_node || resolve_node_lts
-}
-
 fnm_exec() {
-  [[ -n $RESOLVED_NODE_VERSION ]] || resolve_node_version || return 1
-  "$HOME/.local/bin/fnm" exec --using="$RESOLVED_NODE_VERSION" -- "$@"
+  "$(fnm_path)" exec --using=default -- "$@"
 }

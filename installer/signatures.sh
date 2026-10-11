@@ -2,18 +2,18 @@
 # Per-component signature material, dispatched through registry.sh.
 # shellcheck disable=SC2034
 
-# artifact_signature <name>: what a locked artifact contributes to its
-# component's signature: "|<version>|<url><TAB><sha256>", or "|<url>|<sha256>"
-# for a versionless single file.
+# artifact_signature <name>: what an artifact contributes to its component's
+# signature: where it comes from, never which version is current, so a new
+# upstream release does not invalidate the recorded state.
 artifact_signature() {
-  local asset url sha
-  asset=$(platform_asset "$1")
-  if [[ -z $(artifact_version "$1") ]]; then
-    IFS=$'\t' read -r url sha <<< "$asset"
-    printf '|%s|%s' "$url" "$sha"
-  else
-    printf '|%s|%s' "$(artifact_version "$1")" "$asset"
-  fi
+  local record
+  artifact_row "$1"
+  case $(artifact_source "$1") in
+    pinned) record=$(artifact_pinned_asset "$1") ;;
+    formula) record="formula|$ARTIFACT_FORMULA" ;;
+    release) record="release|$(artifact_release_asset "$1" || printf unsupported)" ;;
+  esac
+  printf '|%s' "$record"
 }
 
 signature_bins() { artifact_signature rpatool; }
@@ -40,13 +40,13 @@ signature_packages() {
 
 signature_pyenv() {
   local material="" asset
-  material+="|$PYENV_REPOSITORY|$PYENV_COMMIT"
+  material+="|$PYENV_REPOSITORY|default-branch"
   printf '%s' "$material"
 }
 
 signature_rbenv() {
   local material="" asset
-  material+="|$RBENV_REPOSITORY|$RBENV_COMMIT|$RUBY_BUILD_REPOSITORY|$RUBY_BUILD_COMMIT"
+  material+="|$RBENV_REPOSITORY|$RUBY_BUILD_REPOSITORY|default-branch"
   printf '%s' "$material"
 }
 
@@ -54,32 +54,34 @@ signature_bun() { artifact_signature bun; }
 
 signature_uv() { artifact_signature uv; }
 
-signature_yarn() {
-  local material="" asset
-  material+="|$YARN_VERSION|$YARN_URL|$YARN_SHA256|$HOME/.local/npm|$NODE_POLICY|${RESOLVED_NODE_VERSION:-unresolved}"
-  printf '%s' "$material"
+# npm_tool_signature <yarn|pnpm>: its formula on macOS, the npm prefix elsewhere.
+npm_tool_signature() {
+  if [[ $OS_FAMILY == macos ]]; then
+    printf '|formula|%s' "$1"
+  else
+    printf '|npm|%s@latest|%s' "$1" "$HOME/.local/npm"
+  fi
 }
 
-signature_pnpm() {
-  local material="" asset
-  material+="|$PNPM_VERSION|$PNPM_URL|$PNPM_SHA256|$HOME/.local/npm|$NODE_POLICY|${RESOLVED_NODE_VERSION:-unresolved}"
-  printf '%s' "$material"
-}
+signature_yarn() { npm_tool_signature yarn; }
+
+signature_pnpm() { npm_tool_signature pnpm; }
 
 signature_fnm() {
   artifact_signature fnm
-  printf '|%s|%s' "$NODE_POLICY" "${RESOLVED_NODE_VERSION:-unresolved}"
+  printf '|%s' "$NODE_POLICY"
 }
 
 signature_plugins() {
   printf '|%s' "$TARGET"
   artifact_signature starship
-  printf '|%s|%s|%s|%s' "$ZSH_AUTOSUGGESTIONS_COMMIT" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT" "$ZSH_COMPLETIONS_COMMIT" "$FZF_TAB_COMMIT"
+  printf '|%s|%s|%s|%s|default-branch' "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" \
+    "$ZSH_COMPLETIONS_REPOSITORY" "$FZF_TAB_REPOSITORY"
 }
 
 signature_fonts() {
   local material="" asset
-  material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_VERSION|$NERD_FONTS_CHECKSUMS_SHA256"
+  material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_RELEASE_URL"
   printf '%s' "$material"
 }
 
