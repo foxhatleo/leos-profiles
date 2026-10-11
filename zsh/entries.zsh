@@ -1,10 +1,28 @@
-# Leo's Profiles — entries: ordered loader.
+# Leo's Profiles — entries: ordered PATH, environment and command loader.
+
+# Fewer fpath entries mean fewer directories for compinit to scan, and a
+# nested shell inherits FPATH from brew shellenv: keep the array unique.
+typeset -gU fpath
+
+# Entries test for tools with `whence -p tool >/dev/null`, then read the path
+# from $commands[tool]. Like $+commands[tool], `whence -p` ignores functions
+# and aliases, but it searches PATH for that one name and hashes it, while
+# $+commands fills zsh's whole command table (2-3 ms with Homebrew on PATH)
+# whenever the name is not hashed yet, and every PATH edit empties the table
+# again. Several fills per startup were measurable (PERF-9).
 
 entry "path/brew"
 entry "path/gnu"
-# add-path prepends, so PATH order is the reverse of load order: user-local bins
-# are loaded here, BEFORE the version managers below, so their shims end up in
-# front. Otherwise a stale node/python/ruby left in ~/.local/bin permanently
+# add-path prepends, so PATH order is the reverse of load order. The resulting
+# precedence is: version-manager shims, then ~/.local/bin, then Go workspace
+# bins, then Homebrew and the system.
+#
+# Go loads right after Homebrew (which usually provides the go binary): a
+# GOPATH bin is a user-local install location like ~/.local/bin, and must not
+# shadow the runtimes the version managers below select.
+entry "path/go"
+# User-local bins load BEFORE the version managers below, so their shims end up
+# in front. Otherwise a stale node/python/ruby left in ~/.local/bin permanently
 # shadows whatever fnm/pyenv/rbenv selected, defeating per-directory switching.
 entry "path/bin"
 entry "path/apt"
@@ -15,11 +33,11 @@ entry "path/pyenv"
 entry "path/rbenv"
 entry "path/fnm"
 entry "path/direnv"
-entry "path/go"
-entry "path/flutter"
-entry "path/thefuck"
-entry "path/gcloud"
 entry "path/gpg"
+
+# Tool init scripts assign PATH directly; drop any duplicates they introduced.
+typeset -gU path
+path=($path)
 
 # Load aliases and completion styles only after PATH initialisation, so tools
 # discovered by Homebrew/local-bin setup are available to env.zsh.
@@ -27,35 +45,8 @@ entry "env"
 
 entry "commands"
 
-# Private definitions live outside version control and load after the public
-# command layer so a machine-specific override can intentionally win.
-#
-# compinit has not run yet, so `compdef` does not exist here: completion and ZLE
-# widget overrides belong in local/private-interactive.zsh, which interactive.zsh
-# sources at the very end instead.
-if [[ -r $LEOS_PROFILES/local/private.zsh ]]; then
-  # This file routinely holds API keys, and a group-traversable home (the macOS
-  # default, where every local account is in staff) makes a permissive mode a
-  # real exposure. Warn instead of rewriting it: the mode is the owner's call,
-  # and the installer already enforces 600 on every apply.
-  #
-  # Checked inside an anonymous function so EXTENDED_GLOB — needed for the
-  # (#q...) qualifiers, and normally set by env.zsh —
-  # stays local, and so the `source` below still sees the ambient option set
-  # that a machine-specific override may depend on.
-  () {
-    emulate -L zsh
-    setopt extended_glob
-    local f=$LEOS_PROFILES/local/private.zsh
-    # `-f` follows symlinks: a bare `f:...:` qualifier lstats, and a symlink's
-    # own mode is 0777, so a link to a correctly-locked file would warn forever
-    # with no way to silence it.
-    [[ -n $f(#qN-f:g+r:) || -n $f(#qN-f:o+r:) ]] || return 0
-    puts-err "$f is readable beyond its owner and usually holds secrets. Fix with: chmod 600 ${(q)f}"
-  }
-  source "$LEOS_PROFILES/local/private.zsh"
-fi
-
-entry "interactive"
+# local/private.zsh, the interactive layer and local/private-interactive.zsh
+# are loaded by start.zsh after this file returns: private files must be
+# sourced at top level, not inside `entry`, so their declarations stay global.
 
 :

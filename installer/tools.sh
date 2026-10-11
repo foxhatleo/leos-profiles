@@ -46,25 +46,27 @@ clone_pinned() {
   [[ $DRY_RUN -eq 1 ]] || [[ $(git -C "$destination" rev-parse HEAD) == "$commit" ]] || die "$label did not resolve pinned commit"
 }
 
-install_local_bins() {
-  local destination="$HOME/.local/bin/rpatool"
-  download_verified "$RPATOOL_URL" "$RPATOOL_SHA256" "$destination"
-  [[ $DRY_RUN -eq 1 ]] || chmod 700 "$destination"
+install_local_bins() { artifact_install rpatool; }
+
+# pyenv and rbenv ship an optional native extension that speeds up their
+# bash code. Both work without it, so a failed compile only warns (BP-10).
+compile_optional_extension() {
+  local root=$1 label=$2
+  [[ $DRY_RUN -eq 0 && -x $root/src/configure ]] || return 0
+  if ! (cd "$root" && src/configure && make -C src); then
+    warn "$label's optional native extension did not compile; $label works without it, a little slower."
+  fi
 }
 
 install_pyenv() {
   clone_pinned "$PYENV_REPOSITORY" "$PYENV_COMMIT" "$HOME/.pyenv" pyenv
-  if [[ $DRY_RUN -eq 0 ]]; then
-    (cd "$HOME/.pyenv" && src/configure && make -C src)
-  fi
+  compile_optional_extension "$HOME/.pyenv" pyenv
 }
 
 install_rbenv() {
   clone_pinned "$RBENV_REPOSITORY" "$RBENV_COMMIT" "$HOME/.rbenv" rbenv
   clone_pinned "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT" "$HOME/.rbenv/plugins/ruby-build" ruby-build
-  if [[ $DRY_RUN -eq 0 && -x $HOME/.rbenv/src/configure ]]; then
-    (cd "$HOME/.rbenv" && src/configure && make -C src)
-  fi
+  compile_optional_extension "$HOME/.rbenv" rbenv
 }
 
 install_plugins() {
@@ -83,38 +85,72 @@ font_should_install() {
   [[ $INSTALL_FONTS == yes ]] || { [[ $INSTALL_FONTS == auto ]] && is_desktop; }
 }
 
-# Blobless, shallow, cone-sparse checkout of a pinned commit limited to the
-# given paths. For a huge monorepo (nerd-fonts) this fetches only the requested
-# font's blobs instead of the whole multi-GB tree/history. Returns non-zero on
-# any failure so callers can fall back to a full checkout; content trust is
-# unchanged (the pinned commit is still asserted).
-sparse_checkout_pinned() {
-  local repository=$1 commit=$2 destination=$3 label=$4
-  shift 4
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would sparse-checkout $label ($*) at the pinned commit"
-    return 0
+# Where the fonts go, matching upstream's installer and font_is_installed:
+# ~/Library/Fonts/NerdFonts on macOS (XDG_DATA_HOME is no font directory
+# there), ${XDG_DATA_HOME:-~/.local/share}/fonts/NerdFonts on Linux.
+nerd_font_directory() {
+  if [[ $OS_FAMILY == macos ]]; then
+    printf '%s\n' "$HOME/Library/Fonts/NerdFonts"
+  else
+    printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/fonts/NerdFonts"
   fi
-  mkdir -p "$destination" &&
-    git -C "$destination" init -q &&
-    git -C "$destination" remote add origin "$repository" &&
-    git -C "$destination" config extensions.partialClone origin &&
-    git -C "$destination" sparse-checkout init --cone &&
-    git -C "$destination" sparse-checkout set "$@" &&
-    git -C "$destination" fetch --depth 1 --filter=blob:none origin "$commit" &&
-    git -C "$destination" checkout --detach FETCH_HEAD || return 1
-  [[ $(git -C "$destination" rev-parse HEAD) == "$commit" ]] || return 1
 }
 
-# The upstream installer writes to $XDG_DATA_HOME/<Fonts|fonts>/NerdFonts when
-# XDG_DATA_HOME is set. On macOS that is not a font directory, so the fonts
-# would never load: always use ~/Library/Fonts there.
-nerd_fonts_installer() {
-  if [[ $OS_FAMILY == macos ]]; then
-    env -u XDG_DATA_HOME "$@"
-  else
-    "$@"
+# nerd_font_archive_digest <SHA-256.txt> <font>: print the digest the
+# verified checksum list gives for <font>.tar.xz; fail for a name the release
+# does not have. Lines are sha256sum's "<digest>  <file>".
+nerd_font_archive_digest() {
+  awk -v want="$2.tar.xz" '
+    length($1) == 64 && $1 !~ /[^0-9A-Fa-f]/ {
+      name = $NF
+      sub(/^\*/, "", name)
+      if (name == want) { print tolower($1); found = 1; exit }
+    }
+    END { exit !found }
+  ' "$1"
+}
+
+# fetch_nerd_font_checksums <destination>: the release's SHA-256.txt, verified
+# against its pinned digest. The URL and digest can be overridden for tests.
+fetch_nerd_font_checksums() {
+  download_verified "${NERD_FONTS_TEST_RELEASE_URL:-$NERD_FONTS_RELEASE_URL}/SHA-256.txt" \
+    "${NERD_FONTS_TEST_CHECKSUMS_SHA256:-$NERD_FONTS_CHECKSUMS_SHA256}" "$1"
+}
+
+# require_known_nerd_font <SHA-256.txt> <font>: die, before any font download,
+# when the release has no archive of that name.
+require_known_nerd_font() {
+  nerd_font_archive_digest "$1" "$2" >/dev/null ||
+    die "Unknown Nerd Font: $2. Nerd Fonts $NERD_FONTS_VERSION has no $2.tar.xz; use a name from https://www.nerdfonts.com/font-downloads (for example JetBrainsMono)."
+}
+
+# install_nerd_font <font> [verified SHA-256.txt]: download the font's release
+# archive, verify it against the checksum list and install its font files.
+install_nerd_font() {
+  local font=$1 checksums=${2:-} release=${NERD_FONTS_TEST_RELEASE_URL:-$NERD_FONTS_RELEASE_URL}
+  local temp digest directory file found=0
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  if [[ -z $checksums ]]; then
+    checksums="$temp/SHA-256.txt"
+    fetch_nerd_font_checksums "$checksums"
   fi
+  require_known_nerd_font "$checksums" "$font"
+  digest=$(nerd_font_archive_digest "$checksums" "$font")
+  download_verified "$release/$font.tar.xz" "$digest" "$temp/$font.tar.xz"
+  mkdir -p "$temp/extract"
+  tar -xJf "$temp/$font.tar.xz" -C "$temp/extract" || die "Could not extract $font.tar.xz (GNU tar needs xz)"
+  directory=$(nerd_font_directory)
+  mkdir -p "$directory"
+  while IFS= read -r -d '' file; do
+    install -m 644 "$file" "$directory/"
+    found=1
+  done < <(find "$temp/extract" -type f \( -iname '*.ttf' -o -iname '*.otf' \) -print0)
+  (( found )) || die "Nerd Font archive $font.tar.xz contained no font files"
+  if [[ $OS_FAMILY != macos ]] && command -v fc-cache >/dev/null 2>&1; then
+    fc-cache -f "$directory" >/dev/null 2>&1 || warn "fc-cache could not refresh the font cache; log out and back in to see $font."
+  fi
+  rm -rf "$temp"
 }
 
 install_fonts() {
@@ -124,26 +160,18 @@ install_fonts() {
   fi
   local font=${FONT_NAME:-JetBrainsMono}
   if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would download pinned Nerd Fonts and install $font"
+    say "Would download Nerd Fonts $NERD_FONTS_VERSION $font.tar.xz, verify it against the release's pinned SHA-256.txt and install it into $(nerd_font_directory)"
     return 0
   fi
-  local temp checkout
-  temp=$(mktemp -d)
-  track_temp "$temp"
-  checkout="$temp/nerd-fonts"
-  # Fast path: fetch only this font's files. Fall back to a full pinned checkout
-  # (the original behavior) if the sparse layout doesn't satisfy the upstream
-  # installer, so no supported font can regress.
-  if sparse_checkout_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$checkout" nerd-fonts \
-       install.sh bin "patched-fonts/$font" && nerd_fonts_installer "$checkout/install.sh" "$font"; then
-    :
-  else
-    say "Sparse Nerd Fonts install did not complete; retrying with a full pinned checkout"
-    rm -rf "$checkout"
-    clone_pinned "$NERD_FONTS_REPOSITORY" "$NERD_FONTS_COMMIT" "$checkout" nerd-fonts
-    run nerd_fonts_installer "$checkout/install.sh" "$font"
+  install_nerd_font "$font" "${NERD_FONTS_CHECKSUMS_FILE:-}"
+  # On WSL the terminal is a Windows program and reads Windows fonts, so the
+  # copy in the Linux guest is not enough (MI-10). Asked once, when the font
+  # is installed; the guest copy still verifies, so a reconcile does not ask
+  # again.
+  if is_wsl; then
+    queue_manual_action install-windows-font "$(nerd_font_directory)" "$NERD_FONTS_RELEASE_URL/$font.zip" \
+      "WSL: install the $font Nerd Font on Windows as well (download $font.zip, select its .ttf files, Install), then choose \"$(nerd_font_family) Nerd Font\" in your Windows terminal's profile."
   fi
-  rm -rf "$temp"
 }
 
 ensure_user_npm_prefix() {
@@ -188,30 +216,20 @@ machine_arch() {
   esac
 }
 
+# platform_asset <artifact>: "<url><TAB><sha256>" for this platform, from the
+# artifact registry's lock lookup; dies when the lock has none.
 platform_asset() {
-  local tool=$1 arch
-  arch=$(machine_arch)
-  case "$tool:$OS_FAMILY:$arch" in
-    bun:macos:aarch64) printf '%s\t%s\n' "$BUN_DARWIN_AARCH64_URL" "$BUN_DARWIN_AARCH64_SHA256" ;;
-    bun:macos:x64) printf '%s\t%s\n' "$BUN_DARWIN_X64_URL" "$BUN_DARWIN_X64_SHA256" ;;
-    bun:apt:aarch64|bun:fedora:aarch64|bun:arch:aarch64) printf '%s\t%s\n' "$BUN_LINUX_AARCH64_URL" "$BUN_LINUX_AARCH64_SHA256" ;;
-    bun:apt:x64|bun:fedora:x64|bun:arch:x64) printf '%s\t%s\n' "$BUN_LINUX_X64_URL" "$BUN_LINUX_X64_SHA256" ;;
-    fnm:macos:aarch64|fnm:macos:x64) printf '%s\t%s\n' "$FNM_MACOS_URL" "$FNM_MACOS_SHA256" ;;
-    fnm:apt:aarch64|fnm:fedora:aarch64|fnm:arch:aarch64) printf '%s\t%s\n' "$FNM_LINUX_AARCH64_URL" "$FNM_LINUX_AARCH64_SHA256" ;;
-    fnm:apt:x64|fnm:fedora:x64|fnm:arch:x64) printf '%s\t%s\n' "$FNM_LINUX_X64_URL" "$FNM_LINUX_X64_SHA256" ;;
-    starship:macos:aarch64) printf '%s\t%s\n' "$STARSHIP_DARWIN_AARCH64_URL" "$STARSHIP_DARWIN_AARCH64_SHA256" ;;
-    starship:macos:x64) printf '%s\t%s\n' "$STARSHIP_DARWIN_X64_URL" "$STARSHIP_DARWIN_X64_SHA256" ;;
-    starship:apt:aarch64|starship:fedora:aarch64|starship:arch:aarch64) printf '%s\t%s\n' "$STARSHIP_LINUX_AARCH64_URL" "$STARSHIP_LINUX_AARCH64_SHA256" ;;
-    starship:apt:x64|starship:fedora:x64|starship:arch:x64) printf '%s\t%s\n' "$STARSHIP_LINUX_X64_URL" "$STARSHIP_LINUX_X64_SHA256" ;;
-    *) die "No locked $tool artifact for $OS_FAMILY/$arch" ;;
-  esac
+  artifact_asset "$1" || die "No locked $1 artifact for $OS_FAMILY/$(uname -m)"
 }
 
+# install_locked_archive_binary <tool> <zip|tar.gz> <destination> [extra...]:
+# download the verified archive and install its <tool> executable at
+# <destination>, and each extra executable beside it.
 install_locked_archive_binary() {
-  local tool=$1 extension=$2 destination=$3 url sha temp archive binary asset
+  local tool=$1 extension=$2 destination=$3 url sha temp archive binary asset extra
+  shift 3
   asset=$(platform_asset "$tool")
-  local IFS=$'\t'
-  read -r url sha <<< "$asset"
+  IFS=$'\t' read -r url sha <<< "$asset"
   temp=$(mktemp -d)
   track_temp "$temp"
   archive="$temp/$tool.$extension"
@@ -231,17 +249,68 @@ install_locked_archive_binary() {
   [[ -n $binary ]] || die "Verified $tool archive did not contain its executable"
   mkdir -p "$(dirname -- "$destination")"
   install -m 755 "$binary" "$destination"
+  for extra in ${1+"$@"}; do
+    binary=$(find "$temp/extract" -type f -name "$extra" -print | sed -n '1p')
+    [[ -n $binary ]] || die "Verified $tool archive did not contain $extra"
+    install -m 755 "$binary" "$(dirname -- "$destination")/$extra"
+  done
   rm -rf "$temp"
 }
 
-install_bun() {
-  install_locked_archive_binary bun zip "$HOME/.local/bin/bun"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/bun" --version | grep -qx "$BUN_VERSION" || die "Bun version verification failed"
+# artifact_version_ok <name> <executable>: the executable reports the locked
+# version on the first line of --version (the registry's expected line,
+# optionally followed by build details after a space).
+artifact_version_ok() {
+  local name=$1 executable=$2 expected first
+  artifact_row "$name"
+  # shellcheck disable=SC2059  # the registry column is the format
+  printf -v expected "$ARTIFACT_VERSION_LINE" "$(artifact_version "$name")"
+  first=$("$executable" --version 2>/dev/null | sed -n '1p') || return 1
+  [[ $first == "$expected" || $first == "$expected "* ]]
 }
 
+# artifact_install <name> [directory]: install a registry artifact into
+# ~/.local/bin (or the directory) and check the installed version.
+artifact_install() {
+  local name=$1 directory=${2:-$HOME/.local/bin} url sha main
+  local -a executables=()
+  artifact_row "$name"
+  IFS=' ' read -r -a executables <<< "$ARTIFACT_EXECUTABLES"
+  main=${executables[0]}
+  if [[ $ARTIFACT_ARCHIVE == file ]]; then
+    IFS=$'\t' read -r url sha <<< "$(platform_asset "$name")"
+    download_verified "$url" "$sha" "$directory/$main"
+    [[ $DRY_RUN -eq 1 ]] || chmod 700 "$directory/$main"
+    return 0
+  fi
+  install_locked_archive_binary "$main" "$ARTIFACT_ARCHIVE" "$directory/$main" ${executables[1]+"${executables[@]:1}"}
+  [[ $DRY_RUN -eq 1 ]] || artifact_version_ok "$name" "$directory/$main" || die "$name version verification failed"
+}
+
+# artifact_verify <name>: the installed copy in ~/.local/bin is the locked one:
+# the same digest for a single file, or every executable present with the
+# main one reporting the locked version.
+artifact_verify() {
+  local name=$1 directory="$HOME/.local/bin" executable asset url sha
+  local -a executables=()
+  artifact_row "$name"
+  IFS=' ' read -r -a executables <<< "$ARTIFACT_EXECUTABLES"
+  for executable in "${executables[@]}"; do
+    [[ -x $directory/$executable ]] || return 1
+  done
+  if [[ $ARTIFACT_ARCHIVE == file ]]; then
+    asset=$(artifact_asset "$name") || return 1
+    IFS=$'\t' read -r url sha <<< "$asset"
+    [[ $(sha256 "$directory/${executables[0]}") == "$sha" ]]
+  else
+    artifact_version_ok "$name" "$directory/${executables[0]}"
+  fi
+}
+
+install_bun() { artifact_install bun; }
+
 install_fnm() {
-  install_locked_archive_binary fnm zip "$HOME/.local/bin/fnm"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/fnm" --version | grep -qx "fnm $FNM_VERSION" || die "fnm version verification failed"
+  artifact_install fnm
   if [[ $DRY_RUN -eq 1 ]]; then
     say "Would adopt a compatible existing Node into fnm, or install current LTS, and make it default"
     return 0
@@ -255,6 +324,14 @@ install_fnm() {
 
 node_version_ok() { [[ ${1:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 
+# The Node release index, from FNM_NODE_DIST_MIRROR when set (fnm honours the
+# same variable for its downloads), so a mirror serves both (ONB-10). It must
+# be an https URL.
+node_dist_index_url() {
+  local base=${FNM_NODE_DIST_MIRROR:-https://nodejs.org/dist}
+  printf '%s/index.tab\n' "${base%/}"
+}
+
 resolve_node_lts() {
   [[ -z $RESOLVED_NODE_VERSION ]] || return 0
   local fnm_bin latest
@@ -265,7 +342,7 @@ resolve_node_lts() {
     # index.tab columns: $1 = version, $10 = the LTS codename ("-" when current).
     latest=$(curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
       --connect-timeout 15 --max-time 30 \
-      https://nodejs.org/dist/index.tab 2>/dev/null | awk -F '\t' 'NR > 1 && $10 != "-" { print $1; exit }') || true
+      "$(node_dist_index_url)" 2>/dev/null | awk -F '\t' 'NR > 1 && $10 != "-" { print $1; exit }') || true
   fi
   if ! node_version_ok "${latest:-}"; then
     if [[ -x $HOME/.local/bin/fnm ]]; then
@@ -287,10 +364,10 @@ resolve_node_lts() {
   NODE_SELECTION=current-lts
 }
 
-install_starship() {
-  install_locked_archive_binary starship tar.gz "$HOME/.local/bin/starship"
-  [[ $DRY_RUN -eq 1 ]] || "$HOME/.local/bin/starship" --version | grep -q "starship $STARSHIP_VERSION" || die "Starship version verification failed"
-}
+install_starship() { artifact_install starship; }
+
+# uv and uvx; their Zsh completions are cached by zsh/path/uv.zsh (MI-13).
+install_uv() { artifact_install uv; }
 
 
 # The locked packages currently declare simple lower bounds. Refuse a new range
@@ -300,9 +377,8 @@ node_satisfies_engine() {
   [[ $engine == \>=* ]] || die "Unsupported locked Node engine: $engine"
   minimum=${engine#>=}
   local -a actual_parts minimum_parts
-  local IFS=.
-  read -r -a actual_parts <<< "$version"
-  read -r -a minimum_parts <<< "$minimum"
+  IFS=. read -r -a actual_parts <<< "$version"
+  IFS=. read -r -a minimum_parts <<< "$minimum"
   for i in 0 1 2; do
     a=${actual_parts[$i]:-0}; b=${minimum_parts[$i]:-0}
     [[ $a =~ ^[0-9]+$ && $b =~ ^[0-9]+$ ]] || return 1

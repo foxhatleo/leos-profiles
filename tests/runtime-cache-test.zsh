@@ -201,6 +201,88 @@ touch "$HOME/recovered"
 leos-source-cached transient "$tmp/bin/transient"
 [[ $CACHE_VALUE == recovered ]] || fail 'transient generator never retried'
 
+# Freshness is the launcher's mtime: an unchanged launcher keeps the cached
+# script even when its output would now differ, and a newer one regenerates.
+# Backdate the cache rather than future-date the launcher, so no clock skew or
+# one-second mtime granularity can make the comparison a tie.
+cat > "$tmp/bin/versioned" <<'GENERATOR'
+#!/bin/sh
+printf '%s\n' "$0" >> "$HOME/versioned-calls"
+printf 'typeset -g CACHE_VALUE=%s\n' "$(cat "$HOME/version")"
+GENERATOR
+chmod +x "$tmp/bin/versioned"
+print -r -- one > "$HOME/version"
+leos-source-cached versioned "$tmp/bin/versioned"
+[[ $CACHE_VALUE == one ]] || fail 'versioned generator first run'
+print -r -- two > "$HOME/version"
+leos-source-cached versioned "$tmp/bin/versioned"
+[[ $CACHE_VALUE == one ]] || fail 'unchanged launcher did not reuse its cache'
+__leos_init_cache versioned "$tmp/bin/versioned"
+cache=$REPLY
+touch -t 202001010000 "$cache" "$cache.zwc"
+leos-source-cached versioned "$tmp/bin/versioned"
+[[ $CACHE_VALUE == two ]] || fail 'launcher newer than its cache did not regenerate'
+[[ $(wc -l < "$HOME/versioned-calls") -eq 2 ]] || fail 'versioned generator ran an unexpected number of times'
+
+# A generator that succeeds with no output records a private negative marker
+# instead of publishing an empty script, and there is nothing to source.
+cat > "$tmp/bin/emptyok" <<'GENERATOR'
+#!/bin/sh
+printf '%s\n' "$0" >> "$HOME/emptyok-calls"
+printf '\n\n'
+GENERATOR
+chmod +x "$tmp/bin/emptyok"
+__leos_cache_dir
+init_dir=$REPLY
+typeset -a before_failed after_failed
+before_failed=("$init_dir"/*.failed(N))
+CACHE_VALUE=untouched
+st=0; leos-source-cached emptyok "$tmp/bin/emptyok" || st=$?
+(( st == 1 )) || fail "empty successful generator returned $st, expected 1 (nothing sourced)"
+[[ $CACHE_VALUE == untouched ]] || fail 'empty generator changed shell state'
+after_failed=("$init_dir"/*.failed(N))
+(( $#after_failed == $#before_failed + 1 )) || fail 'empty successful generation was not recorded as .failed'
+marker=${after_failed:|before_failed}
+zstat -H info -- "$marker"
+(( (info[mode] & 8#777) == 8#600 )) || fail 'negative marker is not private'
+[[ ! -e ${marker%.failed}.zsh ]] || fail 'empty generator output was published as a cache script'
+
+# A planted marker suppresses the generator (status 3, and 2 from the public
+# wrapper) until the launcher is newer than the marker; then it retries, and a
+# successful generation clears the marker.
+cat > "$tmp/bin/suppressed" <<'GENERATOR'
+#!/bin/sh
+printf '%s\n' "$0" >> "$HOME/suppressed-calls"
+printf 'typeset -g CACHE_VALUE=retried\n'
+GENERATOR
+chmod +x "$tmp/bin/suppressed"
+__leos_init_cache suppressed "$tmp/bin/suppressed"
+cache=$REPLY
+failed=${cache%.zsh}.failed
+rm -f -- "$cache" "$cache.zwc" "$HOME/suppressed-calls"
+touch -t 202001010000 "$tmp/bin/suppressed"
+# A marker only counts for the identity written on its first line: one left by
+# another identity (or none at all) must not suppress this generator.
+: > "$failed"
+chmod 600 "$failed"
+st=0; __leos_init_cache suppressed "$tmp/bin/suppressed" || st=$?
+(( st == 0 )) || fail "a .failed without this identity suppressed the generator ($st)"
+rm -f -- "$cache" "$cache.zwc" "$HOME/suppressed-calls"
+__leos_init_cache_identity suppressed "${${:-$tmp/bin/suppressed}:A}"
+print -r -- "$REPLY" > "$failed"
+chmod 600 "$failed"
+st=0; __leos_init_cache suppressed "$tmp/bin/suppressed" || st=$?
+(( st == 3 )) || fail "planted .failed returned $st, expected 3"
+CACHE_VALUE=untouched
+st=0; leos-source-cached suppressed "$tmp/bin/suppressed" || st=$?
+(( st == 2 )) || fail "leos-source-cached with a planted .failed returned $st, expected 2"
+[[ $CACHE_VALUE == untouched && ! -e $HOME/suppressed-calls ]] ||
+  fail 'a recorded .failed still ran the generator'
+touch "$tmp/bin/suppressed"
+leos-source-cached suppressed "$tmp/bin/suppressed"
+[[ $CACHE_VALUE == retried && -e $HOME/suppressed-calls ]] || fail 'a newer launcher did not retry past .failed'
+[[ ! -e $failed && -s $cache ]] || fail 'successful retry left the .failed marker or no cache'
+
 # Concurrent cold starts publish only complete scripts/compiled files.
 typeset -a workers
 for i in 1 2 3 4; do
@@ -212,6 +294,106 @@ leos-source-cached parallel "$bin" concurrent
 [[ $CACHE_VALUE == concurrent ]] || fail 'published compiled cache'
 stages=("$XDG_CACHE_HOME/leos-profiles/init"/.init.*(N) "$XDG_CACHE_HOME/leos-profiles/init"/.compile.*(N))
 (( $#stages == 0 )) || fail 'staging files leaked'
+
+# The directory is validated in full once per shell; repeat calls re-check only
+# the root and the two profile-owned levels. Count full ancestor walks.
+functions -c __leos_cache_safe_path __leos_test_safe_path
+integer safe_walks=0
+__leos_cache_safe_path() { (( ++safe_walks )); __leos_test_safe_path "$@"; }
+__leos_cache_forget
+__leos_cache_dir || fail 'cache directory validation'
+init_dir=$REPLY
+(( safe_walks > 0 )) || fail 'first call did not validate the directory'
+safe_walks=0
+__leos_cache_dir && [[ $REPLY == $init_dir ]] || fail 'memoized cache directory'
+leos-source-cached secure "$bin" fresh
+(( safe_walks == 0 )) || fail "memoized directory was re-walked $safe_walks time(s)"
+# Any change to a checked level drops the memo: validate again, and repair.
+chmod 755 "$init_dir"
+__leos_cache_dir || fail 'revalidation after chmod'
+(( safe_walks > 0 )) || fail 'a changed directory mode did not trigger full validation'
+zstat -H info -- "$init_dir"
+(( (info[mode] & 8#777) == 8#700 )) || fail 'revalidation did not repair the directory mode'
+chmod 777 "$XDG_CACHE_HOME"
+if __leos_cache_dir; then fail 'a root made world-writable after validation stayed trusted'; fi
+safe_walks=0
+if __leos_cache_dir; then fail 'memoized failure'; fi
+(( safe_walks == 0 )) || fail 'a memoized failure was re-walked'
+[[ $__leos_cache_unsafe == $XDG_CACHE_HOME ]] || fail "memoized failure lost the unsafe path: $__leos_cache_unsafe"
+chmod 700 "$XDG_CACHE_HOME"
+if __leos_cache_dir; then fail 'memoized failure was not kept for this shell'; fi
+__leos_cache_forget
+__leos_cache_dir || fail 'forgetting the memo did not revalidate'
+# A different root (or EUID) is a different memo key.
+(
+  export XDG_CACHE_HOME=$tmp/other-root
+  __leos_cache_dir && [[ $REPLY == $tmp/other-root/leos-profiles/init ]] || fail 'memo leaked across cache roots'
+)
+functions -c __leos_test_safe_path __leos_cache_safe_path
+
+# A cache hit runs no external command at all: no PATH, still a hit.
+__leos_init_cache secure "$bin" fresh
+cache=$REPLY
+(
+  path=()
+  hash -r
+  __leos_init_cache secure "$bin" fresh && [[ $REPLY == $cache ]] || fail 'cache hit needed an external command'
+)
+
+# Each entry starts with its full identity. Control characters in any field are
+# escaped onto that one line, and an entry whose identity differs (a forged or
+# colliding first line) is regenerated rather than used.
+__leos_init_cache forge "$bin" $'one\n# leos-id: v1 forged'
+cache=$REPLY
+lines=("${(@f)$(<$cache)}")
+[[ $lines[1] == "# leos-id: v1 forge "*" \$'one\\n# leos-id: v1 forged'" ]] ||
+  fail "identity line does not escape a newline: $lines[1]"
+[[ $lines[2] == 'typeset -g CACHE_VALUE='* ]] || fail 'identity line must be a single line'
+print -rl -- '# leos-id: v1 someone-else' 'typeset -g CACHE_VALUE=forged' > "$cache"
+rm -f -- "$cache.zwc"
+leos-source-cached forge "$bin" $'one\n# leos-id: v1 forged'
+[[ $CACHE_VALUE != forged ]] || fail 'an entry with a different identity was used'
+IFS= read -r line < "$cache"
+[[ $line == $lines[1] ]] || fail 'a mismatched entry was not regenerated'
+
+# Keys are encoded reversibly into file names: `%` and separators are escaped,
+# so `a:b` and `a%3Ab` cannot share an entry name.
+__leos_init_cache_name 'a:b' x; first=$REPLY
+__leos_init_cache_name 'a%3Ab' x; second=$REPLY
+[[ $first == a%3Ab.* && $second == a%253Ab.* ]] || fail "key encoding: $first $second"
+
+# Entries named by the SHA-256 of their identity (earlier versions) are removed
+# when the directory is validated; nothing else is touched.
+legacy_name=${(l:64::a:)${:-}}
+: > "$init_dir/$legacy_name.zsh"
+: > "$init_dir/$legacy_name.zsh.zwc"
+: > "$init_dir/$legacy_name.failed"
+: > "$init_dir/keep-me.zsh"
+__leos_cache_forget
+__leos_cache_dir || fail 'validation with legacy entries'
+legacy=("$init_dir"/$legacy_name*(N))
+(( $#legacy == 0 )) || fail "legacy hash-named entries survived: $legacy"
+[[ -e $init_dir/keep-me.zsh ]] || fail 'legacy cleanup removed an unrelated entry'
+rm -f -- "$init_dir/keep-me.zsh"
+
+# A stamp from today answers __leos_daily_due without validating anything; a
+# stale or missing one validates before the job may run.
+functions -c __leos_cache_dir_validate __leos_test_validate
+integer validations=0
+__leos_cache_dir_validate() { (( ++validations )); __leos_test_validate "$@"; }
+__leos_cache_forget
+rm -f -- "$init_dir/stamp-test"
+__leos_daily_due stamp-test || fail 'a missing stamp was not due'
+(( validations == 1 )) || fail "a due job validated $validations time(s)"
+__leos_cache_forget
+validations=0
+if __leos_daily_due stamp-test; then fail 'a fresh stamp was due again'; fi
+(( validations == 0 )) || fail 'a fresh stamp still validated the directory'
+touch -t 202001010000 "$init_dir/stamp-test"
+__leos_daily_due stamp-test || fail 'a stale stamp was not due'
+(( validations == 1 )) || fail 'a stale stamp did not validate the directory'
+functions -c __leos_test_validate __leos_cache_dir_validate
+rm -f -- "$init_dir/stamp-test"
 
 # Homebrew's empty success is process-dependent, and must not poison a later
 # shell. The stub also rejects dialect inference by requiring an explicit zsh.
@@ -244,6 +426,42 @@ export PYENV_ROOT=$tmp/custom-python RBENV_ROOT=$tmp/custom-ruby
 source "$root/zsh/path/pyenv.zsh"
 source "$root/zsh/path/rbenv.zsh"
 [[ $PYENV_ROOT == $tmp/custom-python && $RBENV_ROOT == $tmp/custom-ruby ]] || fail 'version-manager roots overwritten'
+
+# pyenv init: no bash PATH rewrite (--no-push-path), no compctl completion, and
+# the shims still end up first on PATH, once, even when already present. The
+# fake emits what pyenv's guarded prepend and completion line look like.
+mkdir -p "$tmp/pyenv-root/bin" "$tmp/pyenv-root/shims" "$tmp/pyenv-root/completions"
+print -rl -- 'typeset -g PYENV_COMPCTL_LOADED=yes' > "$tmp/pyenv-root/completions/pyenv.zsh"
+cat > "$tmp/pyenv-root/bin/pyenv" <<'PYENV'
+#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/pyenv-calls"
+cat <<EOS
+if [[ ":\$PATH:" != *':$PYENV_ROOT/shims:'* ]]; then
+export PATH="$PYENV_ROOT/shims:\${PATH}"
+fi
+export PYENV_SHELL=zsh
+source '$PYENV_ROOT/completions/pyenv.zsh'
+pyenv() { command pyenv "\$@"; }
+EOS
+PYENV
+chmod +x "$tmp/pyenv-root/bin/pyenv"
+(
+  export PYENV_ROOT=$tmp/pyenv-root
+  rm -f -- "$HOME/pyenv-calls"
+  path=(/usr/bin "$PYENV_ROOT/shims" /bin)
+  for round in fresh cached; do
+    unset PYENV_COMPCTL_LOADED PYENV_SHELL
+    source "$root/zsh/path/pyenv.zsh"
+    [[ $PYENV_SHELL == zsh && -z ${PYENV_COMPCTL_LOADED-} ]] || fail "pyenv init ($round): compctl completion still sourced"
+    [[ $path[1] == $PYENV_ROOT/shims && ${#${(M)path:#$PYENV_ROOT/shims}} == 1 ]] ||
+      fail "pyenv shims not first exactly once ($round): $path"
+    (( $+functions[pyenv] )) || fail "pyenv shell function missing ($round)"
+  done
+  [[ $(<$HOME/pyenv-calls) == 'init --no-rehash --no-push-path - zsh' ]] ||
+    fail "pyenv init arguments or cache reuse: $(<$HOME/pyenv-calls)"
+  [[ -r $root/zsh/completions/_pyenv && $(head -n 1 "$root/zsh/completions/_pyenv") == '#compdef pyenv' ]] ||
+    fail 'compsys completion for pyenv missing'
+)
 
 # Bun selects a dialect from SHELL even when the running interpreter is Zsh.
 # A parent Bash/Fish shell must not cause Bash/Fish code to enter the cache.

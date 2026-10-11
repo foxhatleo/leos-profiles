@@ -38,7 +38,7 @@ if __leos_brew_bin_path=$(__leos_brew_bin); then
       puts-err "Usage: brew-china-enable [--yes]"; return 2
     fi
     if [[ ${1:-} != --yes ]]; then
-      puts-err "This routes Homebrew metadata and bottles through the third-party USTC mirror."
+      puts-err "This routes Homebrew's own code (brew.git), its metadata and bottles through the third-party USTC mirror."
       read -r "answer?Enable it? [y/N] "
       [[ $answer == [yY] || $answer == [yY][eE][sS] ]] || { puts "Cancelled."; return 1; }
     fi

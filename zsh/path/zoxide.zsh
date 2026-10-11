@@ -4,9 +4,14 @@
 # Loaded from interactive.zsh, AFTER compinit: the generated script registers
 # its `cd` completion with `compdef`, guarded on compdef existing, so running
 # this during the PATH phase silently lost that completion.
-if (( $+commands[zoxide] )); then
+#
+# _ZO_ECHO and _ZO_RESOLVE_SYMLINKS change the code `zoxide init` generates
+# (zoxide's other variables are read at run time), so they are part of the
+# cache identity: changing either in local/private.zsh regenerates the script.
+if whence -p zoxide >/dev/null; then
   leos-source-cached-warn "zoxide init produced no output; cd will not be frecency-aware." \
-    zoxide-init $commands[zoxide] init zsh --cmd cd
+    "zoxide-init:${+_ZO_ECHO}${_ZO_ECHO-}:${+_ZO_RESOLVE_SYMLINKS}${_ZO_RESOLVE_SYMLINKS-}" \
+    $commands[zoxide] init zsh --cmd cd
 fi
 
 :

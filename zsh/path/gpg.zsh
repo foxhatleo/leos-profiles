@@ -1,7 +1,7 @@
 # GPG
 if [[ -o interactive ]]; then
   # $TTY is zsh's own record of the terminal, so this needs no `tty` fork.
-  # Leave GPG_TTY unset when there is no terminal (mirrors fish).
+  # Leave GPG_TTY unset when there is no terminal.
   if [[ -n ${TTY:-} ]]; then
     export GPG_TTY=$TTY
   else

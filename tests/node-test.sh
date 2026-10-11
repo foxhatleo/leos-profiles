@@ -26,7 +26,8 @@ SELECTED_GROUPS=""
 normalise_dependencies
 order_selected_steps
 equal "$SELECTED_STEPS" packages,fnm,pnpm
-equal "$SELECTED_GROUPS" languages
+# pnpm runs on fnm's Node: no OS runtime group is implied (MI-4).
+equal "$SELECTED_GROUPS" ""
 validate_component_registry
 (
   unset -f signature_pnpm
@@ -164,7 +165,13 @@ for family in apt macos fedora arch; do
     ensure_brew() { :; }
     result=$(install_os_packages)
     [[ $result == *missing* && $result != *present* ]] || fail "$family repair installed an existing package"
-    [[ $result != *' upgrade '* && $result != *' -Syu '* ]] || fail "$family performed a full upgrade"
+    if [[ $family == arch ]]; then
+      # Arch has no partial upgrades: installing what is missing syncs and
+      # upgrades in the same transaction (BP-8), and only then.
+      [[ $result == *' pacman -Syu --needed --noconfirm missing '* ]] || fail "arch installed against a stale database: $result"
+    else
+      [[ $result != *' upgrade '* && $result != *' -Syu '* ]] || fail "$family performed a full upgrade"
+    fi
   )
 done
 

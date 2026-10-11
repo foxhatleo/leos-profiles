@@ -1,14 +1,26 @@
 "$schema" = 'https://starship.rs/config-schema.json'
 
+# Upper bound, in milliseconds, for each external command a module runs (the
+# VCS status, `node --version`, ...). 500 is Starship's built-in default,
+# stated here so the per-prompt worst case is visible and tuned in one place;
+# lower it where a slow toolchain probe makes Enter feel sluggish.
+command_timeout = 500
+
 # Explicit fallback when LEOS_PLAIN_PROMPT=1. Keep the profile readable in a
 # stock terminal or on a headless host without a Nerd Font.
-format = "$username$directory$git_branch$git_status$nodejs$python$ruby$line_break$character"
+format = "$username$hostname $directory$git_branch$git_status$nodejs$python$ruby$line_break$character"
 
 [username]
 show_always = true
-format = '[$user@]($style)'
+format = '[$user]($style)'
 style_user = 'bold blue'
 style_root = 'bold red'
+
+# Shown only over SSH: user@host there, just the user locally.
+[hostname]
+ssh_only = true
+format = '[@$hostname]($style)'
+style = 'bold blue'
 
 [directory]
 format = '[$path]($style) '

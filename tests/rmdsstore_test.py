@@ -11,7 +11,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("rmdsstore", ROOT / "util" / "rmdsstore.py")
 assert SPEC and SPEC.loader
@@ -222,13 +221,15 @@ class RmdsstoreTest(unittest.TestCase):
                 real_open = rmdsstore.os.open
                 swapped = False
 
+                # The closure is only called inside this iteration's mock.patch
+                # block, so reading the loop variables late is intended (B023).
                 def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
                     nonlocal swapped
                     if path == "nested" and dir_fd is not None and not swapped:
                         swapped = True
-                        victim.rename(recycle / "moved")
-                        victim.symlink_to(outside, target_is_directory=True)
-                    return real_open(path, flags, mode, dir_fd=dir_fd)
+                        victim.rename(recycle / "moved")  # noqa: B023
+                        victim.symlink_to(outside, target_is_directory=True)  # noqa: B023
+                    return real_open(path, flags, mode, dir_fd=dir_fd)  # noqa: B023
 
                 with mock.patch.object(rmdsstore.os, "open", side_effect=swapping_open):
                     result = rmdsstore.scan(str(root), dry_run=dry_run, purge_recycle_bins=True)

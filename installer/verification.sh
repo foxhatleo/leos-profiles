@@ -11,18 +11,11 @@ git_checkout_at() {
   [[ $(git -C "$directory" rev-parse HEAD 2>/dev/null || true) == "$commit" ]]
 }
 
-font_is_installed() {
-  local font=${FONT_NAME:-JetBrainsMono} installed_family directory
-  if [[ $OS_FAMILY == macos ]]; then
-    directory="$HOME/Library/Fonts"
-  else
-    directory="${XDG_DATA_HOME:-$HOME/.local/share}/fonts"
-  fi
-  [[ -d $directory ]] || return 1
-  # Nerd Fonts renames families whose upstream names are reserved. These
-  # aliases match the filenames in the pinned nerd-fonts commit. Keep the
-  # check family-specific: another installed Nerd Font must not satisfy the
-  # requested family's postcondition.
+# The family name a Nerd Font installs under. Nerd Fonts renames families
+# whose upstream names are reserved; these aliases match the filenames in the
+# pinned Nerd Fonts release.
+nerd_font_family() {
+  local font=${FONT_NAME:-JetBrainsMono} installed_family
   case $font in
     AnonymousPro) installed_family=AnonymicePro ;;
     AurulentSansMono) installed_family=AurulentSansM ;;
@@ -45,13 +38,24 @@ font_is_installed() {
     iA-Writer) installed_family=iMWriting ;;
     *) installed_family=$font ;;
   esac
+  printf '%s\n' "$installed_family"
+}
+
+font_is_installed() {
+  local directory installed_family
+  if [[ $OS_FAMILY == macos ]]; then
+    directory="$HOME/Library/Fonts"
+  else
+    directory="${XDG_DATA_HOME:-$HOME/.local/share}/fonts"
+  fi
+  [[ -d $directory ]] || return 1
+  # Keep the check family-specific: another installed Nerd Font must not
+  # satisfy the requested family's postcondition.
+  installed_family=$(nerd_font_family)
   find "$directory" -type f -iname "*${installed_family}*NerdFont*" -print -quit | grep -q .
 }
 
-verify_bins() {
-  local directory
-  [[ -x $HOME/.local/bin/rpatool ]] && [[ $(sha256 "$HOME/.local/bin/rpatool") == "$RPATOOL_SHA256" ]]
-}
+verify_bins() { artifact_verify rpatool; }
 
 verify_packages() {
   local directory
@@ -70,10 +74,9 @@ verify_rbenv() {
     git_checkout_at "$HOME/.rbenv/plugins/ruby-build" "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT"
 }
 
-verify_bun() {
-  local directory
-  [[ -x $HOME/.local/bin/bun ]] && "$HOME/.local/bin/bun" --version 2>/dev/null | grep -qx "$BUN_VERSION"
-}
+verify_bun() { artifact_verify bun; }
+
+verify_uv() { artifact_verify uv; }
 
 verify_yarn() {
   local directory
@@ -89,17 +92,14 @@ verify_fnm() {
   local directory
   [[ -n $RESOLVED_NODE_VERSION ]] || resolve_node_version || return 1
   node_version_compatible "$RESOLVED_NODE_VERSION" || return 1
-  [[ -x $HOME/.local/bin/fnm ]] &&
-    "$HOME/.local/bin/fnm" --version 2>/dev/null | grep -qx "fnm $FNM_VERSION" &&
+  artifact_verify fnm &&
     [[ $("$HOME/.local/bin/fnm" default 2>/dev/null) == "$RESOLVED_NODE_VERSION" ]] &&
     [[ $("$HOME/.local/bin/fnm" exec --using="$RESOLVED_NODE_VERSION" -- node --version 2>/dev/null) == "$RESOLVED_NODE_VERSION" ]]
 }
 
 verify_plugins() {
-  local directory
-  [[ -x $HOME/.local/bin/starship ]] &&
-    "$HOME/.local/bin/starship" --version 2>/dev/null | sed -n '1p' | grep -qx "starship $STARSHIP_VERSION" &&
-    directory="$TARGET/zsh/plugins" &&
+  local directory="$TARGET/zsh/plugins"
+  artifact_verify starship &&
     git_checkout_at "$directory/zsh-autosuggestions" "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT" &&
     git_checkout_at "$directory/zsh-syntax-highlighting" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT" &&
     git_checkout_at "$directory/zsh-completions" "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT" &&
@@ -113,8 +113,13 @@ verify_fonts() {
 
 verify_zsh_config() {
   local directory
-  managed_block_equals "$HOME/.zshrc" loader "$(zshrc_managed_content)" &&
-    managed_block_equals "$HOME/.zshenv" environment "$(zshenv_managed_content)"
+  resolve_zsh_dotdirs
+  managed_block_equals "$ZSH_RC_DIR/.zshrc" loader "$(zshrc_managed_content)" &&
+    managed_block_equals "$ZSH_ENV_DIR/.zshenv" environment "$(zshenv_managed_content)" &&
+    { [[ $OS_FAMILY != macos ]] ||
+      managed_block_equals "$ZSH_RC_DIR/.zprofile" login-path "$(zprofile_managed_content)"; } &&
+    ! legacy_loader_present "$ZSH_RC_DIR/.zshrc" loader &&
+    ! legacy_loader_present "$ZSH_ENV_DIR/.zshenv" environment
 }
 
 verify_default_shell() {
@@ -126,6 +131,6 @@ verify_default_shell() {
     current_shell=$(current_login_shell)
     [[ ${current_shell##*/} == zsh ]]
   else
-    [[ $(current_login_shell) == "$(command -v zsh)" ]]
+    [[ $(current_login_shell) == "$(preferred_zsh_path)" ]]
   fi
 }

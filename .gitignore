@@ -9,6 +9,9 @@ docs/*
 ssh-shortcuts.zsh
 zsh/_private.zsh
 zsh/plugins/
+# Compiled profile sources (installer, leos-refresh-init-cache) and their
+# temporary build directories.
+*.zwc
 local/
 
 # ---- macOS ----

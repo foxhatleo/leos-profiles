@@ -1,15 +1,23 @@
 name: CI
 
+# Fast checks for every push and pull request. Their job names are the branch
+# ruleset's required checks, so keep them stable and do not add a workflow-level
+# paths filter: a filtered required workflow never reports on docs-only pull
+# requests and blocks them. Real host provisioning lives in provision.yml.
 on:
   push:
     branches: [master]
   pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: "23 8 * * 1"
 
 permissions:
   contents: read
+
+# Superseded pull-request runs are cancelled; master runs always complete so
+# every merged commit keeps a full result.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   zsh-syntax:
@@ -17,13 +25,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Install zsh
         run: sudo apt-get update && sudo apt-get install -y zsh
       - name: Syntax-check zsh files
         run: |
           rc=0
-          for f in zsh/*.zsh zsh/path/*.zsh tests/*.zsh; do
+          for f in zsh/*.zsh zsh/path/*.zsh zsh/completions/_* tests/*.zsh; do
             zsh -n "$f" || { echo "syntax error: $f"; rc=1; }
           done
           exit "$rc"
@@ -31,11 +41,13 @@ jobs:
         run: zsh tests/profile-test.zsh
 
   lint:
-    name: Shell lint (gating)
+    name: Lint (gating)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Install pinned ShellCheck
         env:
           VERSION: v0.11.0
@@ -50,14 +62,62 @@ jobs:
           echo "$RUNNER_TEMP/shellcheck-$VERSION" >> "$GITHUB_PATH"
       - name: Lint deterministic installer
         run: shellcheck --version && shellcheck -s bash -x install.sh installer/*.sh tests/*.sh
+      # Each linter below runs even when an earlier one failed, so one push
+      # reports every finding instead of the first failing tool's.
+      - name: Install pinned actionlint
+        if: ${{ !cancelled() }}
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          archive="actionlint_${VERSION}_linux_amd64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSLo "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v$VERSION/$archive"
+          printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/$archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/actionlint" actionlint
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
+      - name: Lint workflows (actionlint, with the pinned ShellCheck)
+        if: ${{ !cancelled() }}
+        run: actionlint -version && actionlint
+      - name: Install pinned Python linters
+        if: ${{ !cancelled() }}
+        run: pipx install zizmor==1.30.1 && pipx install ruff==0.16.10
+      - name: Audit workflows (zizmor)
+        if: ${{ !cancelled() }}
+        env:
+          # Read-only token for zizmor's online audits (impostor commits,
+          # known-vulnerable actions); the job has only contents: read.
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --version && zizmor --no-progress --format=github .github
+      - name: Lint Python (ruff)
+        if: ${{ !cancelled() }}
+        run: ruff --version && ruff check --no-cache util tests
+      # Informational only: the scripts predate a formatter and are not yet
+      # normalized, so a diff here never fails the job.
+      - name: Show shfmt formatting drift (informational)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          VERSION: v3.14.1
+          SHA256: 76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf
+        run: |
+          binary="$RUNNER_TEMP/shfmt"
+          curl --proto '=https' --tlsv1.2 -fsSLo "$binary" \
+            "https://github.com/mvdan/sh/releases/download/$VERSION/shfmt_${VERSION}_linux_amd64"
+          printf '%s  %s\n' "$SHA256" "$binary" | sha256sum -c -
+          chmod +x "$binary"
+          "$binary" -d -i 2 -ci install.sh installer/*.sh tests/*.sh
 
   install-checks:
     name: Installer + util checks (gating)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Install shell test dependencies
@@ -104,6 +164,8 @@ jobs:
         run: bash tests/locked-plugins-test.sh
       - name: Smoke-test the deterministic apply in dry-run (apt)
         run: bash tests/apply-dryrun-test.sh
+      - name: Prove inspect and dry-run apply are read-only (apt)
+        run: bash tests/readonly-test.sh
 
   package-map-macos:
     name: Package map / ${{ matrix.runner }} (gating)
@@ -112,9 +174,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-14, macos-15, macos-15-intel, macos-26, macos-26-intel]
+        # Homebrew Tier 1 only; see the support matrix in README.md.
+        runner: [macos-15, macos-26]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Refresh formula metadata and tap Heroku
         run: |
           # Upstream metadata fetches flake; retry before failing the gate.
@@ -128,12 +193,28 @@ jobs:
         run: bash tests/package-map-availability.sh macos
       - name: Verify locked macOS artifacts and digests
         run: bash tests/locked-artifacts-test.sh
-      - name: Run deterministic installer tests
-        run: bash tests/install-test.sh
+      # A fresh Mac runs the installer with the system Bash 3.2, not the
+      # Homebrew Bash that hosted runners put first on PATH.
+      - name: Run deterministic installer tests (system Bash 3.2)
+        run: /bin/bash --version && /bin/bash tests/install-test.sh
+      - name: Test credential workflows without external mutations (system Bash 3.2)
+        run: /bin/bash tests/credentials-test.sh
+      - name: Test Node dependency and activation logic
+        run: /bin/bash tests/node-test.sh
       - name: Run Zsh profile tests
         run: zsh tests/profile-test.zsh
-      - name: Smoke-test the deterministic apply in dry-run (macOS)
-        run: bash tests/apply-dryrun-test.sh
+      - name: Test runtime cache and completion integration (BSD stat/mktemp)
+        run: zsh tests/runtime-cache-test.zsh
+      # rmdsstore runs as `sudo /usr/bin/python3 -I`, the OS-provided Python,
+      # so test it with exactly that interpreter rather than setup-python's.
+      - name: Test metadata utility with the system Python
+        run: /usr/bin/python3 --version && /usr/bin/python3 -I tests/rmdsstore_test.py
+      - name: Clone locked plugins and source their combined Zsh integration
+        run: bash tests/locked-plugins-test.sh
+      - name: Smoke-test the deterministic apply in dry-run (macOS, system Bash 3.2)
+        run: /bin/bash tests/apply-dryrun-test.sh
+      - name: Prove inspect and dry-run apply are read-only (macOS, system Bash 3.2)
+        run: /bin/bash tests/readonly-test.sh
 
   package-map-apt:
     name: Package map / ${{ matrix.runner }} (gating)
@@ -144,7 +225,9 @@ jobs:
       matrix:
         runner: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Refresh package metadata
         run: sudo apt-get update
       - name: Verify mapped package availability
@@ -157,6 +240,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Tags, not digests: these checks deliberately follow each distro's
+        # current image, which is what a new user installs on.
         include:
           - family: apt
             label: Debian 12
@@ -174,7 +259,9 @@ jobs:
             label: Arch latest x86_64
             image: archlinux:latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Verify mapped package availability
         env:
           FAMILY: ${{ matrix.family }}
@@ -184,20 +271,23 @@ jobs:
             docker run --rm -v "$PWD:/repo:ro" "$IMAGE" bash -lc '
               apt-get update && apt-get install -y ca-certificates &&
               bash /repo/tests/package-map-availability.sh apt &&
-              bash /repo/tests/apply-dryrun-test.sh
+              bash /repo/tests/apply-dryrun-test.sh &&
+              bash /repo/tests/readonly-test.sh
             '
           elif [[ $FAMILY == fedora ]]; then
             docker run --rm -v "$PWD:/repo:ro" "$IMAGE" bash -lc '
               dnf install -y findutils grep rpm ca-certificates &&
               dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" &&
               bash /repo/tests/package-map-availability.sh fedora &&
-              bash /repo/tests/apply-dryrun-test.sh
+              bash /repo/tests/apply-dryrun-test.sh &&
+              bash /repo/tests/readonly-test.sh
             '
           else
             docker run --rm -v "$PWD:/repo:ro" "$IMAGE" bash -lc '
               pacman -Sy --noconfirm &&
               bash /repo/tests/package-map-availability.sh arch &&
-              bash /repo/tests/apply-dryrun-test.sh
+              bash /repo/tests/apply-dryrun-test.sh &&
+              bash /repo/tests/readonly-test.sh
             '
           fi
 
@@ -206,65 +296,40 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - name: Install completion verification dependency
         run: sudo apt-get update && sudo apt-get install -y zsh
       - name: Verify every locked Linux arm64 binary and digest
         run: bash tests/locked-artifacts-test.sh
 
-  provision-linux:
-    name: Real provisioning / ${{ matrix.image }} / ${{ matrix.runner }} (gating)
+  # Informational: hosted-runner timing is noisy and the runners carry few of
+  # the tools a workstation initializes, so this reports numbers in the job
+  # summary but never blocks a merge. Do not make it a required check.
+  startup-benchmark:
+    name: Startup benchmark / ${{ matrix.runner }} (informational)
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 15
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
-        image: ['ubuntu:22.04', 'ubuntu:24.04', 'ubuntu:26.04', 'debian:12', 'debian:13', 'fedora:43', 'fedora:44']
-        include:
-          - runner: ubuntu-24.04
-            image: archlinux:latest
+        runner: [ubuntu-latest, macos-15]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Provision a fresh user in a disposable native-architecture container
-        env:
-          IMAGE: ${{ matrix.image }}
-        run: |
-          # No emulation and no privileged container: each runner pulls its
-          # native image architecture. The source checkout stays read-only.
-          mkdir -p "$RUNNER_TEMP/provisioning-logs"
-          chmod 777 "$RUNNER_TEMP/provisioning-logs"
-          docker run --rm --init -e GITHUB_ACTIONS=true -e LEOS_CI_ARTIFACTS=/artifacts \
-            -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/provisioning-logs:/artifacts" "$IMAGE" \
-            bash /repo/tests/provisioning-container.sh
-      - name: Upload provisioning diagnostics
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          name: provisioning-${{ strategy.job-index }}-${{ matrix.runner }}
-          path: ${{ runner.temp }}/provisioning-logs
-          if-no-files-found: ignore
-
-  provision-macos:
-    name: Real provisioning / ${{ matrix.runner }} (gating)
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [macos-14, macos-15, macos-15-intel, macos-26, macos-26-intel]
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Provision a fresh HOME on the existing hosted macOS image
-        # Hosted images already contain Homebrew and other tools. This exercises
-        # real installations/upgrades, not a factory-fresh macOS bootstrap.
+          persist-credentials: false
+      - name: Install zsh and strace (process count)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh strace
+      - name: Measure non-terminal and pty startup
         run: |
-          mkdir -p "$RUNNER_TEMP/provisioning-logs"
-          LEOS_CI_ARTIFACTS="$RUNNER_TEMP/provisioning-logs" bash tests/provisioning-test.sh
-      - name: Upload provisioning diagnostics
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: provisioning-${{ matrix.runner }}
-          path: ${{ runner.temp }}/provisioning-logs
-          if-no-files-found: ignore
+          {
+            echo "### Startup benchmark ($RUNNER_OS $RUNNER_ARCH)"
+            echo
+            echo '```text'
+            zsh tests/startup-benchmark.zsh 2>&1
+            zsh tests/startup-benchmark.zsh --pty 2>&1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

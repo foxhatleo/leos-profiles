@@ -1,0 +1,114 @@
+name: Provision
+
+# Real host provisioning is slow (hours of runner time per run) and depends on
+# moving upstream package repositories, so it is not part of every push. It
+# runs weekly, on demand, and on pull requests labelled `provision`. These jobs
+# are not required checks; a reviewer applies the label when a change touches
+# provisioning behaviour and reads the result before merging.
+on:
+  schedule:
+    - cron: "23 8 * * 1"
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+
+permissions:
+  contents: read
+
+# Pull-request runs are superseded by newer pushes. Adding an unrelated label
+# also fires `labeled`; give that event its own group so it can never cancel a
+# provisioning run in progress. Scheduled and dispatched runs are not cancelled.
+concurrency:
+  group: >-
+    provision-${{ github.ref }}${{ github.event.action == 'labeled' &&
+    github.event.label.name != 'provision' && format('-ignored-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  provision-linux:
+    name: Real provisioning / ${{ matrix.image }} / ${{ matrix.runner }}
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'provision') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'provision'))
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        # Tags, not digests: provisioning deliberately tests each distro's
+        # current image, which is what a new user installs on.
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'ubuntu:26.04', 'debian:12', 'debian:13', 'fedora:43', 'fedora:44']
+        include:
+          - runner: ubuntu-24.04
+            image: archlinux:latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Provision a fresh user in a disposable native-architecture container
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          # No emulation and no privileged container: each runner pulls its
+          # native image architecture. The source checkout stays read-only.
+          mkdir -p "$RUNNER_TEMP/provisioning-logs"
+          chmod 777 "$RUNNER_TEMP/provisioning-logs"
+          docker run --rm --init -e GITHUB_ACTIONS=true -e LEOS_CI_ARTIFACTS=/artifacts \
+            -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/provisioning-logs:/artifacts" "$IMAGE" \
+            bash /repo/tests/provisioning-container.sh
+      - name: Upload provisioning diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: provisioning-${{ strategy.job-index }}-${{ matrix.runner }}
+          path: ${{ runner.temp }}/provisioning-logs
+          if-no-files-found: ignore
+
+  provision-macos:
+    name: Real provisioning / ${{ matrix.runner }}${{ matrix.full_upgrade == '1' && ' (full upgrade)' || '' }}
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'provision') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'provision'))
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # A full `brew upgrade` of a hosted image takes most of the timeout
+        # and mostly exercises Homebrew itself, so only macos-15 runs the
+        # recommended scenario with the default full upgrade. The others pass
+        # --no-full-upgrade (LEOS_CI_FULL_UPGRADE=0); every other scenario is
+        # identical across runners.
+        # Only Homebrew Tier 1 hosts (Apple silicon, macOS 15 and later):
+        # macOS 14 and Intel Macs no longer get bottles for node, python or
+        # ruby, so a real install there fails or builds from source.
+        include:
+          - runner: macos-15
+            full_upgrade: '1'
+          - runner: macos-26
+            full_upgrade: '0'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Provision a fresh HOME on the existing hosted macOS image
+        # Hosted images already contain Homebrew and other tools. This exercises
+        # real installations/upgrades, not a factory-fresh macOS bootstrap.
+        env:
+          LEOS_CI_FULL_UPGRADE: ${{ matrix.full_upgrade }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/provisioning-logs"
+          LEOS_CI_ARTIFACTS="$RUNNER_TEMP/provisioning-logs" bash tests/provisioning-test.sh
+      - name: Upload provisioning diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: provisioning-${{ matrix.runner }}
+          path: ${{ runner.temp }}/provisioning-logs
+          if-no-files-found: ignore

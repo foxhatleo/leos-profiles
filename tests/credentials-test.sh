@@ -6,6 +6,9 @@ set -Eeuo pipefail
 ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=../installer/credentials.sh
 source "$ROOT/installer/credentials.sh"
+# pkg_install and the root prefix used by the credential prerequisites.
+# shellcheck source=../installer/packages.sh
+source "$ROOT/installer/packages.sh"
 fixture=$(mktemp -d /tmp/leos-credentials.XXXXXX)
 trap 'rm -rf -- "$fixture"' EXIT
 export HOME="$fixture/home"
@@ -13,6 +16,7 @@ export TMPDIR="$fixture"
 mkdir -p "$HOME" "$fixture/local"
 LOCAL_DIR="$fixture/local"
 PROFILE_FILE="$LOCAL_DIR/profile"
+TARGET="$fixture/profile"
 DRY_RUN=0 COMMAND=apply SSH_MODE=reuse SSH_PASSPHRASE_MODE=empty
 GPG_MODE=reuse GPG_PASSPHRASE_MODE=empty
 SSH_KEY_PATH="$fixture/custom-key"
@@ -193,9 +197,26 @@ GPG_MODE=reuse
     install_credential_prerequisites
     [[ ! -s $fixture/prerequisites ]] || fail 'fully installed prerequisites caused mutation'
   done
+  # macOS uses the system OpenSSH in /usr/bin and installs only gh/gnupg via
+  # Homebrew. The fixture's gh and gpg are shell functions, which `command -v`
+  # reports as present, so the first run must not touch Homebrew at all.
   if [[ $(uname -s) == Darwin ]]; then
     OS_FAMILY=macos
+    : > "$fixture/prerequisites"
     install_credential_prerequisites
+    [[ ! -s $fixture/prerequisites ]] || fail 'macOS prerequisites mutated with gh and gpg present'
+    # Without them (no functions, nothing on PATH) exactly both are requested.
+    (
+      unset -f gh gpg
+      mkdir -p "$fixture/empty-path"
+      # Deliberate: an empty search path makes `command -v gh` fail.
+      # shellcheck disable=SC2123
+      PATH="$fixture/empty-path"
+      ensure_brew() { :; }
+      install_credential_prerequisites
+    )
+    [[ $(cat "$fixture/prerequisites") == 'brew install gh gnupg' ]] ||
+      fail "macOS prerequisites requested: $(cat "$fixture/prerequisites")"
   fi
 )
 # Deduplicate known-host material only for the matching host.

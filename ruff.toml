@@ -1,0 +1,2 @@
+# rmdsstore runs under macOS's /usr/bin/python3 (3.9), so reject newer syntax.
+target-version = "py39"

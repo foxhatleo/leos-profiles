@@ -2,6 +2,33 @@
 # Sourced by install.sh; shares the installer context.
 # shellcheck disable=SC2034
 
+# credential_prerequisites_missing: on Linux, the credential packages this
+# host lacks, space-separated (they install as root).
+credential_prerequisites_missing() {
+  [[ $SSH_MODE == skip && $GPG_MODE == skip ]] && return 0
+  local package missing=""
+  local -a candidates=()
+  case $OS_FAMILY in
+    apt)
+      candidates=(gh)
+      [[ $SSH_MODE == skip ]] || candidates+=(openssh-client)
+      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
+    fedora)
+      candidates=(gh)
+      [[ $SSH_MODE == skip ]] || candidates+=(openssh-clients)
+      [[ $GPG_MODE == skip ]] || candidates+=(gnupg2) ;;
+    arch)
+      candidates=(github-cli)
+      [[ $SSH_MODE == skip ]] || candidates+=(openssh)
+      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
+    *) return 0 ;;
+  esac
+  for package in "${candidates[@]}"; do
+    package_installed "$package" || missing+=" $package"
+  done
+  printf '%s' "${missing# }"
+}
+
 install_credential_prerequisites() {
   [[ $SSH_MODE == skip && $GPG_MODE == skip ]] && return 0
   local package tool
@@ -15,9 +42,7 @@ install_credential_prerequisites() {
       fi
       command -v gh >/dev/null 2>&1 || missing+=(gh)
       if [[ $GPG_MODE != skip ]] && ! command -v gpg >/dev/null 2>&1; then missing+=(gnupg); fi
-      (( ${#missing[@]} > 0 )) || return 0
-      ensure_brew
-      run brew install "${missing[@]}"
+      pkg_install ${missing[@]+"${missing[@]}"}
       return ;;
     apt)
       candidates=(gh)
@@ -38,13 +63,7 @@ install_credential_prerequisites() {
   done
   (( ${#missing[@]} > 0 )) || return 0
   ensure_sudo
-  case $OS_FAMILY in
-    apt)
-      run sudo apt-get update
-      run sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" ;;
-    fedora) run sudo dnf install -y "${missing[@]}" ;;
-    arch) run sudo pacman -S --needed --noconfirm "${missing[@]}" ;;
-  esac
+  pkg_install "${missing[@]}"
 }
 
 ensure_git_identity() {
@@ -78,6 +97,36 @@ github_ssh_key_present() {
   awk 'NF >= 2 { print $1 " " $2 }' <<< "$remote_keys" | grep -qxF "$material"
 }
 
+# Manual actions end the run with status 3. A component that needs one (a
+# missing chsh, a font to install on the Windows side of WSL) queues it and
+# the run goes on; finish_manual_actions then prints every queued
+# `manual-action` record on stdout, repeats the explanations and exits 3. A
+# credential pause queues its own action and finishes at once (ONB-4).
+PENDING_MANUAL_ACTIONS=""
+PENDING_MANUAL_EXPLANATIONS=""
+STEP_AWAITS_MANUAL_ACTION=0
+
+# queue_manual_action <action> <public path> <destination> <explanation>
+queue_manual_action() {
+  local action=$1 public_path=$2 destination=$3 explanation=$4 field
+  for field in "$action" "$public_path" "$destination"; do
+    [[ $field != *$'\t'* && $field != *$'\n'* && $field != *$'\r'* ]] ||
+      die "Manual-action fields may not contain tabs or newlines"
+  done
+  [[ $action =~ ^[a-z][a-z-]+$ ]] || die "Invalid manual action name"
+  PENDING_MANUAL_ACTIONS+=$(printf 'manual-action\t%s\t%s\t%s' "$action" "$public_path" "$destination")$'\n'
+  PENDING_MANUAL_EXPLANATIONS+="${explanation//$'\n'/ }"$'\n'
+  warn "$explanation"
+}
+
+finish_manual_actions() {
+  [[ -n $PENDING_MANUAL_ACTIONS ]] || return 0
+  printf '%s' "$PENDING_MANUAL_ACTIONS"
+  warn "Manual action required (exit 3). Complete each manual-action record above, then resume with: bash $TARGET/install.sh reconcile --yes"
+  printf '%s' "$PENDING_MANUAL_EXPLANATIONS" | sed 's/^/  - /' >&2
+  exit 3
+}
+
 credential_manual_action() {
   local action=$1 public_path=$2 destination=$3 explanation=$4 field material
   for field in "$action" "$public_path" "$destination"; do
@@ -99,12 +148,11 @@ credential_manual_action() {
       printf 'GPG public key (fingerprint %s):\n' "$GPG_KEY_ID" >&2
       cat "$public_path" >&2 ;;
   esac
-  printf 'manual-action\t%s\t%s\t%s\n' "$action" "$public_path" "$destination"
-  warn "$explanation"
+  queue_manual_action "$action" "$public_path" "$destination" "$explanation"
   if [[ ${SSH_MODE:-skip} == generate || ${GPG_MODE:-skip} == generate ]]; then
     warn "Key generation is still pending. After completing the manual action, resume apply with the original approved choices; select reuse for every key already created (SSH: --ssh reuse --ssh-key '$SSH_KEY_PATH' when present). Reconcile will not generate the pending key. Obtain new approval only if the choices change."
   fi
-  exit 3
+  finish_manual_actions
 }
 
 ensure_github_auth() {
@@ -138,8 +186,8 @@ ensure_github_known_hosts() {
   gh api --hostname github.com meta --jq '.ssh_keys[]' > "$approved" || die "Could not obtain GitHub's published SSH host keys"
   ssh-keyscan -T 15 -t rsa,ecdsa,ed25519 github.com > "$scanned" 2>/dev/null ||
     die "Could not scan GitHub SSH host keys"
-  # ssh-keyscan output is space-separated; the global IFS ($'\n\t') has no space,
-  # so this read must set a space-splitting IFS or the whole line lands in $host.
+  # ssh-keyscan output is space-separated; say so explicitly rather than rely
+  # on whatever IFS the caller has.
   while IFS=$' \t' read -r host key_type key _; do
     material="$key_type $key"
     grep -qxF "$material" "$approved" && printf '%s %s %s\n' "$host" "$key_type" "$key" >> "$verified"

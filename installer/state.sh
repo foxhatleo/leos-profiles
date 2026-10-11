@@ -6,9 +6,11 @@ prepare_local_dir() {
   [[ $DRY_RUN -eq 0 ]] || return 0
   mkdir -p "$LOCAL_DIR/flags"
   chmod 700 "$LOCAL_DIR" "$LOCAL_DIR/flags"
-  # private.zsh routinely holds API keys and is created by hand, so its mode is
-  # enforced on every run — migrate_one_local_file only chmods files it moves.
+  # The private override files routinely hold API keys and are created by hand,
+  # so their mode is enforced on every run — migrate_one_local_file only chmods
+  # files it moves.
   [[ ! -f $LOCAL_DIR/private.zsh ]] || chmod 600 "$LOCAL_DIR/private.zsh"
+  [[ ! -f $LOCAL_DIR/private-interactive.zsh ]] || chmod 600 "$LOCAL_DIR/private-interactive.zsh"
 }
 
 track_temp() { TEMP_PATHS+=("$1"); }
@@ -77,6 +79,7 @@ write_profile() {
     printf 'node-policy\t%s\n' "$NODE_POLICY"
     printf 'ai-cli-update-channel\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
     printf 'package-channel\t%s\n' "$PACKAGE_CHANNEL"
+    printf 'version-managers\t%s\n' "$([[ $SKIP_EXISTING_VERSION_MANAGERS -eq 1 ]] && printf skip-existing || printf install)"
   } > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$PROFILE_FILE"
@@ -110,6 +113,13 @@ read_profile() {
       node-policy) NODE_POLICY=$value ;;
       ai-cli-update-channel) AI_CLI_UPDATE_CHANNEL=$value ;;
       package-channel) PACKAGE_CHANNEL=$value ;;
+      # Optional (added after schema 2): keep an existing pyenv/rbenv.
+      version-managers)
+        case $value in
+          install) SKIP_EXISTING_VERSION_MANAGERS=0 ;;
+          skip-existing) SKIP_EXISTING_VERSION_MANAGERS=1 ;;
+          *) die "Invalid saved version-managers value: $value" ;;
+        esac ;;
       '') ;;
       *) die "Unknown install profile key: $key" ;;
     esac
@@ -121,6 +131,9 @@ read_profile() {
     [[ $seen == *",$required,"* ]] || die "Incomplete install profile: missing $required"
   done
   PROFILE_SCHEMA=$schema
+  # Schema 1 (no node-policy; before 2026-09) migrates on the next approved
+  # apply/reconcile. Keep reading it until 2027-09, then reject it with a
+  # message to run apply again.
   if [[ $schema == 1 ]]; then NODE_POLICY=preserve-compatible; fi
   if [[ $schema == 2 && $seen != *,node-policy,* ]]; then die "Profile schema 2 requires node-policy"; fi
 }
@@ -144,6 +157,12 @@ migrate_one_local_file() {
   chmod 600 "$destination"
 }
 
+# Legacy-location migrations. Each is kept for one year after the release that
+# moved the data, then removed with its test:
+#   - XDG installer state ($LEGACY_STATE_FILE) and zsh/_private.zsh moved into
+#     local/ in 2026-09: remove after 2027-09.
+#   - ~/.brew-china and ~/.lp-* markers moved to local/flags/ in 2026-09:
+#     remove after 2027-09.
 # Dry-run performs the *detection* half of the migration but none of the
 # mutations, so `apply --dry-run` surfaces the same conflicts a real apply would
 # die on. Previously it returned early and reported success, then the real apply

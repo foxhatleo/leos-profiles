@@ -23,10 +23,10 @@ DRY_RUN=0
 mkdir -p "$TARGET/zsh" "$HOME" "$TEMP_ROOT/bin"
 cp "$ROOT"/zsh/*.zsh "$ROOT"/zsh/*.toml "$TARGET/zsh/"
 cp -R "$ROOT/zsh/path" "$TARGET/zsh/path"
-printf '\n__leos_rehash_daily() { :; }\n' >> "$TARGET/zsh/cache.zsh"
+printf '\n__leos_rehash_daily() { :; }\n__leos_fnm_prune_daily() { :; }\n' >> "$TARGET/zsh/cache.zsh"
 # Exercise real locked plugin code, without invoking host initialization tools
 # or falling back to an absolute Homebrew installation outside the fixture.
-for tool in brew starship pyenv rbenv fnm npm pnpm bun direnv zoxide heroku thefuck; do
+for tool in brew starship pyenv rbenv fnm npm pnpm bun direnv zoxide heroku; do
   printf '%s\n' '#!/bin/sh' 'printf ":\n"' > "$TEMP_ROOT/bin/$tool"
   chmod +x "$TEMP_ROOT/bin/$tool"
 done
@@ -46,6 +46,16 @@ HOME="$HOME" LEOS_PROFILES_HOME="$TARGET" TERM=xterm-256color zsh -dfc '
   (( $+functions[_zsh_highlight] ))
   (( $+functions[_zsh_autosuggest_start] ))
   (( $+functions[compdef] ))
+  # ZSH_AUTOSUGGEST_MANUAL_REBIND: the widgets are wrapped once, at the first
+  # prompt (after every other plugin), and the rebind hook then removes itself.
+  [[ $widgets[self-insert] == builtin ]]
+  for hook in $precmd_functions; do "$hook"; done
+  (( ! ${precmd_functions[(Ie)_zsh_autosuggest_start]} ))
+  [[ $widgets[self-insert] == user:_zsh_autosuggest_bound_1_self-insert ]]
+  [[ $widgets[fzf-tab-complete] == user:_zsh_autosuggest_bound_1_fzf-tab-complete ]]
+  [[ $(bindkey "^I") == *fzf-tab-complete ]]
+  for hook in $precmd_functions; do "$hook"; done
+  [[ $widgets[self-insert] == user:_zsh_autosuggest_bound_1_self-insert ]]
 '
 
 printf '%s\n' 'locked plugin integration: PASS'
