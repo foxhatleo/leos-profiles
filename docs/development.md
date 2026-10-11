@@ -4,7 +4,10 @@
 
 `install.sh` owns argument parsing, validation, inspection, and orchestration.
 Sourced modules share its context and do not invoke provisioning when loaded.
-The implementation stays compatible with macOS Bash 3.2.
+The implementation stays compatible with macOS Bash 3.2. Users reach it
+through the interactive `setup` wizard; `inspect`, `apply` and `reconcile`
+are the deterministic, non-interactive contract underneath (the wizard, an
+optional AI assistant following QUICK-INSTALL.md, and automation all use it).
 
 | File | Responsibility |
 | --- | --- |
@@ -18,6 +21,7 @@ The implementation stays compatible with macOS Bash 3.2.
 | `installer/signatures.sh` | Inputs that invalidate each component's recorded state |
 | `installer/lock.sh` | Reviewed versions, URLs, commits, digests and npm engine requirements |
 | `installer/plan.sh` | Disclosure records beyond the selection, the preflight before any change, and the inventory |
+| `installer/setup.sh` | The interactive `setup` wizard: questions, plan display, running apply/reconcile and resuming after manual actions |
 
 Add a component to the registry and supply its install, verification and
 signature handlers. Registry validation rejects missing handlers or unknown
@@ -116,8 +120,9 @@ real SSH and GPG commits in a disposable HOME, GNUPGHOME and Git config.
 
 ## Apply flow
 
-`main` runs, in order: argument parsing; `remove-blocks` and `inventory`
-(dispatched before platform detection, so they work anywhere); the saved
+`main` runs, in order: argument parsing; `setup` (the wizard, which runs
+`inspect` and `apply` as child processes of the same script); `remove-blocks`
+and `inventory` (dispatched before platform detection, so they work anywhere); the saved
 profile for `reconcile` and `inspect --saved`; validation, dependency closure
 and `detect_os`; `inspect` stops here. Apply and reconcile then warn about an
 unsupported platform, capture the existing Node, and run `preflight`; only
@@ -142,6 +147,50 @@ Fonts checksum list and rejects an unknown font name. Tests stub
 A component that needs the user (a missing chsh) calls `queue_manual_action`
 and sets `STEP_AWAITS_MANUAL_ACTION`: `run_step` then leaves it unrecorded and
 the run continues.
+
+## Setup wizard
+
+`install.sh setup [--print-command] [--dry-run]` (`installer/setup.sh`) is the
+primary user interface. It needs a terminal on stdin and stdout (otherwise it
+prints the non-interactive commands and exits 2) and keeps to plain `read`
+and `printf`: numbered single-selects, numbered toggle lists for components
+and package groups, at most 78 columns, colour only without `NO_COLOR` and
+`TERM=dumb`, and `q` or end of input to quit.
+
+It must not grow its own provisioning logic. Its rules:
+
+- The plan, findings, packages, implied groups and Node version come from
+  `install.sh inspect` (or `inspect --saved`) run as a child process with the
+  wizard's explicit flags, parsed by record type with empty columns kept
+  (records are re-split on a non-whitespace separator before `read`). While
+  the user toggles, implied groups come from the engine's own
+  `normalise_dependencies`; group members from `package_list_for_group`;
+  free-text values (key path, font name, GPG expiry, Git identity) are
+  checked with `validate_options` in a subshell, and a font name also against
+  the pinned Nerd Fonts checksum list (`fetch_nerd_font_checksums`).
+- It applies by running `install.sh apply --yes` with every choice as an
+  explicit flag plus `--node-version` from the inspected `runtime` record (or
+  `reconcile --yes [--full-upgrade]` for a saved setup), streaming the output
+  through `tee` into a log it names at the end; stdin stays the terminal, so
+  the engine's preflight asks for sudo once.
+- Exit 3: it lists the attempt's `manual-action` records with the engine's
+  explanations and, on Enter, runs the same command again, switching a key
+  the first attempt generated to `reuse` from the saved profile. Exit 2 (the
+  Node version moved): it inspects again and asks again.
+- `--print-command` prints the equivalent command (words quoted only when
+  needed) instead of running it; `--dry-run` adds `--dry-run`.
+- Its functions are sourced into the engine, so they use the `setup_`, `w_`
+  and `plan_` prefixes; `tests/setup-wizard-test.sh` fails if one replaces an
+  engine function.
+
+`tests/setup-wizard-test.sh` drives the real CLI on a pseudo-terminal through
+`python3 -I` (an expect-style driver it writes into the fixture), in a
+fixture HOME and checkout copy with the same PATH fakes as `readonly-test.sh`:
+Recommended and Customize with `--print-command` (the exact argv), no
+terminal, a non-Git `~/.pyenv`, a saved profile, and one `--dry-run` through
+apply. It also checks that every line fits 80 columns and that `NO_COLOR`
+output has no escape sequences, plus unit checks of the manual-action screen
+and the resume rules.
 
 ## Zsh startup files
 
@@ -201,6 +250,8 @@ bash tests/install-test.sh
 /bin/bash tests/install-test.sh  # macOS: the system Bash 3.2 a fresh Mac runs
 bash tests/apply-dryrun-test.sh
 bash tests/readonly-test.sh
+bash tests/setup-wizard-test.sh
+/bin/bash tests/setup-wizard-test.sh  # macOS: the setup wizard under Bash 3.2
 bash tests/node-test.sh
 bash tests/credentials-test.sh
 zsh tests/profile-test.zsh
@@ -210,8 +261,9 @@ zsh tests/runtime-cache-test.zsh
 
 These suites use fixtures and are safe on a provisioned workstation: they
 redirect HOME, XDG state and Git configuration, and the CLI-level tests
-(`apply-dryrun-test.sh`, `readonly-test.sh`) run a temporary copy of the public
-checkout so your `local/` state is never read or written. `install-test.sh`
+(`apply-dryrun-test.sh`, `readonly-test.sh`, `setup-wizard-test.sh`) run a
+temporary copy of the public checkout so your `local/` state is never read or
+written. `install-test.sh`
 runs every test in its own subshell, reports each failing test by name and
 removes the temporary files the code under test tracked. `readonly-test.sh`
 snapshots the fixture HOME and checkout around `inspect`, `apply --dry-run` and
@@ -252,7 +304,8 @@ bash tests/package-map-availability.sh macos  # or apt, fedora, arch
 
 The artifact checks execute downloaded binaries appropriate to the host and
 verify npm package engine declarations. Plugin checks load the combined real
-Zsh plugin integration. CI also checks TOML and fenced Bash in the runbook.
+Zsh plugin integration. CI also checks TOML and the fenced Bash blocks in
+QUICK-INSTALL.md.
 None of these alone substitutes for actual package installation.
 
 ## CI layout
@@ -263,7 +316,8 @@ Two workflows split fast feedback from real provisioning:
   and on demand: Zsh syntax and profile tests, lint (ShellCheck, actionlint,
   zizmor, ruff; shfmt informational), installer/credential/Node/cache/util
   suites, locked artifacts, package-map availability on macOS, apt and
-  containers, the dry-run smoke test and the read-only test. The macOS jobs run
+  containers, the dry-run smoke test, the read-only test and the setup wizard
+  on a pty. The macOS jobs run
   the Bash suites under `/bin/bash` (3.2) and `rmdsstore_test.py` under
   `/usr/bin/python3 -I`, the interpreters the installer and `rmdsstore`
   actually use there. Jobs whose names end in "(gating)" are the branch
