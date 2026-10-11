@@ -10,8 +10,8 @@ set -Eeuo pipefail
 # printf, so no handler depends on the caller's field separator (CQ-1).
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-# shellcheck source=installer/lock.sh
-source "$SCRIPT_DIR/installer/lock.sh"
+# shellcheck source=installer/sources.sh
+source "$SCRIPT_DIR/installer/sources.sh"
 
 TARGET=$SCRIPT_DIR
 LOCAL_DIR="$TARGET/local"
@@ -50,9 +50,9 @@ GIT_EMAIL=""
 FONT_NAME=""
 RESOLVED_NODE_VERSION=""
 NODE_CHANNEL="current-lts"
-NODE_POLICY="preserve-compatible"
+NODE_POLICY="current-lts"
 NODE_SELECTION=""
-PROFILE_SCHEMA=2
+PROFILE_SCHEMA=3
 AI_CLI_UPDATE_CHANNEL="native"
 PACKAGE_CHANNEL="system"
 BREW_MIRROR=""
@@ -97,7 +97,7 @@ Options:
                                   Homebrew mirror for this run and later shells
   --skip-existing-version-managers
                                   Keep an existing ~/.pyenv or ~/.rbenv that is
-                                  not the pinned checkout; skip that component
+                                  not the profile's checkout; skip that component
   --node-version <vX.Y.Z>         The Node version inspect resolved; apply stops
                                   (exit 2) if it would now choose another
   --saved                         inspect: use the saved profile's selection
@@ -115,7 +115,10 @@ from the zsh startup files (.zshrc, .zshenv, and .zprofile on macOS), leaving
 packages, plugins and credentials in place. \`inventory\` lists everything the
 installer creates or manages and whether it is present.
 
-Node: preserve a compatible version by adopting it into fnm; otherwise use LTS.
+Tools follow their latest release: Homebrew formulae on macOS, GitHub releases
+(checked against GitHub's SHA-256 digests) on Linux, and default branches for
+Git checkouts. A full upgrade moves them forward; otherwise a run only repairs.
+Node: fnm's default is the current LTS, moved forward by a full upgrade.
 Credentials: local creation is supported; GitHub registration and SSH identity
 configuration are manual. Exit 3 means user action is required; resume using
 reconcile --yes after completing the emitted manual-action record.
@@ -260,7 +263,7 @@ validate_options() {
   [[ $INSTALL_FONTS != yes || -n $FONT_NAME ]] || die "--fonts yes requires --font <name>"
   [[ -z $SSH_KEY_PATH || $SSH_KEY_PATH == /* ]] || die "--ssh-key must be an absolute path"
   [[ -z $FONT_NAME || $FONT_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "--font must be a Nerd Fonts directory name"
-  [[ $NODE_POLICY == preserve-compatible ]] || die "Unsupported Node policy: $NODE_POLICY"
+  [[ $NODE_POLICY == current-lts ]] || die "Unsupported Node policy: $NODE_POLICY"
   [[ $NODE_CHANNEL == current-lts ]] || die "Unsupported Node channel in saved profile: $NODE_CHANNEL"
   [[ $AI_CLI_UPDATE_CHANNEL == native ]] || die "Unsupported AI CLI update channel in saved profile: $AI_CLI_UPDATE_CHANNEL"
   [[ $PACKAGE_CHANNEL == system ]] || die "Unsupported package channel in saved profile: $PACKAGE_CHANNEL"
@@ -331,14 +334,15 @@ hash_text() {
   fi
 }
 
-download_verified() {
-  local url=$1 expected=$2 destination=$3 tmp
+# download_file <url> <destination>: fetch over HTTPS into place (mode 700).
+download_file() {
+  local url=$1 destination=$2 tmp
   local -a curl_args
-  run mkdir -p "$(dirname -- "$destination")"
   if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would download and SHA-256 verify $url"
+    say "Would download $url"
     return 0
   fi
+  mkdir -p "$(dirname -- "$destination")"
   tmp=$(mktemp "$(dirname -- "$destination")/.$(basename -- "$destination").tmp.XXXXXX")
   track_temp "$tmp"
   # --speed-limit/--speed-time rather than a flat --max-time: artifacts vary in
@@ -354,8 +358,23 @@ download_verified() {
     rm -f "$tmp"
     die "Download failed: $url"
   fi
-  [[ $(sha256 "$tmp") == "$expected" ]] || { rm -f "$tmp"; die "Digest mismatch for $url"; }
   chmod 700 "$tmp"
+  mv -f "$tmp" "$destination"
+}
+
+# download_verified <url> <sha256> <destination>: download_file, keeping the
+# file only when its SHA-256 matches.
+download_verified() {
+  local url=$1 expected=$2 destination=$3 tmp
+  run mkdir -p "$(dirname -- "$destination")"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would download and SHA-256 verify $url"
+    return 0
+  fi
+  tmp=$(mktemp "$(dirname -- "$destination")/.$(basename -- "$destination").verify.XXXXXX")
+  track_temp "$tmp"
+  download_file "$url" "$tmp"
+  [[ $(sha256 "$tmp") == "$expected" ]] || { rm -f "$tmp"; die "Digest mismatch for $url"; }
   mv -f "$tmp" "$destination"
 }
 
@@ -387,15 +406,17 @@ run_step() {
     say "Skipping $step: keeping the existing installation (--skip-existing-version-managers)"
     return 0
   fi
-  # A full host upgrade always re-runs the packages step; it deliberately skips
-  # the state/verify short-circuit rather than failing verification.
-  [[ $step == packages && $FULL_UPGRADE -eq 1 ]] && force_rerun=1
+  # A full upgrade re-runs every step that follows upstream (packages, and the
+  # tools that track their latest release or default branch), so they move
+  # forward; it skips the state/verify short-circuit rather than failing
+  # verification.
+  [[ $FULL_UPGRADE -eq 1 ]] && step_follows_upstream "$step" && force_rerun=1
   if [[ $force_rerun -eq 0 ]] && state_done "$step" && verify_step "$step"; then
     say "Skipping $step (recorded complete and verified)"
     return 0
   fi
   if [[ $force_rerun -eq 1 ]] && state_done "$step"; then
-    say "Re-running $step (full host upgrade always re-runs the packages step)"
+    say "Re-running $step (a full upgrade brings it up to date)"
   elif state_done "$step"; then
     warn "$step was recorded complete but failed verification; repairing it"
   fi
@@ -413,22 +434,43 @@ run_step() {
   mark_done "$step"
 }
 
-# One `artifact direct` record per registry artifact a selected component owns.
+# One `artifact` record per registry artifact a selected component owns:
+#   artifact formula <name> <formula> latest           (macOS)
+#   artifact release <name> github.com/<repo> <asset>  (Linux)
+#   artifact direct  <name> <url> <sha256>             (pinned files)
 inspect_artifacts() {
-  local step name url digest asset
+  local step name url digest record repository asset
   local -a steps=()
   csv_split steps "$SELECTED_STEPS"
   for step in ${steps[@]+"${steps[@]}"}; do
     while IFS= read -r name; do
-      if ! asset=$(artifact_asset "$name"); then
-        printf 'warning\tno-locked-artifact\t%s has no locked build for %s on %s; the %s component cannot be installed here\n' \
-          "$name" "$OS_FAMILY" "$(uname -m)" "$step"
-        continue
-      fi
-      IFS=$'\t' read -r url digest <<< "$asset"
-      printf 'artifact\tdirect\t%s\t%s\t%s\n' "$name" "$url" "$digest"
+      artifact_row "$name"
+      case $(artifact_source "$name") in
+        pinned)
+          IFS=$'\t' read -r url digest <<< "$(artifact_pinned_asset "$name")"
+          printf 'artifact\tdirect\t%s\t%s\t%s\n' "$name" "$url" "$digest" ;;
+        formula)
+          printf 'artifact\tformula\t%s\t%s\tlatest\n' "$name" "$ARTIFACT_FORMULA" ;;
+        release)
+          if ! record=$(artifact_release_asset "$name"); then
+            printf 'warning\tno-release-build\t%s publishes no Linux build for %s; the %s component cannot be installed here\n' \
+              "$name" "$(uname -m)" "$step"
+            continue
+          fi
+          IFS=$'\t' read -r repository asset <<< "$record"
+          printf 'artifact\trelease\t%s\tgithub.com/%s\t%s\n' "$name" "$repository" "$asset" ;;
+      esac
     done < <(component_handler "$step" artifacts)
   done
+}
+
+# npm tools: Homebrew formulae on macOS, the npm registry's latest elsewhere.
+inspect_npm_tool() {
+  if [[ $OS_FAMILY == macos ]]; then
+    printf 'artifact\tformula\t%s\t%s\tlatest\n' "$1" "$1"
+  else
+    printf 'artifact\tnpm\t%s\tregistry.npmjs.org/%s\tlatest\n' "$1" "$1"
+  fi
 }
 
 inspect_tsv() {
@@ -510,30 +552,32 @@ inspect_tsv() {
   if [[ $GPG_MODE != skip ]]; then printf 'global\tgit\tuser.signingkey,gpg.format,commit.gpgsign\n'; fi
   if has_csv_item "$SELECTED_STEPS" default-shell && [[ $CHANGE_DEFAULT_SHELL != no ]]; then printf 'irreversible\tlogin-shell\tchsh may require a new login\n'; fi
   inspect_artifacts
-  if has_csv_item "$SELECTED_STEPS" pyenv; then printf 'artifact\tgit\tpyenv\t%s\t%s\n' "$PYENV_REPOSITORY" "$PYENV_COMMIT"; fi
+  if has_csv_item "$SELECTED_STEPS" pyenv; then printf 'artifact\tgit\tpyenv\t%s\tdefault-branch\n' "$PYENV_REPOSITORY"; fi
   if has_csv_item "$SELECTED_STEPS" rbenv; then
-    printf 'artifact\tgit\trbenv\t%s\t%s\n' "$RBENV_REPOSITORY" "$RBENV_COMMIT"
-    printf 'artifact\tgit\truby-build\t%s\t%s\n' "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT"
+    printf 'artifact\tgit\trbenv\t%s\tdefault-branch\n' "$RBENV_REPOSITORY"
+    printf 'artifact\tgit\truby-build\t%s\tdefault-branch\n' "$RUBY_BUILD_REPOSITORY"
   fi
-  if has_csv_item "$SELECTED_STEPS" yarn; then printf 'artifact\tdirect\tyarn\t%s\t%s\n' "$YARN_URL" "$YARN_SHA256"; fi
-  if has_csv_item "$SELECTED_STEPS" pnpm; then printf 'artifact\tdirect\tpnpm\t%s\t%s\n' "$PNPM_URL" "$PNPM_SHA256"; fi
+  if has_csv_item "$SELECTED_STEPS" yarn; then inspect_npm_tool yarn; fi
+  if has_csv_item "$SELECTED_STEPS" pnpm; then inspect_npm_tool pnpm; fi
   if has_csv_item "$SELECTED_STEPS" fnm; then
     printf 'external\tnode-lts-index\t%s\n' "$(node_dist_index_url)"
   fi
   if has_csv_item "$SELECTED_STEPS" plugins; then
-    printf 'artifact\tgit\tzsh-autosuggestions\t%s\t%s\n' "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT"
-    printf 'artifact\tgit\tzsh-syntax-highlighting\t%s\t%s\n' "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT"
-    printf 'artifact\tgit\tzsh-completions\t%s\t%s\n' "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT"
-    printf 'artifact\tgit\tfzf-tab\t%s\t%s\n' "$FZF_TAB_REPOSITORY" "$FZF_TAB_COMMIT"
+    printf 'artifact\tgit\tzsh-autosuggestions\t%s\tdefault-branch\n' "$ZSH_AUTOSUGGESTIONS_REPOSITORY"
+    printf 'artifact\tgit\tzsh-syntax-highlighting\t%s\tdefault-branch\n' "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY"
+    printf 'artifact\tgit\tzsh-completions\t%s\tdefault-branch\n' "$ZSH_COMPLETIONS_REPOSITORY"
+    printf 'artifact\tgit\tfzf-tab\t%s\tdefault-branch\n' "$FZF_TAB_REPOSITORY"
   fi
   if has_csv_item "$SELECTED_STEPS" fonts && font_should_install; then
-    # The archive's digest comes from the pinned checksum list at apply time.
-    printf 'artifact\tdirect\tnerd-fonts-checksums\t%s\t%s\n' "$NERD_FONTS_RELEASE_URL/SHA-256.txt" "$NERD_FONTS_CHECKSUMS_SHA256"
-    printf 'artifact\tdirect\tnerd-font\t%s\t%s\n' "$NERD_FONTS_RELEASE_URL/${FONT_NAME:-JetBrainsMono}.tar.xz" SHA-256.txt
+    # The archive's digest comes from the latest release's checksum list.
+    printf 'artifact\trelease\tnerd-font\t%s\t%s\n' "$NERD_FONTS_RELEASE_URL/${FONT_NAME:-JetBrainsMono}.tar.xz" SHA-256.txt
     printf 'file\tfonts\t%s\n' "$(nerd_font_directory)"
   fi
   if has_csv_item "$SELECTED_STEPS" fnm; then
-    if resolve_node_version; then
+    local kept_node
+    if kept_node=$(node_default_kept); then
+      printf 'runtime\tnode\t%s\tinstalled\n' "$kept_node"
+    elif resolve_node_version; then
       printf 'runtime\tnode\t%s\t%s\n' "$RESOLVED_NODE_VERSION" "$NODE_SELECTION"
       if [[ -n $NODE_VERSION_APPROVED && $NODE_VERSION_APPROVED != "$RESOLVED_NODE_VERSION" ]]; then
         printf 'warning\tnode-version\tthe plan now resolves Node %s, not the given %s; apply --node-version %s would stop\n' \
@@ -548,6 +592,7 @@ inspect_tsv() {
   report_conflicts
   report_existing_setups
   report_shadowed_artifacts
+  report_tool_migrations
   csv_split items "$SELECTED_STEPS"
   for step in ${items[@]+"${items[@]}"}; do
     if component_skipped_for_existing "$step"; then status=skipped
@@ -611,8 +656,6 @@ main() {
   if support_problem=$(platform_support_problem); then
     warn "Unsupported platform. $support_problem Continuing as asked; expect long source builds or failures."
   fi
-  # Capture the existing runtime before any bootstrap/package changes.
-  if has_csv_item "$SELECTED_STEPS" fnm; then select_existing_node || true; fi
   # Everything the run needs from the user, checked before the first change.
   preflight
   acquire_lock
@@ -624,10 +667,6 @@ main() {
   fi
   apply_brew_mirror
   bootstrap_tools
-  if has_csv_item "$SELECTED_STEPS" fnm && [[ $DRY_RUN -eq 0 ]]; then
-    resolve_node_version || die "Could not select a compatible Node version or resolve current LTS"
-    say "Selected Node $RESOLVED_NODE_VERSION ($NODE_SELECTION)"
-  fi
   write_profile
   local step
   local -a steps=()

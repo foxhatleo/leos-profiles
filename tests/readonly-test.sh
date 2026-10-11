@@ -176,7 +176,7 @@ run_read_only() {
 
 run_read_only 'inspect (recommended)' 0 inspect
 check_tsv 'inspect (recommended)' "$OUTPUT"
-grep -qxF $'migration\tprofile-schema\t1\t2' <<< "$OUTPUT" || fail 'inspect did not report the pending profile migration'
+grep -qxF $'migration\tprofile-schema\t1\t3' <<< "$OUTPUT" || fail 'inspect did not report the pending profile migration'
 grep -q $'^postcondition\tzsh-config\tneeded$' <<< "$OUTPUT" || fail 'inspect did not report zsh-config as needed'
 grep -qxF $'migration\tlegacy-loader\t'"$FIXTURE_HOME/.zshrc"$'\tloader' <<< "$OUTPUT" ||
   fail 'inspect did not report the legacy .zshrc loader'

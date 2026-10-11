@@ -73,19 +73,25 @@ installer is only your deterministic execution engine.
    - every package member and the full-upgrade effect; explain that
      `--no-full-upgrade` requests only missing selected packages but dependency
      resolution may still upgrade dependencies;
-   - external repositories/taps and locked direct artifacts;
-   - the preserved fnm default, adopted existing Node version, or resolved LTS
-     fallback, with its compatibility against selected tools;
+   - external repositories/taps and where each tool comes from (`artifact`
+     records): Homebrew formulae on macOS, latest GitHub releases checked
+     against GitHub's digests on Linux, default-branch Git checkouts, and the
+     two pinned downloads; say that tools follow upstream, so a full upgrade
+     moves them forward;
+   - the Node version: the current LTS fnm will install, or the installed
+     default a run without a full upgrade keeps;
    - credential actions, selected references, and manual GitHub registration
      or SSH configuration steps;
-   - any schema-1 to schema-2 profile migration reported by inspection;
+   - any profile-schema migration and every `migration` record (pinned
+     `~/.local/bin`/`~/.local/npm` copies that Homebrew replaces on macOS, and
+     checkouts moving from a pinned commit to their default branch);
    - files and managed blocks, global Git settings, shell changes, and every
      irreversible (`irreversible`) or root (`privileged`) action and side
      effect (`behaviour`);
    - `warning`, `conflict`, `existing` and `shadow` records: an unsupported
      Mac, an existing `~/.pyenv`/`~/.rbenv` (offer to keep it with
      `--skip-existing-version-managers`), shell setups the profile will sit
-     next to, and Homebrew tools the pinned copies will shadow.
+     next to, and (Linux) Homebrew tools the profile's copies will shadow.
 10. Obtain one explicit approval. Then invoke `bash install.sh apply --yes ...`
     with the same normalized choices, plus `--node-version <the runtime
     record's version>` when inspect resolved one (exit 2 then means the plan
@@ -145,18 +151,19 @@ can safely repair a partial failure.
 ## Inspection and resume contract
 
 The inspection stream starts with `meta<TAB>schema<TAB>1`; this identifies the
-inspection format, not the saved profile schema. Saved profiles use schema 2.
+inspection format, not the saved profile schema. Saved profiles use schema 3.
 Read records by their type and preserve empty fields:
 
-- `policy<TAB>node<TAB>preserve-compatible` describes runtime selection.
-- `runtime<TAB>node<TAB>VERSION<TAB>ORIGIN` identifies `preserved-fnm`,
-  `adopted-existing`, or `current-lts`; an unresolved preview is labeled as such.
-- `migration<TAB>profile-schema<TAB>1<TAB>2` announces automatic migration on
-  the next approved execution; inspection does not migrate files.
+- `policy<TAB>node<TAB>current-lts` describes runtime selection.
+- `runtime<TAB>node<TAB>VERSION<TAB>ORIGIN` is `current-lts` (what fnm will
+  install) or `installed` (a working default kept without a full upgrade); an
+  unresolved preview is labeled as such.
+- `migration<TAB>profile-schema<TAB>OLD<TAB>3` announces automatic migration on
+  the next approved execution; inspection does not migrate files. Other
+  `migration` records name pinned copies the run moves.
 - `manual-action<TAB>ACTION<TAB>PUBLIC_PATH<TAB>DESTINATION` accompanies exit 3.
   Some actions, such as login, have no public-key path.
 
-Preserve a compatible fnm default, otherwise adopt the exact compatible Node
-version found on PATH, otherwise resolve current LTS. Compatibility is based on
-locked Yarn/pnpm engine metadata, not simply the newest available runtime.
+fnm's default follows the current Node LTS: apply installs it, and a full
+upgrade moves the default forward; a run without one keeps a working default.
 Read [docs/development.md](./docs/development.md) for the full engine contract.

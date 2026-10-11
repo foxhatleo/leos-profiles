@@ -28,8 +28,8 @@ CANONICAL_STEPS=$(component_registry | awk -F '|' '{printf "%s%s", sep, $1; sep=
 readonly CANONICAL_STEPS
 
 # component_handler <component> <install|verify|signature|artifacts>: the
-# handler function name, or for `artifacts` the names of the direct locked
-# artifacts the component owns (from artifact_registry below), one per line.
+# handler function name, or for `artifacts` the names of the tool artifacts
+# the component owns (from artifact_registry below), one per line.
 component_handler() {
   local name=$1 kind=$2 step dependencies groups installer artifact owner rest
   while IFS='|' read -r step dependencies groups installer; do
@@ -57,7 +57,10 @@ validate_component_registry() {
     has_csv_item "$CANONICAL_STEPS" "$ARTIFACT_COMPONENT" || die "Artifact $name has unknown component $ARTIFACT_COMPONENT"
     [[ -n $ARTIFACT_EXECUTABLES ]] || die "Artifact $name installs no executable"
     case $ARTIFACT_ARCHIVE in
-      file|zip|tar.gz) ;;
+      file) ;;
+      zip|tar.gz)
+        [[ -n $ARTIFACT_FORMULA ]] || die "Artifact $name has no Homebrew formula"
+        [[ $ARTIFACT_VERSION_LINE == *%s* ]] || die "Artifact $name has no version line" ;;
       *) die "Artifact $name has an unsupported archive kind: $ARTIFACT_ARCHIVE" ;;
     esac
   done < <(artifact_names)
@@ -97,43 +100,49 @@ normalise_dependencies() {
   done
 }
 
-# Direct locked artifacts: executables downloaded from a pinned URL, verified
-# by SHA-256 and installed into ~/.local/bin. Columns: name | owning component
-# | lock prefix | archive (zip, tar.gz, or `file` for a single verified file)
-# | installed executables (space-separated; the first is the main one) |
-# expected first line of `<main> --version`, with %s for <PREFIX>_VERSION
-# (empty: verified by digest instead).
+# Tool artifacts: executables the installer puts on PATH itself. Columns:
+# name | owning component | source prefix | archive (zip, tar.gz, or `file`
+# for a single pinned file) | installed executables (space-separated; the
+# first is the main one) | first line of `<main> --version`, with %s for the
+# version (empty: checked by digest instead) | Homebrew formula.
 #
-# This one table drives each artifact's lock lookup, install, verification,
-# signature and inspect record (CQ-8); the owning component's handlers call
-# artifact_install, artifact_verify and artifact_signature. The lock prefix
-# names installer/lock.sh values: <PREFIX>_VERSION and, for this platform, the
-# first URL/SHA256 pair defined among <PREFIX>_<DARWIN|LINUX>_<AARCH64|X64>,
-# <PREFIX>_<DARWIN|LINUX> and <PREFIX>.
+# This one table drives each artifact's install, verification, signature and
+# inspect record (CQ-8); the owning component's handlers call
+# artifact_install, artifact_verify and artifact_signature. Where it comes
+# from depends on the platform (artifact_source):
+#   formula  macOS: Homebrew installs the formula, and `brew upgrade` keeps it
+#            current.
+#   release  Linux: the latest GitHub release of <PREFIX>_REPOSITORY, asset
+#            <PREFIX>_LINUX_<AARCH64|X64>_ASSET from installer/sources.sh,
+#            installed into ~/.local/bin.
+#   pinned   `file` artifacts, everywhere: <PREFIX>_URL, checked against
+#            <PREFIX>_SHA256.
 artifact_registry() {
   cat <<'ROWS'
-rpatool|bins|RPATOOL|file|rpatool|
-bun|bun|BUN|zip|bun|%s
-fnm|fnm|FNM|zip|fnm|fnm %s
-starship|plugins|STARSHIP|tar.gz|starship|starship %s
-uv|uv|UV|tar.gz|uv uvx|uv %s
+rpatool|bins|RPATOOL|file|rpatool||
+bun|bun|BUN|zip|bun|%s|bun
+fnm|fnm|FNM|zip|fnm|fnm %s|fnm
+starship|plugins|STARSHIP|tar.gz|starship|starship %s|starship
+uv|uv|UV|tar.gz|uv uvx|uv %s|uv
 ROWS
 }
 
 # artifact_row <name>: sets ARTIFACT_COMPONENT, ARTIFACT_PREFIX,
-# ARTIFACT_ARCHIVE, ARTIFACT_EXECUTABLES and ARTIFACT_VERSION_LINE.
+# ARTIFACT_ARCHIVE, ARTIFACT_EXECUTABLES, ARTIFACT_VERSION_LINE and
+# ARTIFACT_FORMULA.
 artifact_row() {
-  local name=$1 row_name component prefix archive executables version_line
-  while IFS='|' read -r row_name component prefix archive executables version_line; do
+  local name=$1 row_name component prefix archive executables version_line formula
+  while IFS='|' read -r row_name component prefix archive executables version_line formula; do
     [[ $row_name == "$name" ]] || continue
     ARTIFACT_COMPONENT=$component
     ARTIFACT_PREFIX=$prefix
     ARTIFACT_ARCHIVE=$archive
     ARTIFACT_EXECUTABLES=$executables
     ARTIFACT_VERSION_LINE=$version_line
+    ARTIFACT_FORMULA=$formula
     return 0
   done < <(artifact_registry)
-  die "Unknown locked artifact: $name"
+  die "Unknown artifact: $name"
 }
 
 # artifact_names: every registered artifact, in table order.
@@ -144,34 +153,53 @@ artifact_names() {
   done < <(artifact_registry)
 }
 
-# artifact_asset <name>: print "<url><TAB><sha256>" for this platform, or
-# return 1 when the lock has none (an unsupported platform).
-artifact_asset() {
-  local os arch candidate url_var sha_var
+# artifact_source <name>: formula, release or pinned (see artifact_registry).
+artifact_source() {
   artifact_row "$1"
-  if [[ $OS_FAMILY == macos ]]; then os=DARWIN; else os=LINUX; fi
+  if [[ $ARTIFACT_ARCHIVE == file ]]; then
+    printf 'pinned\n'
+  elif [[ $OS_FAMILY == macos ]]; then
+    printf 'formula\n'
+  else
+    printf 'release\n'
+  fi
+}
+
+# artifact_pinned_asset <name>: "<url><TAB><sha256>" of a pinned artifact.
+artifact_pinned_asset() {
+  local url_var sha_var
+  artifact_row "$1"
+  url_var=${ARTIFACT_PREFIX}_URL
+  sha_var=${ARTIFACT_PREFIX}_SHA256
+  [[ -n ${!url_var-} && -n ${!sha_var-} ]] || die "$1 needs $url_var and $sha_var in installer/sources.sh"
+  printf '%s\t%s\n' "${!url_var}" "${!sha_var}"
+}
+
+# artifact_release_asset <name>: "<owner/repo><TAB><asset>" for this Linux
+# CPU, or return 1 when upstream publishes no build for it.
+artifact_release_asset() {
+  local arch repository_var asset_var
+  artifact_row "$1"
   case $(uname -m) in
     arm64|aarch64) arch=AARCH64 ;;
     x86_64|amd64) arch=X64 ;;
-    *) arch=UNSUPPORTED ;;
+    *) return 1 ;;
   esac
-  for candidate in "${ARTIFACT_PREFIX}_${os}_${arch}" "${ARTIFACT_PREFIX}_${os}" "$ARTIFACT_PREFIX"; do
-    url_var=${candidate}_URL
-    sha_var=${candidate}_SHA256
-    [[ -n ${!url_var-} ]] || continue
-    [[ -n ${!sha_var-} ]] || die "$url_var has no matching $sha_var in installer/lock.sh"
-    printf '%s\t%s\n' "${!url_var}" "${!sha_var}"
-    return 0
-  done
-  return 1
+  repository_var=${ARTIFACT_PREFIX}_REPOSITORY
+  asset_var=${ARTIFACT_PREFIX}_LINUX_${arch}_ASSET
+  [[ -n ${!asset_var-} ]] || return 1
+  [[ -n ${!repository_var-} ]] || die "$1 needs $repository_var in installer/sources.sh"
+  printf '%s\t%s\n' "${!repository_var}" "${!asset_var}"
 }
 
-# artifact_version <name>: the locked version (empty for a versionless file).
-artifact_version() {
-  local version_var
-  artifact_row "$1"
-  version_var=${ARTIFACT_PREFIX}_VERSION
-  printf '%s' "${!version_var-}"
+# step_follows_upstream <step>: a full upgrade re-runs it to move it forward:
+# packages, and the components that track a latest release or default branch.
+# bins (a pinned file) and fonts stay as installed.
+step_follows_upstream() {
+  case $1 in
+    packages|pyenv|rbenv|bun|fnm|yarn|pnpm|uv|plugins) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 verify_step() {

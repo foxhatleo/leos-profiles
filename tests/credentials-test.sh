@@ -246,7 +246,7 @@ integration_ssh_pause() {
 expect_exit 3 integration_ssh_pause
 [[ ! -e $fixture/integration/lock ]] || fail 'manual pause retained installer lock'
 [[ -s $fixture/integration-key.pub ]] || fail 'EXIT cleanup removed public key'
-grep -q $'^schema\t2$' "$fixture/integration/profile" || fail 'manual pause failed to persist current profile schema'
+grep -q $'^schema\t3$' "$fixture/integration/profile" || fail 'manual pause failed to persist current profile schema'
 grep -q $'^ssh\treuse$' "$fixture/integration/profile" || fail 'manual pause did not persist SSH reuse mode'
 
 # Exercise real cryptography and Git signing, confined to a disposable keyring

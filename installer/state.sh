@@ -60,7 +60,7 @@ write_profile() {
   tmp=$(mktemp "$LOCAL_DIR/.install-profile.tmp.XXXXXX")
   track_temp "$tmp"
   {
-    printf 'schema\t2\n'
+    printf 'schema\t3\n'
     printf 'groups\t%s\n' "$SELECTED_STEPS"
     printf 'package-groups\t%s\n' "$SELECTED_GROUPS"
     printf 'full-upgrade\t%s\n' "$SAVED_FULL_UPGRADE"
@@ -124,18 +124,20 @@ read_profile() {
       *) die "Unknown install profile key: $key" ;;
     esac
   done < "$PROFILE_FILE"
-  [[ $schema == 1 || $schema == 2 ]] || die "Unsupported install profile schema: ${schema:-missing}"
+  [[ $schema == 1 || $schema == 2 || $schema == 3 ]] || die "Unsupported install profile schema: ${schema:-missing}"
   local required
   for required in groups package-groups full-upgrade fonts font default-shell git-name git-email \
     ssh ssh-key ssh-passphrase gpg gpg-key gpg-passphrase node-channel ai-cli-update-channel package-channel; do
     [[ $seen == *",$required,"* ]] || die "Incomplete install profile: missing $required"
   done
   PROFILE_SCHEMA=$schema
-  # Schema 1 (no node-policy; before 2026-09) migrates on the next approved
-  # apply/reconcile. Keep reading it until 2027-09, then reject it with a
-  # message to run apply again.
-  if [[ $schema == 1 ]]; then NODE_POLICY=preserve-compatible; fi
+  # Schemas 1 (no node-policy; before 2026-09) and 2 (node-policy
+  # preserve-compatible; before 2026-10) migrate on the next approved
+  # apply/reconcile: fnm's default now follows the current LTS. Keep reading
+  # them until 2027-10, then reject them with a message to run apply again.
   if [[ $schema == 2 && $seen != *,node-policy,* ]]; then die "Profile schema 2 requires node-policy"; fi
+  if [[ $schema == 3 && $seen != *,node-policy,* ]]; then die "Profile schema 3 requires node-policy"; fi
+  if [[ $schema == 1 || $schema == 2 ]]; then NODE_POLICY=current-lts; fi
 }
 
 migrate_one_local_file() {
@@ -227,8 +229,8 @@ report_profile_migration() {
   if [[ -f $PROFILE_FILE ]]; then
     schema=$(awk -F '\t' '$1 == "schema" { print $2; exit }' "$PROFILE_FILE")
   fi
-  if [[ $schema == 1 ]]; then
-    printf 'migration\tprofile-schema\t1\t2\n'
+  if [[ $schema == 1 || $schema == 2 ]]; then
+    printf 'migration\tprofile-schema\t%s\t3\n' "$schema"
   fi
   return 0
 }

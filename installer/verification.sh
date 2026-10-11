@@ -2,18 +2,21 @@
 # Sourced by install.sh; shares the installer context.
 # shellcheck disable=SC2034
 
-git_checkout_at() {
-  local directory=$1 repository=$2 commit=$3 origin
+# git_checkout_follows <directory> <repository>: a clean checkout of the
+# repository on a branch. A detached HEAD is a checkout from the pinned
+# installs before 2026-10, which follow_default_branch moves onto the branch.
+git_checkout_follows() {
+  local directory=$1 repository=$2 origin
   [[ -d $directory/.git ]] || return 1
   origin=$(git -C "$directory" remote get-url origin 2>/dev/null || true)
   github_origins_equivalent "$origin" "$repository" || return 1
   [[ -z $(git -C "$directory" status --porcelain) ]] || return 1
-  [[ $(git -C "$directory" rev-parse HEAD 2>/dev/null || true) == "$commit" ]]
+  git -C "$directory" symbolic-ref --quiet HEAD >/dev/null 2>&1
 }
 
 # The family name a Nerd Font installs under. Nerd Fonts renames families
 # whose upstream names are reserved; these aliases match the filenames in the
-# pinned Nerd Fonts release.
+# Nerd Fonts releases.
 nerd_font_family() {
   local font=${FONT_NAME:-JetBrainsMono} installed_family
   case $font in
@@ -64,46 +67,37 @@ verify_packages() {
 
 verify_pyenv() {
   local directory
-  [[ -x $HOME/.pyenv/bin/pyenv ]] && git_checkout_at "$HOME/.pyenv" "$PYENV_REPOSITORY" "$PYENV_COMMIT"
+  [[ -x $HOME/.pyenv/bin/pyenv ]] && git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY"
 }
 
 verify_rbenv() {
   local directory
   [[ -x $HOME/.rbenv/bin/rbenv ]] &&
-    git_checkout_at "$HOME/.rbenv" "$RBENV_REPOSITORY" "$RBENV_COMMIT" &&
-    git_checkout_at "$HOME/.rbenv/plugins/ruby-build" "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_COMMIT"
+    git_checkout_follows "$HOME/.rbenv" "$RBENV_REPOSITORY" &&
+    git_checkout_follows "$HOME/.rbenv/plugins/ruby-build" "$RUBY_BUILD_REPOSITORY"
 }
 
 verify_bun() { artifact_verify bun; }
 
 verify_uv() { artifact_verify uv; }
 
-verify_yarn() {
-  local directory
-  [[ -x $HOME/.local/npm/bin/yarn ]] && fnm_exec "$HOME/.local/npm/bin/yarn" --version 2>/dev/null | grep -qx "$YARN_VERSION"
-}
+verify_yarn() { npm_tool_verify yarn; }
 
-verify_pnpm() {
-  local directory
-  [[ -x $HOME/.local/npm/bin/pnpm ]] && fnm_exec "$HOME/.local/npm/bin/pnpm" --version 2>/dev/null | grep -qx "$PNPM_VERSION"
-}
+verify_pnpm() { npm_tool_verify pnpm; }
 
+# fnm with a working default Node. Which version that is, is not checked: a
+# full upgrade moves it to the current LTS, and a repair leaves it alone.
 verify_fnm() {
-  local directory
-  [[ -n $RESOLVED_NODE_VERSION ]] || resolve_node_version || return 1
-  node_version_compatible "$RESOLVED_NODE_VERSION" || return 1
-  artifact_verify fnm &&
-    [[ $("$HOME/.local/bin/fnm" default 2>/dev/null) == "$RESOLVED_NODE_VERSION" ]] &&
-    [[ $("$HOME/.local/bin/fnm" exec --using="$RESOLVED_NODE_VERSION" -- node --version 2>/dev/null) == "$RESOLVED_NODE_VERSION" ]]
+  artifact_verify fnm && fnm_default_node >/dev/null
 }
 
 verify_plugins() {
   local directory="$TARGET/zsh/plugins"
   artifact_verify starship &&
-    git_checkout_at "$directory/zsh-autosuggestions" "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_COMMIT" &&
-    git_checkout_at "$directory/zsh-syntax-highlighting" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_COMMIT" &&
-    git_checkout_at "$directory/zsh-completions" "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_COMMIT" &&
-    git_checkout_at "$directory/fzf-tab" "$FZF_TAB_REPOSITORY" "$FZF_TAB_COMMIT"
+    git_checkout_follows "$directory/zsh-autosuggestions" "$ZSH_AUTOSUGGESTIONS_REPOSITORY" &&
+    git_checkout_follows "$directory/zsh-syntax-highlighting" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" &&
+    git_checkout_follows "$directory/zsh-completions" "$ZSH_COMPLETIONS_REPOSITORY" &&
+    git_checkout_follows "$directory/fzf-tab" "$FZF_TAB_REPOSITORY"
 }
 
 verify_fonts() {

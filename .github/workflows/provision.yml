@@ -53,12 +53,15 @@ jobs:
       - name: Provision a fresh user in a disposable native-architecture container
         env:
           IMAGE: ${{ matrix.image }}
+          # Linux tools come from GitHub's latest releases; a token avoids the
+          # API's anonymous limit of 60 requests an hour per runner address.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           # No emulation and no privileged container: each runner pulls its
           # native image architecture. The source checkout stays read-only.
           mkdir -p "$RUNNER_TEMP/provisioning-logs"
           chmod 777 "$RUNNER_TEMP/provisioning-logs"
-          docker run --rm --init -e GITHUB_ACTIONS=true -e LEOS_CI_ARTIFACTS=/artifacts \
+          docker run --rm --init -e GITHUB_ACTIONS=true -e GITHUB_TOKEN -e LEOS_CI_ARTIFACTS=/artifacts \
             -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/provisioning-logs:/artifacts" "$IMAGE" \
             bash /repo/tests/provisioning-container.sh
       - name: Upload provisioning diagnostics
@@ -102,6 +105,7 @@ jobs:
         # real installations/upgrades, not a factory-fresh macOS bootstrap.
         env:
           LEOS_CI_FULL_UPGRADE: ${{ matrix.full_upgrade }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$RUNNER_TEMP/provisioning-logs"
           LEOS_CI_ARTIFACTS="$RUNNER_TEMP/provisioning-logs" bash tests/provisioning-test.sh

@@ -220,7 +220,7 @@ bootstrap_tools() {
 # the pkg-config and sqlite3 aliases resolve to. python is the versioned
 # formula on purpose: the `python`/`python3` aliases follow Homebrew's newest
 # minor release, so each move made reconcile install another Python next to
-# the old one. Change python@3.15 here deliberately, like the pins in lock.sh.
+# the old one. Change python@3.15 here deliberately.
 # heroku is a macOS-only group (the CLI comes from Heroku's Homebrew tap); it
 # has no members elsewhere, and main() refuses it there.
 package_list_for_group() {
