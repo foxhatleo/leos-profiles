@@ -15,11 +15,30 @@ SSH and GPG default to Skip; fonts and the Zsh default-shell policy are Auto.
 
 ## Start here
 
-- **Claude Code:** give it [`QUICK-INSTALL.md`](./QUICK-INSTALL.md) in a
-  session with its single-select/multi-select question-box UI.
-- **Codex:** enter **Plan mode first**, then submit
-  [`QUICK-INSTALL.md`](./QUICK-INSTALL.md). The question UI used by this setup
-  is currently available there.
+Paste this into your AI coding tool. It fetches
+[`QUICK-INSTALL.md`](./QUICK-INSTALL.md) itself, so there is nothing else to
+copy:
+
+```text
+Set up Leo's Profiles on this machine. Run
+curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/QUICK-INSTALL.md
+and read its full output word for word (do not summarize it or fetch it
+through a summarizing web tool), then follow those instructions exactly.
+```
+
+- **Claude Code:** use a session with its single-select/multi-select
+  question-box UI. Bypass-permissions mode is recommended (start with
+  `claude --dangerously-skip-permissions`, or pick it with Shift+Tab): the
+  setup runs many inspection and install commands, and you still approve the
+  complete plan once in a question box before anything changes.
+- **Codex:** enter **Plan mode first**, then submit the prompt. The question
+  UI used by this setup is currently available there. Leave Plan mode after
+  approving the plan so apply can run; full-access approvals (`codex --yolo`)
+  avoid a prompt per command for the same reason as above.
+
+Bypass mode skips the agent's per-command confirmations only. `sudo`, the
+Homebrew installer, `chsh` and passphrase prompts still stop for you, so stay at
+the keyboard. Skip it if you would rather review each command yourself.
 
 If the UI is unavailable, restart in the correct mode. The setup deliberately
 does not fall back to a typed questionnaire, and users should not need to learn

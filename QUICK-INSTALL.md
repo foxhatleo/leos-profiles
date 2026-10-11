@@ -1,11 +1,16 @@
 # Leo's Profiles master setup prompt
 
-Copy this entire file into your AI coding tool.
+Paste the short prompt from the README's "Start here" section into your AI
+coding tool; it fetches this file. Pasting this whole file works too.
 
 - **Claude Code:** submit it in a session that can display single-select and
-  multi-select question boxes.
+  multi-select question boxes. Bypass-permissions mode
+  (`claude --dangerously-skip-permissions`) is recommended so each inspection
+  and install command does not need its own confirmation; the plan is still
+  approved once below.
 - **Codex:** enter **Plan mode before submitting this prompt**. The setup uses
-  Plan mode's question UI.
+  Plan mode's question UI. Leave Plan mode after the plan is approved so apply
+  can run.
 - If the current session cannot display select boxes, stop. Explain how to
   restart in the correct mode and do not replace the UI with typed questions
   or make the user operate `install.sh` directly.
@@ -166,4 +171,5 @@ Read records by their type and preserve empty fields:
 
 fnm's default follows the current Node LTS: apply installs it, and a full
 upgrade moves the default forward; a run without one keeps a working default.
-Read [docs/development.md](./docs/development.md) for the full engine contract.
+Read [docs/development.md](./docs/development.md) in the checkout for the full
+engine contract.
