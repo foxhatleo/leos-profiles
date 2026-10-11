@@ -243,9 +243,9 @@ configured OS release/repositories; they do not run distribution-upgrade tools.
 Run these from the repository root:
 
 ```bash
-for file in install.sh installer/*.sh tests/*.sh; do bash -n "$file" || exit; done
+for file in install.sh installer/*.sh tests/*.sh tools/*.sh; do bash -n "$file" || exit; done
 for file in zsh/*.zsh zsh/path/*.zsh tests/*.zsh; do zsh -n "$file" || exit; done
-shellcheck -s bash -x install.sh installer/*.sh tests/*.sh
+shellcheck -s bash -x install.sh installer/*.sh tests/*.sh tools/*.sh
 bash tests/install-test.sh
 /bin/bash tests/install-test.sh  # macOS: the system Bash 3.2 a fresh Mac runs
 bash tests/apply-dryrun-test.sh
@@ -253,6 +253,7 @@ bash tests/readonly-test.sh
 bash tests/setup-wizard-test.sh
 /bin/bash tests/setup-wizard-test.sh  # macOS: the setup wizard under Bash 3.2
 bash tests/node-test.sh
+bash tests/update-locks-test.sh
 bash tests/credentials-test.sh
 zsh tests/profile-test.zsh
 zsh tests/runtime-cache-test.zsh
@@ -369,9 +370,47 @@ only with that run's evidence, and report failures or unexecuted jobs separately
 See [the provisioning workflow](../.github/workflows/provision.yml) for exact
 runner labels and triggers.
 
+## Updating pinned artifacts
+
+`tools/update-locks.sh` proposes lock updates and checks every candidate
+against what its upstream publishes before it can become a pin (SEC-6):
+
+```bash
+bash tools/update-locks.sh                    # plan + diff of lock.sh; writes nothing
+bash tools/update-locks.sh --only bun,uv      # a subset (names below)
+bash tools/update-locks.sh --only bun --write # rewrite installer/lock.sh in place
+```
+
+It needs an authenticated `gh` (read-only API calls), curl, jq, openssl,
+gpg (bun) and shasum/sha256sum. Candidates are downloaded into a temporary
+directory and never executed. Per artifact:
+
+| Artifact | Candidate | Verified against |
+| --- | --- | --- |
+| `bun` | latest GitHub release | `SHASUMS256.txt.asc`, clear-signed by the key in `tools/keys/bun-release.asc` (fingerprint `F3DCC08A8572C0749B3E18888EAB4D40A7B22B59`, the key oven-sh/bun's own Dockerfile verifies with), plus GitHub's asset digest |
+| `starship`, `uv` | latest GitHub release | each asset's `.sha256` file, plus GitHub's asset digest |
+| `fnm` | latest GitHub release | GitHub's asset digest only (fnm publishes nothing else); refused without one unless `--allow-unverified` |
+| `nerd-fonts` | latest GitHub release | `SHA-256.txt` against GitHub's digest for it, and every archive it lists against GitHub's digest for that archive |
+| `yarn`, `pnpm` | npm `latest` dist-tag | the tarball's sha512 `dist.integrity`, and the registry's ECDSA signature over `<name>@<version>:<integrity>` with a key from `/-/npm/v1/keys` (what `npm audit signatures` checks); a changed `engines.node` must stay a `>=X[.Y[.Z]]` range and is written to `*_NODE_ENGINE` |
+| `rpatool`, `homebrew-install` | the repository's HEAD commit | fast-forward from the pin, and the downloaded file's Git blob id against the commit's |
+| `pyenv`, `rbenv`, `ruby-build`, the four Zsh plugins | the repository's HEAD commit | fast-forward from the pin (GitHub's compare API); GitHub's signature status is reported |
+
+Any failed check prints `REFUSED`, exits 1 and leaves `lock.sh` untouched,
+even with `--write`. Values written to `lock.sh` (which the installer sources)
+are restricted to URL, version, digest and range characters. A lock variable
+the tool does not cover is an error, so a new artifact must be added there
+too. The tool also notes install-time lifecycle scripts in an npm candidate:
+the installer runs `npm install --ignore-scripts` (the pinned pnpm has none;
+Yarn 1's `preinstall` only removes a Corepack link from npm's global bin,
+never `~/.local/npm/bin`), so a candidate that needs one must be reviewed.
+`tests/update-locks-test.sh` runs it against fake upstreams (stub `gh` and
+`curl`, a throwaway GPG key and ECDSA key): a verified dry run, `--write`,
+and each refusal.
+
 ## Updating dependencies
 
-1. Read upstream release metadata and the exact candidate artifact's manifest.
+1. Start with `tools/update-locks.sh` (above); then review the candidate
+   artifact's manifest and release notes yourself.
    Update URLs, versions, immutable commits and SHA-256 digests together in
    `installer/lock.sh`. Download candidates for verification; do not execute an
    unverified replacement installer. GitHub publishes each release asset's
@@ -501,7 +540,13 @@ and a 32-bit FNV-1a digest of that line, computed in-process; the line itself,
 read with `read` (no fork), decides whether an entry is used. Bump the key when
 a filter's behaviour changes. The cache checks ownership, write permissions and
 symlinks before executing persisted scripts or compiled files, and creates
-private directories/files. `__leos_cache_dir` validates every ancestor once per
+private directories/files. On macOS, where mode bits do not show ACLs, it
+strips ACLs (`chmod -N`) from what it creates or repairs, and a full
+validation lists the ACLs of the cache root, the two profile-owned levels and
+their files (`/bin/ls -le`) at most once a day or when one of those
+directories' ctime changed (the `acl-checked` stamp records them): an entry
+granting another account write makes a directory unsafe (fallback, with a
+`chmod -N` hint) and a file is removed. `__leos_cache_dir` validates every ancestor once per
 shell and memoizes the result (success or failure) keyed on the cache root and
 EUID; repeat calls lstat the root and the two profile-owned levels and validate
 in full again if their owner, mode or inode changed. Tests that change

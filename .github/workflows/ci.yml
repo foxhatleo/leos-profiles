@@ -61,7 +61,7 @@ jobs:
           tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/shellcheck-$VERSION" >> "$GITHUB_PATH"
       - name: Lint deterministic installer
-        run: shellcheck --version && shellcheck -s bash -x install.sh installer/*.sh tests/*.sh
+        run: shellcheck --version && shellcheck -s bash -x install.sh installer/*.sh tests/*.sh tools/*.sh
       # Each linter below runs even when an earlier one failed, so one push
       # reports every finding instead of the first failing tool's.
       - name: Install pinned actionlint
@@ -132,6 +132,8 @@ jobs:
         run: bash tests/credentials-test.sh
       - name: Test Node dependency and activation logic
         run: bash tests/node-test.sh
+      - name: Test the lock updater against fake upstreams
+        run: bash tests/update-locks-test.sh
       - name: Test runtime cache and completion integration
         run: zsh tests/runtime-cache-test.zsh
       - name: Verify locked Linux artifacts and digests
@@ -203,6 +205,8 @@ jobs:
         run: /bin/bash tests/credentials-test.sh
       - name: Test Node dependency and activation logic
         run: /bin/bash tests/node-test.sh
+      - name: Test the lock updater against fake upstreams (system Bash 3.2)
+        run: /bin/bash tests/update-locks-test.sh
       - name: Run Zsh profile tests
         run: zsh tests/profile-test.zsh
       - name: Test runtime cache and completion integration (BSD stat/mktemp)

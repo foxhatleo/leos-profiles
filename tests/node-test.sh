@@ -101,7 +101,7 @@ verify_fnm
   npm() { fail 'ambient npm was invoked'; }
   download_verified() { printf 'fixture archive' > "$3"; }
   install_locked_npm_package pnpm https://example.invalid/pnpm.tgz unused
-  [[ $(cat "$TEST_EXEC_LOG") == *'npm install --global --prefix '* ]] || fail 'npm did not use selected fnm runtime'
+  [[ $(cat "$TEST_EXEC_LOG") == *'npm install --global --ignore-scripts --prefix '* ]] || fail 'npm did not use selected fnm runtime'
   mkdir -p "$HOME/.local/npm/bin"
   touch "$HOME/.local/npm/bin/pnpm" "$HOME/.local/npm/bin/yarn"
   chmod +x "$HOME/.local/npm/bin/pnpm" "$HOME/.local/npm/bin/yarn"

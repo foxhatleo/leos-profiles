@@ -193,7 +193,10 @@ install_locked_npm_package() {
   if [[ $DRY_RUN -eq 1 ]]; then
     say "Would install $package with the selected fnm Node runtime"
   else
-    fnm_exec npm install --global --prefix "$HOME/.local/npm" "$archive"
+    # --ignore-scripts: no package code runs at install time. The pinned pnpm
+    # has no install scripts; Yarn 1's preinstall only removes a Corepack
+    # yarn link from npm's global bin, which is never this prefix's bin.
+    fnm_exec npm install --global --ignore-scripts --prefix "$HOME/.local/npm" "$archive"
   fi
   rm -rf "$temp"
 }

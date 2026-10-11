@@ -1,5 +1,23 @@
-# Leo's Profiles — cached tool initialisation and shim upkeep.
+# Leo's Profiles — cached tool initialisation, shim upkeep and profile flags.
 # Sourced by start.zsh before any path/ entry runs, so every entry can use it.
+
+# __leos_set_flag <name> / __leos_clear_flag <name>
+# A flag is an empty file in $LEOS_PROFILES/local/flags that switches a profile
+# behaviour (no-gnu, brew-china, ...). local/ and flags/ are kept private (700)
+# and each flag file 600, as the installer's prepare_local_dir does. Names are
+# plain words, never paths.
+__leos_set_flag() {
+  emulate -L zsh
+  local dir=${LEOS_PROFILES-}/local/flags
+  [[ -n ${LEOS_PROFILES-} && -n $1 && -z ${1//[A-Za-z0-9_-]/} ]] || return 2
+  command mkdir -p -- "$dir" && chmod 700 "${dir:h}" "$dir" &&
+    touch -- "$dir/$1" && chmod 600 "$dir/$1"
+}
+__leos_clear_flag() {
+  emulate -L zsh
+  [[ -n ${LEOS_PROFILES-} && -n $1 && -z ${1//[A-Za-z0-9_-]/} ]] || return 2
+  rm -f -- "$LEOS_PROFILES/local/flags/$1"
+}
 
 # Deterministic tool scripts are cached privately. Homebrew shellenv and fnm
 # env are deliberately not cached: their output depends on the invoking shell.
@@ -93,7 +111,7 @@ __leos_cache_dir_validate() {
   local dir=$root/leos-profiles/init
   local -a missing
   local -A info
-  typeset -g __leos_cache_unsafe=
+  typeset -g __leos_cache_unsafe= __leos_cache_unsafe_fix=
   [[ $root == /* && ! -L $root && /$root/ != */../* ]] || return 1
   ancestor=$root
   while [[ ! -e $ancestor ]]; do
@@ -106,14 +124,24 @@ __leos_cache_dir_validate() {
   # 700` sets the mode whatever the caller's umask, so there is no umask to
   # save and restore (reading it back costs a fork). A level another shell
   # created first is accepted here and validated with the whole chain below.
+  # A level created here gets no ACL either (an inheritable one on its parent
+  # would otherwise be copied onto it; see __leos_acl_strip).
   for item in $missing; do
-    command mkdir -m 700 -- "$item" 2>/dev/null || [[ -d $item && ! -L $item ]] || return 1
+    if command mkdir -m 700 -- "$item" 2>/dev/null; then
+      __leos_acl_strip "$item"
+    else
+      [[ -d $item && ! -L $item ]] || return 1
+    fi
   done
   __leos_cache_safe_path "$root" || return 1
   for item in "$root/leos-profiles" "$root/leos-profiles/init"; do
     [[ ! -L $item ]] || return 1
     if [[ ! -d $item ]]; then
-      command mkdir -m 700 -- "$item" 2>/dev/null || [[ -d $item && ! -L $item ]] || return 1
+      if command mkdir -m 700 -- "$item" 2>/dev/null; then
+        __leos_acl_strip "$item"
+      else
+        [[ -d $item && ! -L $item ]] || return 1
+      fi
     fi
     [[ -O $item ]] || return 1
     zstat -H info -- "$item" 2>/dev/null || return 1
@@ -122,6 +150,7 @@ __leos_cache_dir_validate() {
     # the user's HOME, shared XDG root, or an unowned/symlink directory.
     if (( (info[mode] & 8#777) != 8#700 )); then
       chmod 700 "$item" 2>/dev/null || return 1
+      __leos_acl_strip "$item"
     fi
     __leos_cache_safe_path "$item" || return 1
   done
@@ -138,6 +167,130 @@ __leos_cache_dir_validate() {
   local -a legacy=("$dir"/[0-9a-f](#c64).(zsh|zsh.zwc|failed)(N.))
   (( ! $#legacy )) || rm -f -- "${legacy[@]}" 2>/dev/null
   REPLY=$dir
+}
+
+# __leos_acl_strip <path...>
+# macOS only: remove every ACL entry (chmod -N) from a directory or file the
+# cache creates or repairs. Mode bits do not show ACLs, and an inheritable
+# entry on a parent is copied onto each new child (SEC-10). A no-op elsewhere.
+__leos_acl_strip() {
+  [[ $OSTYPE == darwin* ]] || return 0
+  command /bin/chmod -N "$@" 2>/dev/null
+}
+
+# __leos_cache_acl_unsafe <ls -le output>
+# reply: the header line of each listed file or directory with an ACL entry
+# that allows a principal other than this user a right that changes content
+# (write, append, add_file, add_subdirectory, delete_child) or the ACL and
+# owner themselves (writesecurity, chown). Entry lines look like
+# ` 0: group:everyone [inherited] allow add_file,delete_child`.
+__leos_cache_acl_unsafe() {
+  emulate -L zsh
+  setopt extended_glob
+  local line header= perm
+  local -a words
+  reply=()
+  for line in "${(@f)1}"; do
+    if [[ $line == [[:space:]]##<->:[[:space:]]* ]]; then
+      words=(${=line})
+      [[ $words[2] != "user:$USERNAME" ]] || continue
+      (( ${words[(Ie)allow]} )) || continue
+      for perm in ${(s:,:)words[-1]}; do
+        case $perm in
+          write|append|add_file|add_subdirectory|delete_child|writesecurity|chown)
+            [[ -z $header ]] || (( ${reply[(Ie)$header]} )) || reply+=("$header")
+            break ;;
+        esac
+      done
+    else
+      header=$line
+    fi
+  done
+}
+
+# __leos_stamp_write <stamp>: publish a fresh private stamp file.
+__leos_stamp_write() {
+  local staging
+  staging=$(mktemp "${1:h}/.stamp.XXXXXXXX") || return 1
+  __leos_acl_strip "$staging"
+  mv -f -- "$staging" "$1" || { rm -f -- "$staging"; return 1; }
+}
+
+# __leos_cache_acl_check <root> <dir>
+# macOS only (SEC-10), during a full validation: mode bits do not show ACLs,
+# and an ACL entry can let another account write where the mode says nobody
+# can. Lists (/bin/ls -le, a fork or three) the ACLs of the cache root, the two
+# profile-owned directories and the files in those two. A directory with an
+# unsafe entry (see above) makes the cache unsafe: this fails and names it in
+# __leos_cache_unsafe. Such a file is removed instead; it is regenerated.
+#
+# At most once a day, like __leos_daily_due, and also again whenever one of
+# the three directories changed: the stamp records their ctimes, which an ACL
+# change or a new entry (which may have inherited an ACL) updates. Residual
+# gap: an account granted write access after a passing check (only the owner
+# or root can grant it) could rewrite the stamp before the next shell
+# validates, and so hide the ACL for up to a day.
+__leos_cache_acl_check() {
+  emulate -L zsh
+  setopt extended_glob
+  [[ $OSTYPE == darwin* && -x /bin/ls ]] || return 0
+  zmodload -F zsh/stat b:zstat || return 1
+  local root=$1 dir=$2 stamp=$2/acl-checked line item f
+  local -a dirs=("$1" "${2:h}" "$2")
+  __leos_cache_acl_ctimes $dirs || return 1
+  if [[ -n $stamp(#qN.mh-24) ]] && __leos_cache_safe_file "$stamp" &&
+      { IFS= read -r line || [[ -n $line ]]; } < "$stamp" 2>/dev/null &&
+      [[ $line == "$REPLY" ]]; then
+    return 0
+  fi
+  __leos_cache_acl_unsafe "$(/bin/ls -lde -- $dirs 2>/dev/null)"
+  for line in $reply; do
+    for item in $dirs; do
+      [[ $line == *" $item" ]] || continue
+      rm -f -- "$stamp" 2>/dev/null
+      typeset -g __leos_cache_unsafe=$item __leos_cache_unsafe_fix='chmod -N'
+      return 1
+    done
+  done
+  for item in "${dir:h}" "$dir"; do
+    __leos_cache_acl_unsafe "$(/bin/ls -leA -- "$item" 2>/dev/null)"
+    for line in $reply; do
+      f=$item/${line##* }
+      [[ ! -f $f || -L $f ]] || rm -f -- "$f" 2>/dev/null
+    done
+  done
+  # Creating the stamp changes the directory's ctime, so a new stamp stays
+  # empty and the next full validation checks again; later checks rewrite it
+  # in place, which leaves the directory alone. ctimes have one-second
+  # resolution here: a tree changed within the current second is not
+  # recorded, so a change right after this check cannot hide behind it.
+  if [[ ! -e $stamp && ! -L $stamp ]]; then
+    __leos_stamp_write "$stamp"
+    return 0
+  fi
+  __leos_cache_safe_file "$stamp" || return 0
+  zmodload -F zsh/datetime p:EPOCHSECONDS 2>/dev/null || return 0
+  if __leos_cache_acl_ctimes $dirs && (( REPLY_MAX < EPOCHSECONDS )); then
+    print -r -- "$REPLY" > "$stamp" 2>/dev/null
+  else
+    : > "$stamp" 2>/dev/null
+  fi
+  return 0
+}
+
+# __leos_cache_acl_ctimes <path...>: REPLY gets their ctimes, not following
+# links, and REPLY_MAX the latest of them.
+__leos_cache_acl_ctimes() {
+  emulate -L zsh
+  local item sig=
+  local -A info
+  typeset -g REPLY_MAX=0
+  for item in "$@"; do
+    zstat -L -H info -- "$item" 2>/dev/null || return 1
+    sig+="$info[ctime]:"
+    (( info[ctime] <= REPLY_MAX )) || REPLY_MAX=$info[ctime]
+  done
+  REPLY=$sig
 }
 
 # __leos_cache_dir_sig <path...>
@@ -173,7 +326,7 @@ __leos_cache_dir() {
   local memo="$EUID:$root"
   if [[ ${__leos_cache_memo_key-} == "$memo" ]]; then
     if [[ -z ${__leos_cache_memo_dir-} ]]; then
-      typeset -g __leos_cache_unsafe=${__leos_cache_memo_unsafe-}
+      typeset -g __leos_cache_unsafe=${__leos_cache_memo_unsafe-} __leos_cache_unsafe_fix=${__leos_cache_memo_fix-}
       return 1
     fi
     dir=$__leos_cache_memo_dir
@@ -185,8 +338,8 @@ __leos_cache_dir() {
     fi
   fi
   __leos_cache_forget
-  if __leos_cache_dir_validate; then
-    dir=$REPLY
+  if __leos_cache_dir_validate && __leos_cache_acl_check "$root" "$REPLY"; then
+    dir=$root/leos-profiles/init
     # Without a signature there is nothing cheap to re-check: do not memoize.
     if __leos_cache_dir_sig "$root" "${dir:h}" "$dir"; then
       typeset -g __leos_cache_memo_key=$memo __leos_cache_memo_dir=$dir __leos_cache_memo_sig=$REPLY
@@ -194,13 +347,15 @@ __leos_cache_dir() {
     REPLY=$dir
     return 0
   fi
-  typeset -g __leos_cache_memo_key=$memo __leos_cache_memo_unsafe=${__leos_cache_unsafe-}
+  typeset -g __leos_cache_memo_key=$memo __leos_cache_memo_unsafe=${__leos_cache_unsafe-} \
+    __leos_cache_memo_fix=${__leos_cache_unsafe_fix-}
   return 1
 }
 
 # Drop the memo, so the next __leos_cache_dir validates in full.
 __leos_cache_forget() {
-  typeset -g __leos_cache_memo_key= __leos_cache_memo_dir= __leos_cache_memo_sig= __leos_cache_memo_unsafe=
+  typeset -g __leos_cache_memo_key= __leos_cache_memo_dir= __leos_cache_memo_sig= \
+    __leos_cache_memo_unsafe= __leos_cache_memo_fix=
 }
 
 __leos_cache_warn_fallback() {
@@ -208,7 +363,7 @@ __leos_cache_warn_fallback() {
   typeset -g __leos_cache_fallback_warned=1
   local hint=
   [[ -n ${__leos_cache_unsafe-} ]] &&
-    hint=" Unsafe path: ${(q-)__leos_cache_unsafe}; if it should be private to you, run: chmod go-w ${(q-)__leos_cache_unsafe}"
+    hint=" Unsafe path: ${(q-)__leos_cache_unsafe}; if it should be private to you, run: ${__leos_cache_unsafe_fix:-chmod go-w} ${(q-)__leos_cache_unsafe}"
   print -u2 -r -- "Leo's Profiles: init cache is unsafe or unavailable at ${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init; using freshly generated initialization for this shell.$hint"
 }
 
@@ -291,6 +446,7 @@ __leos_init_cache() {
         (( !(info[mode] & 8#22) )) || untrusted=1
         if (( (info[mode] & 8#777) != 8#600 )); then
           chmod 600 "$f" 2>/dev/null || usable=0
+          __leos_acl_strip "$f"
         fi
       fi
     done
@@ -343,6 +499,7 @@ __leos_init_cache() {
     [[ -n $generated ]] || return 2
     REPLY=$generated; return 1
   }
+  __leos_acl_strip "$stage"
   if [[ -z $generated ]]; then
     # The marker carries the identity too: it only suppresses this generator.
     { print -r -- "$identity" > "$stage" && mv -f -- "$stage" "$failed"; } 2>/dev/null ||
@@ -368,7 +525,8 @@ __leos_init_cache() {
   compiled_dir=$(mktemp -d "$dir/.compile.XXXXXXXX")
   if [[ -n $compiled_dir ]]; then
     if zcompile -R "$compiled_dir/script.zwc" "$cache" 2>/dev/null; then
-      chmod 600 "$compiled_dir/script.zwc" && mv -f -- "$compiled_dir/script.zwc" "$cache.zwc"
+      chmod 600 "$compiled_dir/script.zwc" && { __leos_acl_strip "$compiled_dir/script.zwc"; :; } &&
+        mv -f -- "$compiled_dir/script.zwc" "$cache.zwc"
     fi
     rm -rf -- "$compiled_dir"
   fi
@@ -529,7 +687,7 @@ __leos_zcompile_profile() {
 __leos_daily_due() {
   emulate -L zsh
   setopt extended_glob
-  local stamp=${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init/$1 staging
+  local stamp=${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init/$1
   # The common case, a stamp from today, needs no directory validation at all:
   # this check can only ever decide NOT to run the job, so whoever wrote the
   # stamp, trusting it cannot make anything run.
@@ -538,9 +696,7 @@ __leos_daily_due() {
   stamp=$REPLY/$1
   [[ ! -e $stamp && ! -L $stamp ]] || __leos_cache_safe_file "$stamp" || return 1
   [[ -z $stamp(#qN.mh-24) ]] || return 1
-  staging=$(mktemp "${stamp:h}/.stamp.XXXXXXXX") || return 1
-  mv -f -- "$staging" "$stamp" || { rm -f -- "$staging"; return 1; }
-  return 0
+  __leos_stamp_write "$stamp"
 }
 
 # __leos_rehash_daily <tool>

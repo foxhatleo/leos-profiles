@@ -4,7 +4,10 @@
 The script is intentionally usable without the zsh profile.  It never follows
 symlinks, will not descend into mounted filesystems below the chosen root, and
 returns a non-zero status when the requested root is invalid or a deletion
-fails.  Directories that cannot be *entered* (e.g. macOS TCC/SIP-protected
+fails.  Every deletion is relative to a directory descriptor opened during the
+walk without following links, so swapping a directory for a symlink while the
+scan runs cannot redirect a deletion elsewhere.  Directories that cannot be
+*entered* (e.g. macOS TCC/SIP-protected
 paths, which stay unreadable even under sudo) are skipped rather than counted as
 failures, so a clean sweep still exits 0; a metadata file that is found but
 cannot be deleted still counts as a failure.  Use --dry-run to inspect scope
@@ -50,23 +53,45 @@ def _term_width() -> int:
         return 80
 
 
+# Anything outside printable ASCII (control characters, escape sequences) is
+# shown as "?", so a file name cannot rewrite the terminal.
+_UNPRINTABLE = re.compile(r"[^ a-zA-Z0-9!@#$%^&*()_+={}[\]|\\:;\"'<>,.?/\\~`-]")
+
+
 def _display_path(path: str, root: str) -> str:
-    sanitized = re.sub(r"[^ a-zA-Z0-9!@#$%^&*()_+={}[\]|\\:;\"'<>,.?/\\~`-]", "?", path)
-    sanitized_root = re.sub(r"[^ a-zA-Z0-9!@#$%^&*()_+={}[\]|\\:;\"'<>,.?/\\~`-]", "?", root)
+    sanitized = _UNPRINTABLE.sub("?", path)
+    sanitized_root = _UNPRINTABLE.sub("?", root)
     if sanitized.startswith(sanitized_root):
         return sanitized[len(sanitized_root) :].lstrip(os.sep) or "."
     return sanitized
 
 
-def progress(path: str, root: str, prompt: str = "Scanning: {}...", newline: bool = False) -> None:
-    width = _term_width()
+def progress(
+    path: str, root: str, before: str = "Scanning: ", after: str = "...", newline: bool = False,
+) -> None:
+    """Show before + path + after: the parts are joined, never formatted.
+
+    On a terminal the line is cut to its width, and a transient line (newline
+    False) is overwritten by the next one through a carriage return.
+    Elsewhere (a log, a pipe) transient lines are skipped and the others are
+    written in full, without padding or carriage returns.
+    """
+    out = sys.stdout
     rendered = _display_path(path, root)
-    overhead = len(prompt.format(""))
-    allowed = max(0, width - overhead)
-    line = prompt.format(rendered[:allowed])[:width]
-    sys.stdout.write(line.ljust(width))
-    sys.stdout.write("\n" if newline else "\r")
-    sys.stdout.flush()
+    if not out.isatty():
+        if newline:
+            out.write(before + rendered + after + "\n")
+            out.flush()
+        return
+    width = _term_width()
+    allowed = max(0, width - len(before) - len(after))
+    line = (before + rendered[:allowed] + after)[:width]
+    out.write(line.ljust(width) + ("\n" if newline else "\r"))
+    out.flush()
+
+
+def _report_error(path: str, root: str, action: str, error: OSError) -> None:
+    progress(path, root, before=action + " (", after="): " + str(error), newline=True)
 
 
 def _linux_mount_points() -> set[str]:
@@ -95,36 +120,11 @@ def _is_mount_boundary(path: str, mount_points: set[str]) -> bool:
     )
 
 
-def remove_path(
-    path: str, root: str, dry_run: bool, result: Result, is_dir: bool,
-    mount_points: set[str] | None = None,
-) -> None:
-    if is_dir:
-        _, removed = _purge_tree(path, root, dry_run, result, mount_points)
-        result.removed += removed
-        return
-    verb = "Would remove" if dry_run else "Removing"
-    progress(path, root, prompt=f"{verb} {{}}...", newline=True)
-    if dry_run:
-        result.removed += 1
-        return
-    try:
-        os.remove(path)
-        result.removed += 1
-    except OSError as error:
-        # A metadata file we found but cannot delete (permission, immutable flag,
-        # I/O) is a genuine failure the caller should see — unlike a directory we
-        # could not even enter (handled in walk_error). Escape braces so a path
-        # containing '{' or '}' cannot break progress()'s str.format template.
-        result.failures += 1
-        detail = str(error).replace("{", "{{").replace("}", "}}")
-        progress(path, root, prompt=f"Could not remove ({{}}): {detail}", newline=True)
-
-
 # Check capabilities once: unsupported platforms fail closed rather than falling
-# back to path-based recursive deletion. Python 3.9+ on macOS/Linux provides
-# these APIs. Keeping the check separate also lets tests simulate unavailable
-# descriptor support without executing an unsafe fallback.
+# back to path-based deletion, for the sweep and the recycle-bin purge alike.
+# Python 3.9+ on macOS/Linux provides these APIs. Keeping the check separate
+# also lets tests simulate unavailable descriptor support without executing an
+# unsafe fallback.
 _FD_PURGE_SUPPORTED = (
     hasattr(os, "O_DIRECTORY")
     and hasattr(os, "O_NOFOLLOW")
@@ -155,13 +155,12 @@ def _open_purge_directory(name: str, parent_fd: int | None, observed: os.stat_re
 
 def _purge_error(path: str, root: str, result: Result, error: OSError) -> None:
     result.failures += 1
-    detail = str(error).replace("{", "{{").replace("}", "}}")
-    progress(path, root, prompt=f"Could not remove ({{}}): {detail}", newline=True)
+    _report_error(path, root, "Could not remove", error)
 
 
 def _purge_mount(path: str, root: str, result: Result) -> None:
     result.skipped_mounts += 1
-    progress(path, root, prompt="Skipping mounted filesystem {}...", newline=True)
+    progress(path, root, before="Skipping mounted filesystem ", newline=True)
 
 
 def _purge_tree(
@@ -236,8 +235,7 @@ def _purge_entry(
             if not complete:
                 return False, removed
         _require_same_entry(observed, os.stat(name, dir_fd=parent_fd, follow_symlinks=False), path)
-        verb = "Would remove" if dry_run else "Removing"
-        progress(path, root, prompt=f"{verb} {{}}...", newline=True)
+        progress(path, root, before="Would remove " if dry_run else "Removing ", newline=True)
         if not dry_run:
             if is_directory:
                 os.rmdir(name, dir_fd=parent_fd)
@@ -253,8 +251,8 @@ def _purge_entry(
 
 
 def _directory_key(path: str) -> tuple[int, int]:
-    stat = os.stat(path, follow_symlinks=False)
-    return stat.st_dev, stat.st_ino
+    info = os.stat(path, follow_symlinks=False)
+    return info.st_dev, info.st_ino
 
 
 def unique_roots(roots: list[str]) -> list[str]:
@@ -311,52 +309,137 @@ def scan(root: str, dry_run: bool, purge_recycle_bins: bool = False) -> Result:
     result = Result()
 
     try:
+        if not _FD_PURGE_SUPPORTED:
+            raise OSError(errno.ENOTSUP, "Safe descriptor-relative deletion is unavailable", root)
         mount_points = _linux_mount_points()
     except OSError as error:
         _purge_error(root, root, result, error)
         return result
 
-    def walk_error(error: OSError) -> None:
-        failed_path = error.filename or root
-        # The error text contains the path; escape braces so progress()'s
-        # str.format template cannot choke on it.
-        detail = str(error).replace("{", "{{").replace("}", "}}")
-        if getattr(error, "errno", None) in (errno.EACCES, errno.EPERM):
-            # macOS TCC/SIP blocks traversal of protected trees (Mail, Photos,
-            # ...) even under sudo. That is "nothing to clean here", not a
-            # deletion failure, so a clean sweep still exits 0.
-            result.skipped_unreadable += 1
-            progress(failed_path, root, prompt=f"Skipping unreadable ({{}}): {detail}", newline=True)
-            return
+    try:
+        root_fd = _open_purge_directory(root, None, os.stat(root, follow_symlinks=False), root)
+    except OSError as error:
+        _walk_error(root, root, result, error)
+        return result
+
+    # Depth first without recursion (no limit on tree depth): each frame is an
+    # open directory and an iterator over the subdirectories still to visit in
+    # it, so only the current branch's descriptors are open. A child is opened
+    # relative to its parent's descriptor with O_NOFOLLOW and must still be
+    # the directory that was listed.
+    # A descriptor is on the stack from the moment it is opened, so the
+    # finally clause closes every one still open, whatever interrupts the walk.
+    stack = [(root_fd, iter(()))]
+    try:
+        progress(root, root)
+        stack[-1] = (root_fd, iter(_clean_directory(
+            root_fd, root, root, dry_run, purge_recycle_bins, result, mount_points)))
+        while stack:
+            parent_fd, pending = stack[-1]
+            child = next(pending, None)
+            if child is None:
+                stack.pop()
+                os.close(parent_fd)
+                continue
+            name, observed, path = child
+            try:
+                child_fd = _open_purge_directory(name, parent_fd, observed, path)
+            except OSError as error:
+                _walk_error(path, root, result, error)
+                continue
+            stack.append((child_fd, iter(())))
+            progress(path, root)
+            stack[-1] = (child_fd, iter(_clean_directory(
+                child_fd, path, root, dry_run, purge_recycle_bins, result, mount_points)))
+    finally:
+        for directory_fd, _ in reversed(stack):
+            os.close(directory_fd)
+    return result
+
+
+def _walk_error(path: str, root: str, result: Result, error: OSError) -> None:
+    if getattr(error, "errno", None) in (errno.EACCES, errno.EPERM):
+        # macOS TCC/SIP blocks traversal of protected trees (Mail, Photos,
+        # ...) even under sudo. That is "nothing to clean here", not a
+        # deletion failure, so a clean sweep still exits 0.
+        result.skipped_unreadable += 1
+        _report_error(path, root, "Skipping unreadable", error)
+        return
+    result.failures += 1
+    _report_error(path, root, "Could not scan", error)
+
+
+def _remove_metadata(
+    name: str, parent_fd: int, path: str, root: str, dry_run: bool, result: Result,
+) -> None:
+    """Unlink one metadata file by name, relative to its open directory."""
+    progress(path, root, before="Would remove " if dry_run else "Removing ", newline=True)
+    if dry_run:
+        result.removed += 1
+        return
+    try:
+        os.unlink(name, dir_fd=parent_fd)
+        result.removed += 1
+    except OSError as error:
+        # A metadata file found but not deletable (permission, immutable
+        # flag, I/O) is a genuine failure the caller should see, unlike a
+        # directory that could not even be entered (_walk_error).
         result.failures += 1
-        progress(failed_path, root, prompt=f"Could not scan ({{}}): {detail}", newline=True)
+        _report_error(path, root, "Could not remove", error)
 
-    for current_root, dirs, files in os.walk(
-        root, topdown=True, onerror=walk_error, followlinks=False
-    ):
-        progress(current_root, root)
-        retained_dirs = []
-        for name in dirs:
-            candidate = os.path.join(current_root, name)
-            if _is_mount_boundary(candidate, mount_points):
-                result.skipped_mounts += 1
-                progress(candidate, root, prompt="Skipping mounted filesystem {}...", newline=True)
-                continue
-            if name == RECYCLE_BIN:
-                if purge_recycle_bins:
-                    remove_path(candidate, root, dry_run, result, is_dir=True, mount_points=mount_points)
-                continue
-            retained_dirs.append(name)
-        dirs[:] = retained_dirs
 
-        for name in files:
+def _clean_directory(
+    directory_fd: int, path: str, root: str, dry_run: bool, purge_recycle_bins: bool,
+    result: Result, mount_points: set[str],
+) -> list[tuple[str, os.stat_result, str]]:
+    """Clean one open directory; return the subdirectories to descend into.
+
+    Entries are classified as os.walk classifies them (a symlink to a
+    directory counts as a directory but is never entered), so the same names
+    are removed, kept or purged as before.
+    """
+    try:
+        with os.scandir(directory_fd) as entries:
+            listed = list(entries)
+        device = os.fstat(directory_fd).st_dev
+    except OSError as error:
+        _walk_error(path, root, result, error)
+        return []
+    subdirectories = []
+    for entry in listed:
+        name = entry.name
+        candidate = os.path.join(path, name)
+        try:
+            is_directory = entry.is_dir()
+        except OSError:
+            is_directory = False
+        if not is_directory:
             if name in METADATA_FILES:
-                candidate = os.path.join(current_root, name)
                 if _is_mount_boundary(candidate, mount_points):
                     _purge_mount(candidate, root, result)
                     continue
-                remove_path(candidate, root, dry_run, result, is_dir=False)
-    return result
+                _remove_metadata(name, directory_fd, candidate, root, dry_run, result)
+            continue
+        if _is_mount_boundary(candidate, mount_points):
+            _purge_mount(candidate, root, result)
+            continue
+        if name == RECYCLE_BIN:
+            if purge_recycle_bins:
+                _, removed = _purge_tree(candidate, root, dry_run, result, mount_points)
+                result.removed += removed
+            continue
+        if entry.is_symlink():
+            continue
+        try:
+            observed = entry.stat(follow_symlinks=False)
+        except OSError as error:
+            _walk_error(candidate, root, result, error)
+            continue
+        if observed.st_dev != device:
+            _purge_mount(candidate, root, result)
+            continue
+        subdirectories.append((name, observed, candidate))
+    return subdirectories
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

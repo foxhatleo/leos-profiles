@@ -4,11 +4,11 @@
 # the package default when there is one), as the installer does.
 if command -v apt-get >/dev/null 2>&1; then
   apt-checkup() {
-    sudo apt-get update &&
-      sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+    __leos_sudo apt-get update &&
+      __leos_sudo env DEBIAN_FRONTEND=noninteractive apt-get \
         -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y &&
-      sudo env DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y &&
-      sudo apt-get clean
+      __leos_sudo env DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y &&
+      __leos_sudo apt-get clean
   }
 fi
 

@@ -34,12 +34,13 @@ guide and the reference for everything below.
 From the repository root:
 
 ```bash
-shellcheck -s bash -x install.sh installer/*.sh tests/*.sh
+shellcheck -s bash -x install.sh installer/*.sh tests/*.sh tools/*.sh
 for file in zsh/*.zsh zsh/path/*.zsh tests/*.zsh; do zsh -n "$file" || exit; done
 bash tests/install-test.sh
 /bin/bash tests/install-test.sh
 bash tests/credentials-test.sh
 bash tests/node-test.sh
+bash tests/update-locks-test.sh
 bash tests/apply-dryrun-test.sh
 /bin/bash tests/readonly-test.sh
 bash tests/setup-wizard-test.sh

@@ -477,4 +477,53 @@ compdef() { :; }
 source "$root/zsh/path/node.zsh"
 leos-node-completions
 [[ $BUN_ZSH_COMPLETION == yes && $SHELL == /bin/fish ]] || fail 'Bun dialect or parent-shell preservation'
+# SEC-10, macOS only: ACLs are invisible to mode bits. A real ACL in a fresh
+# cache root: created levels carry none even under an inheritable parent ACL;
+# a write-granting ACL on a profile-owned directory is rejected at the next
+# full validation (its ctime changed, so the daily stamp does not hide it);
+# one on a cache entry removes the entry; this user's own entry is fine.
+if [[ $OSTYPE == darwin* ]]; then
+  (
+    acl_parent=$tmp/acl-parent
+    mkdir -m 700 "$acl_parent"
+    /bin/chmod +a "everyone allow add_file,add_subdirectory,delete_child,file_inherit,directory_inherit" "$acl_parent"
+    export XDG_CACHE_HOME=$acl_parent/cache
+    __leos_cache_forget
+    __leos_cache_dir || fail 'ACL: validation under an inheritable parent ACL'
+    acl_dir=$REPLY
+    for f in "$XDG_CACHE_HOME" "${acl_dir:h}" "$acl_dir"; do
+      [[ $(/bin/ls -lde "$f") != *$'\n'*' allow '* ]] || fail "ACL: created level inherited an ACL: $f"
+    done
+    leos-source-cached acl "$bin" fresh
+    __leos_init_cache acl "$bin" fresh && acl_cache=$REPLY || fail 'ACL: cache entry'
+    [[ $(/bin/ls -le "$acl_cache") != *' allow '* ]] || fail 'ACL: entry inherited an ACL'
+    [[ -f $acl_dir/acl-checked ]] || fail 'ACL: check left no stamp'
+    # A stamp only counts with the directories' current ctimes in it: a stale
+    # record (and any ACL change, which moves a ctime) means checking again.
+    print -r -- '1:2:3:' > "$acl_dir/acl-checked"
+    /bin/chmod +a "user:$USERNAME allow write" "$acl_cache"
+    /bin/chmod +a "everyone allow write" "$acl_dir"
+    __leos_cache_forget
+    if __leos_cache_dir; then fail 'ACL: a world-writable ACL on the cache directory was trusted'; fi
+    [[ $__leos_cache_unsafe == $acl_dir && $__leos_cache_unsafe_fix == 'chmod -N' ]] ||
+      fail "ACL: unsafe path or fix: $__leos_cache_unsafe ${__leos_cache_unsafe_fix-}"
+    [[ ! -e $acl_dir/acl-checked ]] || fail 'ACL: a failed check kept its stamp'
+    CACHE_VALUE=unset
+    leos-source-cached acl "$bin" fresh 2>/dev/null
+    [[ $CACHE_VALUE == fresh ]] || fail 'ACL: fallback did not initialize'
+    /bin/chmod -N "$acl_dir"
+    __leos_cache_forget
+    __leos_cache_dir || fail 'ACL: removing the ACL did not restore the cache'
+    [[ -e $acl_cache ]] || fail "ACL: this user's own ACL entry removed the entry"
+    /bin/chmod +a "group:everyone allow write" "$acl_cache"
+    touch "$acl_dir/ctime-bump" && rm -f -- "$acl_dir/ctime-bump"
+    __leos_cache_forget
+    __leos_cache_dir || fail 'ACL: an entry ACL failed the whole cache'
+    [[ ! -e $acl_cache ]] || fail 'ACL: an entry with a write-granting ACL was kept'
+    /bin/chmod -N "$acl_parent"
+  ) || exit 1
+else
+  print -r -- 'SKIP: ACL checks (macOS only)'
+fi
+
 print -r -- 'runtime cache tests: PASS'
