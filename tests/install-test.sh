@@ -4569,6 +4569,165 @@ test_sudo_is_refreshed_before_long_steps() {
   [[ -z $SUDO_KEEPALIVE_PID ]] || fail "the keepalive was not stopped"
 }
 
+# --- bootstrap.sh -----------------------------------------------------------
+# bootstrap_fixture: a fixture HOME and Git configuration in which the
+# profile's GitHub URL is a local "upstream" repository (url.insteadOf), so
+# the real git clones and pulls without the network.
+bootstrap_fixture() {
+  BS_FIXTURE=$(mktemp -d)
+  track_temp "$BS_FIXTURE"
+  export HOME="$BS_FIXTURE/home"
+  mkdir -p "$HOME"
+  export GIT_CONFIG_GLOBAL="$BS_FIXTURE/gitconfig" GIT_CONFIG_NOSYSTEM=1
+  git config --global user.name 'Fixture User'
+  git config --global user.email fixture@example.com
+  git config --global init.defaultBranch master
+  git config --global url."$BS_FIXTURE/upstream".insteadOf https://github.com/foxhatleo/leos-profiles.git
+  git init -q "$BS_FIXTURE/upstream"
+  printf '#!/usr/bin/env bash\n' > "$BS_FIXTURE/upstream/install.sh"
+  printf 'local/\n' > "$BS_FIXTURE/upstream/.gitignore"
+  git -C "$BS_FIXTURE/upstream" add -A
+  git -C "$BS_FIXTURE/upstream" commit -q -m 'first'
+}
+
+test_bootstrap_clones_updates_and_refuses() {
+  local out status dir
+  bootstrap_fixture
+  LEOS_BOOTSTRAP_LIB_ONLY=1 source "$ROOT/bootstrap.sh"
+  bs_start_setup() { printf 'setup %s\n' "$*"; }
+  bs_say() { printf '==> %s\n' "$*"; }
+  BS_OS=apt
+  dir="$HOME/.leos-profiles"
+  # A fresh clone, then setup in it with the arguments given.
+  out=$(main --dry-run 2>&1)
+  assert_contains "$out" "Cloning Leo's Profiles into $dir"
+  assert_contains "$out" "setup $dir --dry-run"
+  [[ -f $dir/install.sh ]] || fail "nothing was cloned"
+  assert_equals "$(git -C "$dir" config --get remote.origin.url)" https://github.com/foxhatleo/leos-profiles.git
+  # An existing clean checkout is fast-forwarded (ignored local/ state is
+  # not a change).
+  printf 'echo new\n' >> "$BS_FIXTURE/upstream/install.sh"
+  git -C "$BS_FIXTURE/upstream" commit -q -am 'second'
+  mkdir -p "$dir/local"
+  printf 'state\n' > "$dir/local/install-profile.tsv"
+  out=$(main 2>&1)
+  assert_contains "$out" "Updating the existing checkout"
+  assert_equals "$(git -C "$dir" rev-parse HEAD)" "$(git -C "$BS_FIXTURE/upstream" rev-parse HEAD)"
+  # Local changes are refused, and left as they are.
+  printf 'edit\n' >> "$dir/install.sh"
+  status=0
+  out=$( (main) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "has local changes"
+  [[ $(tail -n 1 "$dir/install.sh") == edit ]] || fail "the local change was touched"
+  git -C "$dir" checkout -q -- install.sh
+  # A checkout of another repository is refused.
+  git -C "$dir" remote set-url origin https://github.com/someone/else.git
+  status=0
+  out=$( (main) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "is a checkout of https://github.com/someone/else.git"
+  # SSH and HTTPS spellings of the profile's own origin are accepted.
+  bs_origin_ok git@github.com:FoxHatLeo/leos-profiles.git || fail "the SSH origin was refused"
+  bs_origin_ok https://github.com/foxhatleo/leos-profiles/ || fail "the HTTPS origin was refused"
+  ! bs_origin_ok https://github.com/foxhatleo/leos-profiles-fork.git || fail "a fork was accepted"
+  # Something else in the way is left alone.
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  status=0
+  out=$( (main) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "is not a Git checkout"
+  # LEOS_PROFILES_HOME chooses the directory.
+  out=$(LEOS_PROFILES_HOME="$BS_FIXTURE/elsewhere" main 2>&1)
+  assert_contains "$out" "setup $BS_FIXTURE/elsewhere"
+  [[ -f $BS_FIXTURE/elsewhere/install.sh ]] || fail "LEOS_PROFILES_HOME was not used"
+}
+
+# Without Git: the OS's own way to get it (Linux: the package manager, as
+# root; macOS: the Command Line Tools installer, then waiting for it).
+test_bootstrap_installs_git_when_missing() {
+  local out status family
+  bootstrap_fixture
+  LEOS_BOOTSTRAP_LIB_ONLY=1 source "$ROOT/bootstrap.sh"
+  BS_LOG="$BS_FIXTURE/calls"
+  BS_POLL_SECONDS=0
+  BS_POLL_LIMIT=5
+  git() { [[ $GIT_READY -eq 1 ]] || return 127; }
+  id() { printf '%s\n' "$FAKE_UID"; }
+  sudo() { printf 'sudo %s\n' "$*" >> "$BS_LOG"; [[ $* != *' install '*git* && $* != *'-Syu '*git* ]] || GIT_READY=1; }
+  apt-get() { printf 'apt-get %s\n' "$*" >> "$BS_LOG"; [[ $1 != install ]] || GIT_READY=1; }
+  bs_say() { :; }
+  FAKE_UID=1000
+  for family in apt fedora arch; do
+    BS_OS=$family GIT_READY=0
+    : > "$BS_LOG"
+    bs_install_git
+    case $family in
+      apt) assert_equals "$(paste -sd'|' "$BS_LOG")" 'sudo apt-get update|sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y git ca-certificates' ;;
+      fedora) assert_equals "$(cat "$BS_LOG")" 'sudo dnf install -y git ca-certificates' ;;
+      arch) assert_equals "$(cat "$BS_LOG")" 'sudo pacman -Syu --needed --noconfirm git ca-certificates' ;;
+    esac
+  done
+  # As root, no sudo.
+  FAKE_UID=0 BS_OS=apt GIT_READY=0
+  : > "$BS_LOG"
+  env() { shift; "$@"; }
+  bs_install_git
+  assert_equals "$(paste -sd'|' "$BS_LOG")" 'apt-get update|apt-get install -y git ca-certificates'
+  unset -f env
+  # Git already works: nothing is installed.
+  GIT_READY=1
+  : > "$BS_LOG"
+  bs_install_git
+  [[ ! -s $BS_LOG ]] || fail "Git was installed although it works: $(cat "$BS_LOG")"
+  # macOS: start the Command Line Tools installer, then poll until Git runs.
+  BS_OS=macos GIT_READY=1 CLT_POLLS=0
+  xcode-select() {
+    printf 'xcode-select %s\n' "$*" >> "$BS_LOG"
+    [[ $1 == -p ]] || return 0
+    CLT_POLLS=$((CLT_POLLS + 1))
+    (( CLT_POLLS > 3 ))
+  }
+  : > "$BS_LOG"
+  bs_install_git
+  # The first check, three polls that fail, one that passes, the last check.
+  assert_equals "$(grep -c -- '-p' "$BS_LOG")" 5
+  assert_contains "$(cat "$BS_LOG")" 'xcode-select --install'
+  # ...and gives up, saying what to do, if they never arrive.
+  CLT_POLLS=-100
+  status=0
+  out=$( (bs_install_git) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "Command Line Tools are still not installed"
+  BS_OS=unknown GIT_READY=0
+  status=0
+  out=$( (bs_install_git) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "Unsupported platform"
+}
+
+# A download cut short anywhere runs nothing: every statement is inside main,
+# called on the last line.
+test_bootstrap_cut_short_runs_nothing() {
+  local temp lines n name
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  mkdir -p "$temp/bin"
+  for name in git sudo xcode-select apt-get dnf pacman curl uname id mkdir bash env sleep; do
+    printf '#!/bin/sh\necho "%s $*" >> "%s/ran"\n' "$name" "$temp" > "$temp/bin/$name"
+    chmod +x "$temp/bin/$name"
+  done
+  lines=$(wc -l < "$ROOT/bootstrap.sh")
+  for (( n = 1; n < lines; n++ )); do
+    head -n "$n" "$ROOT/bootstrap.sh" > "$temp/cut.sh"
+    PATH="$temp/bin" HOME="$temp" "$BASH" "$temp/cut.sh" >/dev/null 2>&1 || true
+  done
+  [[ ! -e $temp/ran ]] || fail "a truncated bootstrap ran commands: $(sort -u "$temp/ran" | head -5)"
+  assert_equals "$(tail -n 1 "$ROOT/bootstrap.sh")" '[[ ${LEOS_BOOTSTRAP_LIB_ONLY:-0} == 1 ]] || main "$@"'
+  "$BASH" -n "$ROOT/bootstrap.sh" || fail "bootstrap.sh does not parse"
+}
+
 TESTS=(
   test_default_does_not_include_unreleased_local_bin
   test_option_validation_rejects_bad_csv_and_implicit_keys
@@ -4727,6 +4886,9 @@ TESTS=(
   test_gum_release_asset_names
   test_homebrew_installer_runs_noninteractively
   test_sudo_is_refreshed_before_long_steps
+  test_bootstrap_clones_updates_and_refuses
+  test_bootstrap_installs_git_when_missing
+  test_bootstrap_cut_short_runs_nothing
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do
