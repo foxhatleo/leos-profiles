@@ -94,6 +94,7 @@ write_profile() {
     printf 'package-channel\t%s\n' "$PACKAGE_CHANNEL"
     printf 'version-managers\t%s\n' "$([[ $SKIP_EXISTING_VERSION_MANAGERS -eq 1 ]] && printf skip-existing || printf install)"
     printf 'upgrade-casks\t%s\n' "$([[ $UPGRADE_CASKS -eq 1 ]] && printf yes || printf no)"
+    printf 'release-age\t%s\n' "$MIN_RELEASE_AGE"
   } > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$PROFILE_FILE"
@@ -112,6 +113,7 @@ read_profile() {
   [[ -f $PROFILE_FILE ]] || die "No saved install profile. Run the AI setup flow first: $PROFILE_FILE"
   local key value extra schema="" seen=","
   UPGRADE_CASKS=0  # optional key: a profile without it predates the flag
+  MIN_RELEASE_AGE=7  # optional key, likewise
   while IFS=$'\t' read -r key value extra || [[ -n $key ]]; do
     [[ -z ${extra:-} ]] || die "Malformed install profile row: $key"
     validate_tsv_value "$key" "${value:-}"
@@ -155,6 +157,10 @@ read_profile() {
           yes) UPGRADE_CASKS=1 ;;
           *) die "Invalid saved upgrade-casks value: $value" ;;
         esac ;;
+      # Optional (added 2026-11; absent means 7): --min-release-age.
+      release-age)
+        min_release_age_ok "$value" || die "Invalid saved release-age value: $value"
+        MIN_RELEASE_AGE=$value ;;
       '') ;;
       *) die "Unknown install profile key: $key" ;;
     esac

@@ -25,58 +25,154 @@ github_origins_equivalent() {
   [[ $actual_slug == "$expected_slug" ]]
 }
 
-# follow_default_branch <repository> <destination> <label>: a checkout of the
-# repository's default branch. A missing one is cloned; an existing one must
-# be a clean checkout of the same repository, and is fast-forwarded to
-# origin's default branch. A detached checkout (installs before 2026-10 were
-# pinned to a commit) is moved onto that branch.
-follow_default_branch() {
-  local repository=$1 destination=$2 label=$3 origin remote_head branch current
-  if [[ ! -d $destination ]]; then
-    run mkdir -p "$(dirname -- "$destination")"
-    run git clone --quiet "$repository" "$destination"
-    return 0
-  fi
-  [[ -d $destination/.git ]] || die "$label exists but is not a Git checkout: $destination"
-  origin=$(git -C "$destination" remote get-url origin 2>/dev/null || true)
-  github_origins_equivalent "$origin" "$repository" || die "$label checkout has an unexpected origin: $destination"
-  [[ -z $(git -C "$destination" status --porcelain) ]] || die "$label checkout has local changes: $destination"
-  if [[ $origin != "$repository" ]]; then
-    run git -C "$destination" remote set-url origin "$repository"
-  fi
-  if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would fast-forward $label to the head of origin's default branch"
-    return 0
-  fi
-  run git -C "$destination" fetch --quiet --prune origin || die "Could not fetch $label from $repository"
-  git -C "$destination" remote set-head origin --auto >/dev/null || die "Could not read $label's default branch from $repository"
-  remote_head=$(git -C "$destination" symbolic-ref --short refs/remotes/origin/HEAD) ||
-    die "Could not read $label's default branch from $repository"
-  branch=${remote_head#origin/}
-  current=$(git -C "$destination" symbolic-ref --quiet --short HEAD || true)
-  if [[ $current == "$branch" ]]; then
-    if ! run git -C "$destination" merge --quiet --ff-only "$remote_head"; then
-      upstream_history_rewritten "$destination" "$remote_head" &&
-        die "$label's upstream rewrote its history (a force-push): $destination is at a commit $remote_head no longer contains, with no commits of your own. Nothing was changed. To follow upstream, run: git -C '$destination' reset --hard $remote_head"
-      die "$label has commits that are not on $remote_head: $destination"
-    fi
+# ---------------------------------------------------------------------------
+# Minimum release age. RELEASE_CUTOFF_EPOCH and RELEASE_CUTOFF_ISO (UTC,
+# 2026-11-05T12:00:00Z, the shape of GitHub's published_at, so the two compare
+# as strings) are MIN_RELEASE_AGE days before now, computed once per run.
+# They are globals: call release_age_cutoff in the current shell.
+RELEASE_CUTOFF_EPOCH=""
+RELEASE_CUTOFF_ISO=""
+
+# A function so tests can fix "now".
+current_epoch() { date +%s; }
+
+# epoch_to_iso <seconds>: with GNU date (-d @N), or else BSD date (-r N).
+epoch_to_iso() {
+  if date --version >/dev/null 2>&1; then
+    date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
   else
-    run git -C "$destination" checkout --quiet -B "$branch" "$remote_head"
+    date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ
   fi
 }
 
-# upstream_history_rewritten <checkout> <origin/branch>: the checkout's HEAD
-# is a commit origin's branch used to point at (its remote-tracking reflog
-# has it), so it holds no local work and a failed fast-forward means upstream
-# force-pushed. A local commit was never on origin and is not in the reflog.
-upstream_history_rewritten() {
-  local destination=$1 remote_head=$2 head
-  local reflog
-  head=$(git -C "$destination" rev-parse --verify --quiet HEAD) || return 1
-  # Captured, not piped into `grep -q`: under pipefail an early grep exit
-  # can SIGPIPE rev-list and turn a match into a failure.
-  reflog=$(git -C "$destination" rev-list --walk-reflogs "refs/remotes/$remote_head" 2>/dev/null) || return 1
-  [[ $'\n'$reflog$'\n' == *$'\n'"$head"$'\n'* ]]
+release_age_cutoff() {
+  [[ -z $RELEASE_CUTOFF_EPOCH ]] || return 0
+  local now iso
+  now=$(current_epoch)
+  [[ $now =~ ^[0-9]+$ ]] || die "Could not read the current time"
+  iso=$(epoch_to_iso "$(( now - MIN_RELEASE_AGE * 86400 ))") || die "Could not compute the release-age cutoff"
+  RELEASE_CUTOFF_EPOCH=$(( now - MIN_RELEASE_AGE * 86400 ))
+  RELEASE_CUTOFF_ISO=$iso
+}
+
+# min_release_age_ok <value>: a whole number of days, 0 to 365.
+min_release_age_ok() {
+  local pattern='^(0|[1-9][0-9]?[0-9]?)$'
+  [[ $1 =~ $pattern ]] && (( $1 <= 365 ))
+}
+
+# ---------------------------------------------------------------------------
+# Git checkouts. Each source in sources.sh has <PREFIX>_REPOSITORY and a
+# follow mode, <PREFIX>_FOLLOW (tag, commit or tag-now). The checkout ends
+# detached at the release that mode picks; it may move backwards (the newest
+# old-enough release can be older than what an earlier run checked out). Local
+# work is never thrown away: uncommitted changes, or commits that were never on
+# origin, stop the step.
+
+# A stable release tag: v1.2.3, 0.36.0, v20261023. Not 1.0-rc1, 0.8.0-alpha1.
+readonly STABLE_TAG_PATTERN='^v?[0-9]+([.][0-9]+)*$'
+
+# follow_mode_description <mode>: what the mode checks out, for messages.
+follow_mode_description() {
+  case $1 in
+    tag) printf 'the newest stable tag at least %s days old\n' "$MIN_RELEASE_AGE" ;;
+    commit) printf 'the newest default-branch commit at least %s days old\n' "$MIN_RELEASE_AGE" ;;
+    tag-now) printf 'the newest stable tag\n' ;;
+    *) die "Unknown follow mode: $1" ;;
+  esac
+}
+
+# release_checkout_target <checkout> <mode>: sets FOLLOW_TARGET (a commit) and
+# FOLLOW_TARGET_NAME (the tag, or the commit's short hash) from the refs the
+# checkout already has, or returns 1 when there is none. It reads only: call it
+# after a fetch to pick from what origin has now. Call it in the current shell.
+FOLLOW_TARGET=""
+FOLLOW_TARGET_NAME=""
+release_checkout_target() {
+  local directory=$1 mode=$2 tag any=0
+  FOLLOW_TARGET=""
+  FOLLOW_TARGET_NAME=""
+  release_age_cutoff
+  case $mode in
+    commit)
+      FOLLOW_TARGET=$(git -C "$directory" rev-list -1 --before="@$RELEASE_CUTOFF_EPOCH" refs/remotes/origin/HEAD 2>/dev/null) ||
+        return 1
+      [[ -n $FOLLOW_TARGET ]] || return 1
+      FOLLOW_TARGET_NAME=$(git -C "$directory" rev-parse --short "$FOLLOW_TARGET") || return 1 ;;
+    tag|tag-now)
+      [[ $mode == tag ]] || any=1
+      # Newest first by the tag's own date (the tagger's, or for a lightweight
+      # tag its commit's).
+      tag=$(git -C "$directory" for-each-ref --sort=-creatordate --format='%(refname)%09%(creatordate:unix)' refs/tags |
+        awk -F '\t' -v pattern="$STABLE_TAG_PATTERN" -v cutoff="$RELEASE_CUTOFF_EPOCH" -v any="$any" '
+          {
+            tag = $1
+            sub(/^refs\/tags\//, "", tag)
+            if (tag ~ pattern && (any || $2 + 0 <= cutoff + 0)) { print tag; exit }
+          }')
+      [[ -n $tag ]] || return 1
+      FOLLOW_TARGET=$(git -C "$directory" rev-parse --verify --quiet "refs/tags/$tag^{commit}") || return 1
+      FOLLOW_TARGET_NAME=$tag ;;
+    *) die "Unknown follow mode: $mode" ;;
+  esac
+}
+
+# follow_release_checkout <PREFIX> <destination> <label>: a checkout of
+# <PREFIX>_REPOSITORY, detached at what <PREFIX>_FOLLOW picks. A missing one is
+# cloned; an existing one must be a clean checkout of the same repository.
+follow_release_checkout() {
+  local prefix=$1 destination=$2 label=$3 repository_var mode_var repository mode describe origin unpublished head
+  repository_var=${prefix}_REPOSITORY
+  mode_var=${prefix}_FOLLOW
+  repository=${!repository_var}
+  mode=${!mode_var}
+  describe=$(follow_mode_description "$mode")
+  if [[ ! -d $destination ]]; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+      say "Would clone $label from $repository and check out $describe"
+      return 0
+    fi
+    run mkdir -p "$(dirname -- "$destination")"
+    run git clone --quiet "$repository" "$destination"
+  else
+    [[ -d $destination/.git ]] || die "$label exists but is not a Git checkout: $destination"
+    origin=$(git -C "$destination" remote get-url origin 2>/dev/null || true)
+    github_origins_equivalent "$origin" "$repository" || die "$label checkout has an unexpected origin: $destination"
+    [[ -z $(git -C "$destination" status --porcelain) ]] || die "$label checkout has local changes: $destination"
+    # Before fetching, while the remote-tracking refs and tags still hold what
+    # origin had at the last fetch: a checked-out commit that none of them
+    # contains was made here. (Commits upstream later force-pushed away were
+    # origin's at that point, so they do not count.)
+    unpublished=$(git -C "$destination" rev-list HEAD --not --remotes=origin --tags) ||
+      die "Could not compare $label with $repository: $destination"
+    [[ -z $unpublished ]] ||
+      die "$label has commits that are not on $repository: $destination (for example $(sed -n '1p' <<< "$unpublished")). Nothing was changed; keep them on a branch of your own, check out a commit from origin and rerun."
+    if [[ $origin != "$repository" ]]; then
+      run git -C "$destination" remote set-url origin "$repository"
+    fi
+    if [[ $DRY_RUN -eq 1 ]]; then
+      say "Would fetch $label and check out $describe"
+      return 0
+    fi
+  fi
+  # --prune-tags with --force: the checkout's tags mirror origin's, so a
+  # release upstream deleted or moved is not picked from a stale local tag.
+  run git -C "$destination" fetch --quiet --prune --prune-tags --force --tags origin ||
+    die "Could not fetch $label from $repository"
+  git -C "$destination" remote set-head origin --auto >/dev/null ||
+    die "Could not read $label's default branch from $repository"
+  release_checkout_target "$destination" "$mode" ||
+    die "$label: $repository has nothing to check out as $describe. Rerun with a smaller --min-release-age."
+  head=$(git -C "$destination" rev-parse --verify --quiet HEAD || true)
+  if [[ $head == "$FOLLOW_TARGET" ]] && ! git -C "$destination" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
+    say "$label is at $FOLLOW_TARGET_NAME ($describe)"
+    return 0
+  fi
+  if [[ -n $head && -n $(git -C "$destination" rev-list -1 "$head" --not --remotes=origin --tags) ]]; then
+    say "$label's upstream rewrote its history (a force-push): $destination was at a commit origin no longer has, with no commits of your own"
+  fi
+  run git -C "$destination" checkout --quiet --detach "$FOLLOW_TARGET"
+  say "$label is now at $FOLLOW_TARGET_NAME ($describe)"
 }
 
 install_local_bins() { artifact_install rpatool; }
@@ -92,22 +188,22 @@ compile_optional_extension() {
 }
 
 install_pyenv() {
-  follow_default_branch "$PYENV_REPOSITORY" "$HOME/.pyenv" pyenv
+  follow_release_checkout PYENV "$HOME/.pyenv" pyenv
   compile_optional_extension "$HOME/.pyenv" pyenv
 }
 
 install_rbenv() {
-  follow_default_branch "$RBENV_REPOSITORY" "$HOME/.rbenv" rbenv
-  follow_default_branch "$RUBY_BUILD_REPOSITORY" "$HOME/.rbenv/plugins/ruby-build" ruby-build
+  follow_release_checkout RBENV "$HOME/.rbenv" rbenv
+  follow_release_checkout RUBY_BUILD "$HOME/.rbenv/plugins/ruby-build" ruby-build
   compile_optional_extension "$HOME/.rbenv" rbenv
 }
 
 install_plugins() {
   local directory="$TARGET/zsh/plugins"
-  follow_default_branch "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$directory/zsh-autosuggestions" zsh-autosuggestions
-  follow_default_branch "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$directory/zsh-syntax-highlighting" zsh-syntax-highlighting
-  follow_default_branch "$ZSH_COMPLETIONS_REPOSITORY" "$directory/zsh-completions" zsh-completions
-  follow_default_branch "$FZF_TAB_REPOSITORY" "$directory/fzf-tab" fzf-tab
+  follow_release_checkout ZSH_AUTOSUGGESTIONS "$directory/zsh-autosuggestions" zsh-autosuggestions
+  follow_release_checkout ZSH_SYNTAX_HIGHLIGHTING "$directory/zsh-syntax-highlighting" zsh-syntax-highlighting
+  follow_release_checkout ZSH_COMPLETIONS "$directory/zsh-completions" zsh-completions
+  follow_release_checkout FZF_TAB "$directory/fzf-tab" fzf-tab
 }
 
 is_desktop() {
@@ -143,33 +239,37 @@ nerd_font_archive_digest() {
   ' "$1"
 }
 
-# resolve_nerd_fonts_release: NERD_FONTS_RELEASE_BASE becomes the download
-# URL of the release that is latest now (.../releases/download/<tag>), once
-# per run; the checksum list and the archive both come from it. It sets a
-# global, so call it in the current shell, never inside $(...).
-# NERD_FONTS_TEST_RELEASE_URL replaces the base in tests.
+# nerd_fonts_release: NERD_FONTS_RELEASE_BASE becomes the download URL
+# (.../releases/download/<tag>) of the newest Nerd Fonts release at least
+# MIN_RELEASE_AGE days old, once per run (preflight resolves it first); the
+# checksum list and the archive both come from it. It sets globals, so call it
+# in the current shell, never inside $(...). NERD_FONTS_TEST_RELEASE_URL
+# replaces the base in tests.
 NERD_FONTS_RELEASE_BASE=""
-resolve_nerd_fonts_release() {
+NERD_FONTS_TAG=""
+NERD_FONTS_PUBLISHED=""
+nerd_fonts_release() {
   [[ -z $NERD_FONTS_RELEASE_BASE ]] || return 0
   if [[ -n ${NERD_FONTS_TEST_RELEASE_URL:-} ]]; then
     NERD_FONTS_RELEASE_BASE=$NERD_FONTS_TEST_RELEASE_URL
     return 0
   fi
-  local location tag
-  # The latest-release page redirects to the tag; read the redirect without
-  # following it.
-  location=$(curl --fail --proto '=https' --tlsv1.2 --silent --show-error --connect-timeout 15 --max-time 60 \
-    --retry 3 --output /dev/null --write-out '%{redirect_url}' "$NERD_FONTS_LATEST_URL") ||
-    die "Could not find the latest Nerd Fonts release at $NERD_FONTS_LATEST_URL"
-  tag=${location##*/releases/tag/}
-  [[ $location == https://github.com/*/releases/tag/* && $tag =~ ^[A-Za-z0-9._-]+$ ]] ||
-    die "Could not find the latest Nerd Fonts release: $NERD_FONTS_LATEST_URL redirected to '${location}'"
-  NERD_FONTS_RELEASE_BASE="$NERD_FONTS_DOWNLOAD_URL/$tag"
+  local status=0
+  github_release_tag_pick "$NERD_FONTS_REPOSITORY" || status=$?
+  case $status in
+    0) ;;
+    "$GITHUB_LOOKUP_TOO_NEW") die "No Nerd Fonts release among the 30 newest is at least $MIN_RELEASE_AGE days old; rerun with a smaller --min-release-age" ;;
+    "$GITHUB_LOOKUP_REFUSED") die "Could not read the Nerd Fonts releases: GitHub refused the request (HTTP 403/429), most likely the anonymous API rate limit. Set GITHUB_TOKEN, or log in with gh, and rerun." ;;
+    *) die "Could not read the Nerd Fonts releases from GitHub; check the network and rerun" ;;
+  esac
+  NERD_FONTS_TAG=$RELEASE_TAG
+  NERD_FONTS_PUBLISHED=$RELEASE_PUBLISHED
+  NERD_FONTS_RELEASE_BASE="$NERD_FONTS_DOWNLOAD_URL/$RELEASE_TAG"
 }
 
 # fetch_nerd_font_checksums <destination>: the resolved release's SHA-256.txt.
 fetch_nerd_font_checksums() {
-  resolve_nerd_fonts_release
+  nerd_fonts_release
   download_file "$NERD_FONTS_RELEASE_BASE/SHA-256.txt" "$1"
 }
 
@@ -177,7 +277,7 @@ fetch_nerd_font_checksums() {
 # when the release has no archive of that name.
 require_known_nerd_font() {
   nerd_font_archive_digest "$1" "$2" >/dev/null ||
-    die "Unknown Nerd Font: $2. The latest Nerd Fonts release has no $2.tar.xz; use a name from https://www.nerdfonts.com/font-downloads (for example JetBrainsMono)."
+    die "Unknown Nerd Font: $2. The Nerd Fonts release ${NERD_FONTS_TAG:-picked} has no $2.tar.xz; use a name from https://www.nerdfonts.com/font-downloads (for example JetBrainsMono)."
 }
 
 # install_nerd_font <font> [verified SHA-256.txt]: download the font's release
@@ -185,7 +285,7 @@ require_known_nerd_font() {
 install_nerd_font() {
   local font=$1 checksums=${2:-} release
   local temp digest directory file found=0
-  resolve_nerd_fonts_release
+  nerd_fonts_release
   release=$NERD_FONTS_RELEASE_BASE
   temp=$(mktemp -d)
   track_temp "$temp"
@@ -218,7 +318,7 @@ install_fonts() {
   fi
   local font=${FONT_NAME:-JetBrainsMono}
   if [[ $DRY_RUN -eq 1 ]]; then
-    say "Would download $font.tar.xz from the latest Nerd Fonts release, verify it against the release's SHA-256.txt and install it into $(nerd_font_directory)"
+    say "Would download $font.tar.xz from the newest Nerd Fonts release at least $MIN_RELEASE_AGE days old, verify it against the release's SHA-256.txt and install it into $(nerd_font_directory)"
     return 0
   fi
   install_nerd_font "$font" "${NERD_FONTS_CHECKSUMS_FILE:-}"
@@ -227,7 +327,7 @@ install_fonts() {
   # is installed; the guest copy still verifies, so a reconcile does not ask
   # again.
   if is_wsl; then
-    queue_manual_action install-windows-font "$(nerd_font_directory)" "$NERD_FONTS_RELEASE_URL/$font.zip" \
+    queue_manual_action install-windows-font "$(nerd_font_directory)" "$NERD_FONTS_RELEASE_BASE/$font.zip" \
       "WSL: install the $font Nerd Font on Windows as well (download $font.zip, select its .ttf files, Install), then choose \"$(nerd_font_family) Nerd Font\" in your Windows terminal's profile."
   fi
 }
@@ -360,48 +460,239 @@ remove_legacy_npm_copy() {
   done
 }
 
-# github_latest_asset <owner/repo> <asset>: print "<tag><TAB><url><TAB><sha256>"
-# for the asset in the project's latest release. The digest is the one GitHub
-# computes for every release asset. GITHUB_TOKEN, when set, lifts the API's
-# anonymous limit of 60 requests an hour; it goes to curl on stdin (--config),
-# never on the command line other processes can read.
-# When the release cannot be read it prints nothing and returns
-# GITHUB_LOOKUP_UNREACHABLE, or GITHUB_LOOKUP_REFUSED for HTTP 403/429 (most
-# likely the anonymous rate limit), so the caller can keep an installed copy.
-# A release that does not publish the asset properly still dies.
+# ---------------------------------------------------------------------------
+# GitHub releases. A lookup that cannot read GitHub returns a status instead
+# of dying, so artifact_install can keep a copy that is installed and still
+# verifies: GITHUB_LOOKUP_UNREACHABLE (network, 5xx), GITHUB_LOOKUP_REFUSED
+# (HTTP 403/429, most likely the anonymous limit of 60 requests an hour),
+# GITHUB_LOOKUP_NOT_FOUND (404) or GITHUB_LOOKUP_TOO_NEW (none of the 30
+# newest releases is old enough). A release that does not publish the asset
+# properly still dies.
 GITHUB_LOOKUP_UNREACHABLE=4
 GITHUB_LOOKUP_REFUSED=5
-github_latest_asset() {
-  local repository=$1 asset=$2 api response="" code="" json="" record tag url digest
+GITHUB_LOOKUP_NOT_FOUND=6
+GITHUB_LOOKUP_TOO_NEW=7
+
+# github_api_token: GITHUB_API_TOKEN becomes GITHUB_TOKEN, or else gh's token
+# when gh is logged in, so lookups stay under the anonymous rate limit. Once
+# per run, in the current shell (it sets globals).
+GITHUB_API_TOKEN=""
+GITHUB_API_TOKEN_RESOLVED=0
+GH_LOGGED_IN=""
+github_api_token() {
+  (( GITHUB_API_TOKEN_RESOLVED == 0 )) || return 0
+  GITHUB_API_TOKEN_RESOLVED=1
+  local pattern='^[A-Za-z0-9_.-]+$' token
+  if [[ -n ${GITHUB_TOKEN:-} ]]; then
+    if [[ $GITHUB_TOKEN =~ $pattern ]]; then
+      GITHUB_API_TOKEN=$GITHUB_TOKEN
+      return 0
+    fi
+    warn "GITHUB_TOKEN is not a GitHub token (unexpected characters); ignoring it"
+  fi
+  if gh_logged_in && token=$(gh auth token --hostname github.com 2>/dev/null) && [[ $token =~ $pattern ]]; then
+    GITHUB_API_TOKEN=$token
+  fi
+}
+
+# gh_logged_in: gh is installed and has a github.com token (read locally; no
+# network). Cached in GH_LOGGED_IN when called in the current shell.
+gh_logged_in() {
+  if [[ -z $GH_LOGGED_IN ]]; then
+    if command -v gh >/dev/null 2>&1 && gh auth token --hostname github.com >/dev/null 2>&1; then
+      GH_LOGGED_IN=yes
+    else
+      GH_LOGGED_IN=no
+    fi
+  fi
+  [[ $GH_LOGGED_IN == yes ]]
+}
+
+# github_api_get <path>: print the body of https://api.github.com/<path>, or
+# return one of the GITHUB_LOOKUP statuses. The token goes to curl on stdin
+# (--config), never on the command line other processes can read; when it is
+# refused the request is repeated anonymously.
+github_api_get() {
+  local api="https://api.github.com/$1" response="" code=""
   local -a curl_args=(--location --proto '=https' --tlsv1.2 --silent --show-error
     --connect-timeout 15 --max-time 60 --retry 3 -H 'Accept: application/vnd.github+json'
     --write-out '\n%{http_code}')
-  api="https://api.github.com/repos/$repository/releases/latest"
-  if [[ -n ${GITHUB_TOKEN:-} && ! ${GITHUB_TOKEN} =~ ^[A-Za-z0-9_.-]+$ ]]; then
-    warn "GITHUB_TOKEN is not a GitHub token (unexpected characters); asking GitHub anonymously"
-  elif [[ -n ${GITHUB_TOKEN:-} ]]; then
-    response=$(printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" |
+  if [[ -n $GITHUB_API_TOKEN ]]; then
+    response=$(printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_API_TOKEN" |
       curl --config - "${curl_args[@]}" "$api" 2>/dev/null) || response=""
     code=${response##*$'\n'}
   fi
-  if [[ $code != 200 ]]; then
-    # Without a token, or when the token was refused: anonymously.
+  if [[ $code != 200 && $code != 404 ]]; then
     response=$(curl "${curl_args[@]}" "$api") || response=""
     code=${response##*$'\n'}
   fi
-  if [[ $code != 200 ]]; then
-    case $code in
-      403|429) return "$GITHUB_LOOKUP_REFUSED" ;;
-      *) return "$GITHUB_LOOKUP_UNREACHABLE" ;;
-    esac
+  case $code in
+    200) printf '%s\n' "${response%$'\n'*}" ;;
+    404) return "$GITHUB_LOOKUP_NOT_FOUND" ;;
+    403|429) return "$GITHUB_LOOKUP_REFUSED" ;;
+    *) return "$GITHUB_LOOKUP_UNREACHABLE" ;;
+  esac
+}
+
+# github_release_candidates < releases.json: "<tag><TAB><published_at>" for
+# each release in a releases-list response that is neither a draft nor a
+# prerelease and whose tag is a plain version (bun-v1.3.2, v1.39.0, 0.9.1;
+# not 1.0.0-rc1 or a canary build), newest first. The JSON is split into
+# "key": value tokens as in github_release_asset_record; tag_name starts each
+# release, and its assets and author have none of these keys.
+github_release_candidates() {
+  awk '
+    function value(text) {
+      sub(/^"[^"]*"[ \t]*:[ \t]*"?/, "", text)
+      sub(/"$/, "", text)
+      return text
+    }
+    function flush(  version) {
+      version = tag
+      sub(/^[^0-9]*/, "", version)
+      if (tag ~ /^[A-Za-z0-9._-]+$/ && version ~ /^[0-9]+([.][0-9]+)*$/ &&
+          draft == "false" && pre == "false" &&
+          published ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/)
+        printf "%s\t%s\n", tag, published
+      tag = ""; draft = ""; pre = ""; published = ""
+    }
+    BEGIN { RS = "[],{}[]" }
+    {
+      gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "")
+      if ($0 ~ /^"tag_name"[ \t]*:/) { flush(); tag = value($0) }
+      else if ($0 ~ /^"draft"[ \t]*:/) draft = value($0)
+      else if ($0 ~ /^"prerelease"[ \t]*:/) pre = value($0)
+      else if ($0 ~ /^"published_at"[ \t]*:/) published = value($0)
+    }
+    END { flush() }
+  ' | LC_ALL=C sort -t "$(printf '\t')" -k2,2r
+}
+
+# github_release_tag_pick <owner/repo>: RELEASE_TAG and RELEASE_PUBLISHED
+# become the newest release published at least MIN_RELEASE_AGE days ago,
+# from the 30 newest. Returns a GITHUB_LOOKUP status when there is none.
+# Cached per repository for the run; sets globals, so call it in the current
+# shell, with `||` (a status is not an error).
+RELEASE_TAG=""
+RELEASE_PUBLISHED=""
+RELEASE_URL=""
+RELEASE_SHA=""
+RELEASE_TAG_CACHE=""
+RELEASE_ASSET_CACHE=""
+github_release_tag_pick() {
+  local repository=$1 line list status=0 key
+  line=$(awk -F '\t' -v repository="$repository" '$1 == repository { print; exit }' <<< "$RELEASE_TAG_CACHE")
+  if [[ -n $line ]]; then
+    IFS=$'\t' read -r key RELEASE_TAG RELEASE_PUBLISHED <<< "$line"
+    return 0
   fi
-  json=${response%$'\n'*}
+  release_age_cutoff
+  github_api_token
+  list=$(github_api_get "repos/$repository/releases?per_page=30") || status=$?
+  case $status in
+    0) ;;
+    "$GITHUB_LOOKUP_NOT_FOUND") return "$GITHUB_LOOKUP_UNREACHABLE" ;;
+    *) return "$status" ;;
+  esac
+  line=$(github_release_candidates <<< "$list" |
+    awk -F '\t' -v cutoff="$RELEASE_CUTOFF_ISO" '$2 <= cutoff { print; exit }')
+  [[ -n $line ]] || return "$GITHUB_LOOKUP_TOO_NEW"
+  IFS=$'\t' read -r RELEASE_TAG RELEASE_PUBLISHED <<< "$line"
+  RELEASE_TAG_CACHE+="$repository"$'\t'"$line"$'\n'
+}
+
+# release_asset_name <asset|template> <tag>: the asset name, with {version}
+# (the tag's version: bun-v1.3.2 -> 1.3.2), {os} (Linux or Darwin) and {arch}
+# (x86_64 or arm64) filled in.
+release_asset_name() {
+  local name=$1 version os arch
+  local version_field='{version}' os_field='{os}' arch_field='{arch}'
+  version=$(release_version "$2")
+  os=$(uname -s)
+  case $(uname -m) in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x86_64 ;;
+    *) arch=$(uname -m) ;;
+  esac
+  name=${name//$version_field/$version}
+  name=${name//$os_field/$os}
+  name=${name//$arch_field/$arch}
+  printf '%s\n' "$name"
+}
+
+# github_release_pick <owner/repo> <asset|template>: RELEASE_TAG,
+# RELEASE_PUBLISHED, RELEASE_URL and RELEASE_SHA (hex, no prefix) become the
+# asset in the release github_release_tag_pick chooses, read from
+# releases/tags/<tag> with the digest GitHub computed for it. Same calling
+# rules and statuses as github_release_tag_pick; a release without the asset,
+# without a SHA-256 digest or with a download outside github.com dies.
+github_release_pick() {
+  local repository=$1 template=$2 asset line json record tag url digest status=0 key
+  github_release_tag_pick "$repository" || return $?
+  asset=$(release_asset_name "$template" "$RELEASE_TAG")
+  line=$(awk -F '\t' -v key="$repository" -v asset="$asset" -v tag="$RELEASE_TAG" \
+    '$1 == key && $2 == asset && $3 == tag { print; exit }' <<< "$RELEASE_ASSET_CACHE")
+  if [[ -n $line ]]; then
+    IFS=$'\t' read -r key key key RELEASE_URL RELEASE_SHA <<< "$line"
+    return 0
+  fi
+  json=$(github_api_get "repos/$repository/releases/tags/$RELEASE_TAG") || status=$?
+  case $status in
+    0) ;;
+    "$GITHUB_LOOKUP_NOT_FOUND") return "$GITHUB_LOOKUP_UNREACHABLE" ;;
+    *) return "$status" ;;
+  esac
   record=$(github_release_asset_record "$asset" <<< "$json") ||
-    die "The latest $repository release has no $asset"
+    die "The $repository release $RELEASE_TAG has no $asset"
   IFS=$'\t' read -r tag url digest <<< "$record"
+  [[ $tag == "$RELEASE_TAG" ]] || die "GitHub returned release $tag of $repository, not $RELEASE_TAG"
   [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || die "GitHub publishes no SHA-256 digest for $asset in $repository $tag"
   [[ $url == https://github.com/* ]] || die "Unexpected download URL for $asset in $repository: $url"
-  printf '%s\t%s\t%s\n' "$tag" "$url" "${digest#sha256:}"
+  RELEASE_URL=$url
+  RELEASE_SHA=${digest#sha256:}
+  RELEASE_ASSET_CACHE+="$repository"$'\t'"$asset"$'\t'"$RELEASE_TAG"$'\t'"$RELEASE_URL"$'\t'"$RELEASE_SHA"$'\n'
+}
+
+# release_attestation_published <owner/repo> <sha256>: gh is logged in and
+# the repository publishes a GitHub attestation for that digest. Returns 2
+# when GitHub cannot say (any answer but 200 or 404).
+release_attestation_published() {
+  local status=0
+  gh_logged_in || return 1
+  github_api_token
+  github_api_get "repos/$1/attestations/sha256:$2" >/dev/null || status=$?
+  case $status in
+    0) return 0 ;;
+    "$GITHUB_LOOKUP_NOT_FOUND") return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# release_attestation_check <owner/repo> <file> <sha256>: after the digest
+# check, when gh is logged in: a repository that publishes an attestation for
+# the file must have it verify (gh attestation verify, which checks the
+# Sigstore signature and that the repository's workflow built the file).
+# One that publishes none (404) relies on the digest alone. RELEASE_VERIFIED_BY
+# becomes attestation or digest.
+RELEASE_VERIFIED_BY=""
+release_attestation_check() {
+  local repository=$1 file=$2 sha=$3 status=0 output
+  RELEASE_VERIFIED_BY=digest
+  release_attestation_published "$repository" "$sha" || status=$?
+  case $status in
+    0) ;;
+    1) return 0 ;;
+    *) die "Could not read $repository's attestations for ${file##*/} from GitHub; nothing was installed. Rerun, or log out of gh (gh auth logout) to rely on GitHub's SHA-256 digest alone." ;;
+  esac
+  if ! gh attestation verify --help >/dev/null 2>&1; then
+    warn "$repository publishes attestations, but this gh cannot verify them (gh attestation needs gh 2.49 or later); relying on GitHub's SHA-256 digest"
+    return 0
+  fi
+  if ! output=$(gh attestation verify "$file" --repo "$repository" 2>&1); then
+    printf '%s\n' "$output" | sed 's/^/  gh: /' >&2
+    die "${file##*/} does not verify against $repository's attestation; nothing was installed"
+  fi
+  RELEASE_VERIFIED_BY=attestation
 }
 
 # github_release_asset_record <asset> < release.json: "<tag><TAB><url><TAB><digest>".
@@ -436,16 +727,18 @@ release_version() {
   printf '%s\n' "${tag#"${tag%%[0-9]*}"}"
 }
 
-# install_archive_binary <tool> <zip|tar.gz> <url> <sha256> <destination> [extra...]:
-# download the verified archive and install its <tool> executable at
+# install_archive_binary <tool> <zip|tar.gz> <url> <sha256> <destination> <owner/repo> [extra...]:
+# download the archive, verify its digest and (release_attestation_check) the
+# repository's attestation, and install its <tool> executable at
 # <destination>, and each extra executable beside it.
 install_archive_binary() {
-  local tool=$1 extension=$2 url=$3 sha=$4 destination=$5 temp archive binary extra
-  shift 5
+  local tool=$1 extension=$2 url=$3 sha=$4 destination=$5 repository=$6 temp archive binary extra
+  shift 6
   temp=$(mktemp -d)
   track_temp "$temp"
   archive="$temp/$tool.$extension"
   download_verified "$url" "$sha" "$archive"
+  release_attestation_check "$repository" "$archive" "$sha"
   mkdir -p "$temp/extract"
   case $extension in
     zip) unzip -q "$archive" -d "$temp/extract" ;;
@@ -497,9 +790,11 @@ artifact_path() {
 
 # artifact_install <name> [directory]: install a registry artifact from its
 # source (artifact_source). Release and pinned artifacts go into ~/.local/bin,
-# or the directory.
+# or the directory. A release artifact is the newest release at least
+# MIN_RELEASE_AGE days old (github_release_pick); that can be older than the
+# installed copy, which is then replaced by it.
 artifact_install() {
-  local name=$1 directory=${2:-$HOME/.local/bin} url sha main record repository asset tag version present=1 executable
+  local name=$1 directory=${2:-$HOME/.local/bin} url sha main record repository asset version present=1 executable
   local lookup_status=0
   local -a executables=()
   artifact_row "$name"
@@ -517,47 +812,50 @@ artifact_install() {
       record=$(artifact_release_asset "$name") || die "$name publishes no Linux build for $(uname -m)"
       IFS=$'\t' read -r repository asset <<< "$record"
       if [[ $DRY_RUN -eq 1 ]]; then
-        say "Would install the latest $name release ($asset from github.com/$repository), checked against GitHub's SHA-256 digest"
+        say "Would install the newest $name release at least $MIN_RELEASE_AGE days old ($asset from github.com/$repository), checked against GitHub's SHA-256 digest and, when gh is logged in, its attestation"
         return 0
       fi
-      record=$(github_latest_asset "$repository" "$asset") || lookup_status=$?
+      github_release_pick "$repository" "$asset" || lookup_status=$?
       if (( lookup_status != 0 )); then
         artifact_release_unavailable "$name" "$repository" "$lookup_status"
         return 0
       fi
-      IFS=$'\t' read -r tag url sha <<< "$record"
-      version=$(release_version "$tag")
+      version=$(release_version "$RELEASE_TAG")
       for executable in "${executables[@]}"; do
         [[ -x $directory/$executable ]] || present=0
       done
       if (( present )) && artifact_version_ok "$name" "$directory/$main" "$version"; then
-        say "$name $version is the latest release and already installed"
+        say "$name $version is already installed (the newest release at least $MIN_RELEASE_AGE days old, published $RELEASE_PUBLISHED)"
         return 0
       fi
-      install_archive_binary "$main" "$ARTIFACT_ARCHIVE" "$url" "$sha" "$directory/$main" ${executables[1]+"${executables[@]:1}"}
-      artifact_version_ok "$name" "$directory/$main" "$version" || die "$name does not report version $version after installation" ;;
+      install_archive_binary "$main" "$ARTIFACT_ARCHIVE" "$RELEASE_URL" "$RELEASE_SHA" "$directory/$main" "$repository" \
+        ${executables[1]+"${executables[@]:1}"}
+      artifact_version_ok "$name" "$directory/$main" "$version" || die "$name does not report version $version after installation"
+      say "Installed $name $version (published $RELEASE_PUBLISHED; verified by $RELEASE_VERIFIED_BY)" ;;
   esac
 }
 
-# artifact_release_unavailable <name> <owner/repo> <status>: the latest
-# release could not be read (github_latest_asset's status). A copy that is
-# installed and verifies is kept with a warning: a GitHub outage or the API's
-# rate limit must not fail a run that only re-checks tools. Without one, it
-# dies, naming GITHUB_TOKEN when the API refused the request.
+# artifact_release_unavailable <name> <owner/repo> <status>: no release could
+# be picked (github_release_pick's status). A copy that is installed and
+# verifies is kept with a warning: a GitHub outage, the API's rate limit or a
+# run of very new releases must not fail a run that only re-checks tools.
+# Without one, it dies, naming GITHUB_TOKEN when the API refused the request.
 artifact_release_unavailable() {
-  local name=$1 repository=$2 status=$3
+  local name=$1 repository=$2 status=$3 reason
   case $status in
-    "$GITHUB_LOOKUP_UNREACHABLE"|"$GITHUB_LOOKUP_REFUSED") ;;
-    *) exit 1 ;;  # github_latest_asset died and said why
+    "$GITHUB_LOOKUP_TOO_NEW") reason="none of $repository's 30 newest releases is at least $MIN_RELEASE_AGE days old" ;;
+    "$GITHUB_LOOKUP_REFUSED") reason="GitHub refused the request (HTTP 403/429), most likely the anonymous API rate limit of 60 requests an hour" ;;
+    *) reason="could not read $repository's releases from GitHub" ;;
   esac
   if artifact_verify "$name"; then
-    warn "kept the installed $name; could not reach GitHub releases"
+    warn "kept the installed $name: $reason"
     return 0
   fi
-  if [[ $status == "$GITHUB_LOOKUP_REFUSED" ]]; then
-    die "Could not read the latest $repository release: GitHub refused the request (HTTP 403/429), most likely the anonymous API rate limit of 60 requests an hour. Set GITHUB_TOKEN (for example GITHUB_TOKEN=\$(gh auth token)) and rerun."
-  fi
-  die "Could not read the latest $repository release from GitHub; check the network and rerun"
+  case $status in
+    "$GITHUB_LOOKUP_TOO_NEW") die "Could not install $name: $reason. Rerun with a smaller --min-release-age." ;;
+    "$GITHUB_LOOKUP_REFUSED") die "Could not install $name: $reason. Set GITHUB_TOKEN (for example GITHUB_TOKEN=\$(gh auth token)), or log in with gh, and rerun." ;;
+    *) die "Could not install $name: $reason; check the network and rerun" ;;
+  esac
 }
 
 # artifact_verify <name>: the artifact is installed from its source: the

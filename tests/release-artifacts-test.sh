@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Resolve, download and run the tools the installer takes from upstream, for
-# this runner's platform: on Linux the latest GitHub releases (checked against
-# GitHub's digests) and npm's latest Yarn and pnpm; on macOS, that every
-# Homebrew formula exists. Also the two pinned files and the latest Nerd Fonts
-# release. Needs network; set GITHUB_TOKEN to avoid the API's anonymous limit.
+# this runner's platform: on Linux the GitHub releases github_release_pick
+# chooses (the newest at least the default minimum release age old, checked
+# against GitHub's digests and, with gh logged in, attestations) and npm's
+# latest Yarn and pnpm; on macOS, that every Homebrew formula exists. Also the
+# two pinned files and the picked Nerd Fonts release. Needs network; set
+# GITHUB_TOKEN to avoid the API's anonymous limit.
 # shellcheck disable=SC1091,SC2034,SC2329
 
 set -Eeuo pipefail
@@ -37,7 +39,7 @@ download_verified "$GH_APT_KEYRING_URL" "$GH_APT_KEYRING_SHA256" "$TEST_HOME/git
 printf 'verified pinned GitHub CLI apt keyring\n'
 
 # Every release asset the registry names, for both Linux CPUs, exists in its
-# project's latest release with a GitHub digest (from any host, so a renamed
+# project's picked release with a GitHub digest (from any host, so a renamed
 # asset shows up on the macOS runners too).
 while IFS= read -r artifact; do
   [[ $(OS_FAMILY=apt artifact_source "$artifact") == release ]] || continue
@@ -46,10 +48,10 @@ while IFS= read -r artifact; do
     record=$(artifact_release_asset "$artifact")
     unset -f uname
     IFS=$'\t' read -r repository asset <<< "$record"
-    record=$(github_latest_asset "$repository" "$asset") ||
-      die "Could not read the latest $repository release (status $?; set GITHUB_TOKEN past the rate limit)"
-    IFS=$'\t' read -r tag url digest <<< "$record"
-    printf 'resolved %s %s (%s)\n' "$artifact" "$(release_version "$tag")" "$asset"
+    status=0
+    github_release_pick "$repository" "$asset" || status=$?
+    (( status == 0 )) || die "Could not pick a $repository release (status $status; set GITHUB_TOKEN past the rate limit)"
+    printf 'resolved %s %s, published %s (%s)\n' "$artifact" "$(release_version "$RELEASE_TAG")" "$RELEASE_PUBLISHED" "$asset"
   done
 done < <(artifact_names)
 
@@ -72,7 +74,7 @@ else
     [[ $(artifact_source "$artifact") == release ]] || continue
     artifact_install "$artifact" "$TEST_HOME/bin"
     out=$(artifact_install "$artifact" "$TEST_HOME/bin")
-    [[ $out == *"is the latest release and already installed"* ]] || die "$artifact was downloaded again: $out"
+    [[ $out == *"is already installed (the newest release"* ]] || die "$artifact was downloaded again: $out"
     printf 'installed %s\n' "$("$TEST_HOME/bin/$artifact" --version | sed -n '1p')"
   done < <(artifact_names)
   "$TEST_HOME/bin/uvx" --version >/dev/null
@@ -100,7 +102,7 @@ else
   done
 fi
 
-# Nerd Fonts: the latest release's checksum list, a real font archive verified
+# Nerd Fonts: the picked release's checksum list, a real font archive verified
 # against it, and an unknown name rejected before any archive download.
 install_nerd_font JetBrainsMono
 FONT_NAME=JetBrainsMono INSTALL_FONTS=yes verify_fonts

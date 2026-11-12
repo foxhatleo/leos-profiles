@@ -38,15 +38,19 @@ signature_packages() {
   join_lines ${SELECTED_PACKAGES[@]+"${SELECTED_PACKAGES[@]}"}
 }
 
+# Git sources record `release` (since 2026-11; `default-branch` before, so
+# existing checkouts re-run once and move to their release). Never the
+# minimum release age or the tag: a new upstream release must not make a step
+# look undone.
 signature_pyenv() {
   local material="" asset
-  material+="|$PYENV_REPOSITORY|default-branch"
+  material+="|$PYENV_REPOSITORY|release"
   printf '%s' "$material"
 }
 
 signature_rbenv() {
   local material="" asset
-  material+="|$RBENV_REPOSITORY|$RUBY_BUILD_REPOSITORY|default-branch"
+  material+="|$RBENV_REPOSITORY|$RUBY_BUILD_REPOSITORY|release"
   printf '%s' "$material"
 }
 
@@ -75,16 +79,16 @@ signature_fnm() {
 signature_plugins() {
   printf '|%s' "$TARGET"
   artifact_signature starship
-  printf '|%s|%s|%s|%s|default-branch' "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" \
+  printf '|%s|%s|%s|%s|release' "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" \
     "$ZSH_COMPLETIONS_REPOSITORY" "$FZF_TAB_REPOSITORY"
 }
 
-# The release URL text is the moving "latest" one on purpose: the run
-# downloads from the tag it resolves, but recording that tag (or a new URL)
-# would make every existing install look undone.
+# The URL text is the old "latest release" one on purpose: the run downloads
+# from the tag it picks, but recording that tag (or a new URL) would make
+# every existing install look undone.
 signature_fonts() {
   local material="" asset
-  material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_RELEASE_URL"
+  material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_SIGNATURE_URL"
   printf '%s' "$material"
 }
 

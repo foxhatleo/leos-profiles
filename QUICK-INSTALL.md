@@ -58,7 +58,9 @@ installer is only your deterministic execution engine.
    imply fnm; install fnm before either npm tool.
 6. Ask conditional choices in later stages of no more than three questions:
    fonts; full initial host upgrade (on macOS, also whether it upgrades
-   Homebrew casks: `--upgrade-casks`, off by default); default-shell policy;
+   Homebrew casks: `--upgrade-casks`, off by default); how old a release must
+   be before it installs (`--min-release-age <days>`, default 7; offer the
+   default unless the user asks); default-shell policy;
    SSH; GPG; missing Git identity; and exact key selection. SSH and GPG must have **Skip**
    preselected. Reuse must select one specifically discovered key. Never pick
    a key for the user. For generation, explain both passphrase policies:
@@ -83,17 +85,20 @@ installer is only your deterministic execution engine.
    - external repositories (`action repository` records: RPM Fusion on
      Fedora with `media`, GitHub CLI's apt repository on Debian/Ubuntu with
      `dev-tools`) and where each tool comes from (`artifact` records):
-     Homebrew formulae on macOS, latest GitHub releases checked against
-     GitHub's digests on Linux, default-branch Git checkouts, and the pinned
-     downloads (including GitHub CLI's apt keyring); say that tools follow
-     upstream, so a full upgrade moves them forward;
+     Homebrew formulae on macOS, on Linux the GitHub release each
+     `release` record names (the newest at least `--min-release-age` days
+     old, checked against GitHub's digest or attestation), Git checkouts at a
+     tag or commit at least that old, and the pinned downloads (including
+     GitHub CLI's apt keyring); say that tools follow upstream with that
+     delay, so a full upgrade moves them forward, and relay a
+     `release-age-homebrew`/`release-age-npm` warning;
    - the Node version: the current LTS fnm will install, or the installed
      default a run without a full upgrade keeps;
    - credential actions, selected references, and manual GitHub registration
      or SSH configuration steps;
    - any profile-schema migration and every `migration` record (pinned
      `~/.local/bin`/`~/.local/npm` copies that Homebrew replaces on macOS, and
-     checkouts moving from a pinned commit to their default branch);
+     checkouts moving from their default branch to a release);
    - files and managed blocks, global Git settings, shell changes, and every
      irreversible (`irreversible`) or root (`privileged`) action and side
      effect (`behaviour`);

@@ -76,6 +76,8 @@ case "$name" in
   pacman)
     case "$1" in -Q*) exit 1 ;; esac ;;
   curl|wget|fnm|node) exit 7 ;;
+  # Logged out: inspect asks gh for a token to read GitHub's API with.
+  gh) [ "$1" = auth ] && [ "$2" = token ] && exit 1 ;;
   # The preflight's credential probe changes nothing; answer as a host where
   # sudo needs a password.
   sudo) [ "$*" = '-n true' ] && exit 1 ;;
@@ -183,6 +185,7 @@ grep -qxF $'migration\tlegacy-loader\t'"$FIXTURE_HOME/.zshrc"$'\tloader' <<< "$O
 grep -qxF $'migration\tlegacy-environment\t'"$FIXTURE_HOME/.zshenv"$'\tenvironment' <<< "$OUTPUT" ||
   fail 'inspect did not report the legacy .zshenv snippet'
 grep -qxF $'file\tzshrc\t'"$FIXTURE_HOME/.zshrc" <<< "$OUTPUT" || fail 'inspect did not disclose the .zshrc path'
+grep -qxF $'policy\trelease-age\t7' <<< "$OUTPUT" || fail 'inspect did not disclose the minimum release age'
 grep -q $'^existing\toh-my-zsh\t'"$FIXTURE_HOME/.oh-my-zsh"$'\t' <<< "$OUTPUT" || fail 'inspect did not disclose oh-my-zsh'
 grep -q $'^existing\tnvm\t'"$FIXTURE_HOME/.nvm"$'\t' <<< "$OUTPUT" || fail 'inspect did not disclose nvm'
 if [[ $(uname -s) == Darwin ]]; then
@@ -194,7 +197,7 @@ run_read_only 'inspect (credentials and every component)' 0 inspect \
   --fonts yes --font JetBrainsMono --ssh generate --gpg generate \
   --git-name 'Fixture User' --git-email fixture@example.invalid
 check_tsv 'inspect (credentials and every component)' "$OUTPUT"
-for record in artifact external file global irreversible runtime; do
+for record in artifact external file global irreversible runtime release; do
   grep -q "^$record"$'\t' <<< "$OUTPUT" || fail "full inspect emitted no $record record"
 done
 
