@@ -270,10 +270,10 @@ When GitHub cannot be reached (or refuses, at that limit), a tool that is
 already installed and works is kept with a warning; only a missing or broken
 one stops the run.
 
-On macOS the full upgrade runs `brew update` and `brew upgrade` (formulae). It
-upgrades casks (GUI apps; some cask installers ask for sudo) only with
-`--upgrade-casks`, which apply saves for later reconciles; `bye`'s
-`brew-checkup` still upgrades casks as before.
+On macOS the full upgrade runs `brew update` and `brew upgrade --formula` (a
+bare `brew upgrade` would include casks). It upgrades casks (GUI apps; some
+cask installers ask for sudo) only with `--upgrade-casks`, which apply saves
+for later reconciles; `bye`'s `brew-checkup` still upgrades casks as before.
 
 Two downloads stay pinned to a reviewed URL and SHA-256 digest rather than
 following upstream: Homebrew's installer script (it runs once, on a Mac
@@ -286,13 +286,17 @@ old (2.4 on Ubuntu 22.04, 2.23 on Debian 12). The packages step installs its
 keyring, checked against the SHA-256 GitHub publishes, as
 `/etc/apt/keyrings/githubcli-archive-keyring.gpg` and its source line as
 `/etc/apt/sources.list.d/github-cli.list`, before the apt install; the plan
-lists both as a root action. An existing correct setup, or any other apt
-source for that repository, is left as it is. A gh installed earlier from the
+lists both as a root action. An existing correct setup, or any other enabled
+apt source for that repository, is left as it is. A disabled one (a deb822
+stanza with `Enabled: no`, or a commented-out line) does not count: setup
+adds its own source next to it, and the plan warns about it. A gh installed
+earlier from the
 distribution moves to the repository's version on the next full upgrade.
 
 Equivalent GitHub HTTPS/SSH origins are accepted and normalized; dirty
-installer-managed checkouts, and checkouts at a commit made locally, are
-refused rather than overwritten.
+installer-managed checkouts, and checkouts at a commit made locally or with a
+local tag on one (the update deletes tags origin does not have), are refused
+rather than overwritten. Keep such work on a branch and delete the tag.
 
 Machines set up before 2026-10 carry pinned copies. Inspect reports each
 as a `migration` record and the next approved run moves it: on macOS the
