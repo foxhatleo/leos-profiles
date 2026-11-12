@@ -117,11 +117,45 @@ release_checkout_target() {
   esac
 }
 
+# checkout_local_work <checkout> <repository>: what in the checkout origin
+# never had, read before a fetch prunes or moves anything. Prints `head
+# <commit>` when the checked-out commit is one, and `tag <name> <commit>` for
+# each local tag on one. Evidence that a commit was published: the
+# remote-tracking branches as of the last fetch (so commits upstream later
+# force-pushed away still count), and the commits origin's tags point at now,
+# from ls-remote. Local tags are not evidence: one made here would otherwise
+# vouch for its own commit, and the pruning fetch then deletes it. Returns 2
+# when origin's tags cannot be read, 1 when Git cannot compare.
+checkout_local_work() {
+  local directory=$1 repository=$2 remote_tags published unpublished head
+  remote_tags=$(git -C "$directory" ls-remote --tags "$repository") || return 2
+  # A tag's own object and its peeled ^{} line; keep the commits this checkout
+  # has (a commit it has not fetched cannot be an ancestor of its work).
+  published=$(awk -F '\t' 'NF >= 2 { print $1 }' <<< "$remote_tags" |
+    git -C "$directory" cat-file --batch-check='%(objectname) %(objecttype)' |
+    awk '$2 == "commit" { print "^" $1 }') || return 1
+  unpublished=$(printf '%s\n' "$published" |
+    git -C "$directory" rev-list --stdin HEAD --tags --not --remotes=origin) || return 1
+  [[ -n $unpublished ]] || return 0
+  head=$(git -C "$directory" rev-parse --verify --quiet HEAD) || return 1
+  if grep -Fqx -- "$head" <<< "$unpublished"; then printf 'head\t%s\n' "$head"; fi
+  # The unpublished commits, a `--` line, then the tags (BSD awk refuses a
+  # newline in a -v value).
+  { printf '%s\n--\n' "$unpublished"
+    git -C "$directory" for-each-ref --format='%(refname)%09%(objectname)%09%(*objectname)' refs/tags
+  } | awk -F '\t' '
+      !tags { if ($0 == "--") tags = 1; else local_commit[$0] = 1; next }
+      {
+        commit = ($3 != "") ? $3 : $2
+        if (commit in local_commit) { tag = $1; sub(/^refs\/tags\//, "", tag); printf "tag\t%s\t%s\n", tag, commit }
+      }'
+}
+
 # follow_release_checkout <PREFIX> <destination> <label>: a checkout of
 # <PREFIX>_REPOSITORY, detached at what <PREFIX>_FOLLOW picks. A missing one is
 # cloned; an existing one must be a clean checkout of the same repository.
 follow_release_checkout() {
-  local prefix=$1 destination=$2 label=$3 repository_var mode_var repository mode describe origin unpublished head
+  local prefix=$1 destination=$2 label=$3 repository_var mode_var repository mode describe origin unpublished head local_work status
   repository_var=${prefix}_REPOSITORY
   mode_var=${prefix}_FOLLOW
   repository=${!repository_var}
@@ -139,14 +173,25 @@ follow_release_checkout() {
     origin=$(git -C "$destination" remote get-url origin 2>/dev/null || true)
     github_origins_equivalent "$origin" "$repository" || die "$label checkout has an unexpected origin: $destination"
     [[ -z $(git -C "$destination" status --porcelain) ]] || die "$label checkout has local changes: $destination"
-    # Before fetching, while the remote-tracking refs and tags still hold what
-    # origin had at the last fetch: a checked-out commit that none of them
-    # contains was made here. (Commits upstream later force-pushed away were
-    # origin's at that point, so they do not count.)
-    unpublished=$(git -C "$destination" rev-list HEAD --not --remotes=origin --tags) ||
+    # Before fetching: the fetch prunes local tags and the checkout then moves
+    # HEAD, so a commit made here, checked out or tagged, would be left on no
+    # branch or tag.
+    status=0
+    local_work=$(checkout_local_work "$destination" "$repository") || status=$?
+    if [[ $status -eq 2 && $DRY_RUN -eq 1 ]]; then
+      warn "Could not read $label's tags from $repository; the real run checks $destination for local work before fetching."
+      local_work=""
+    elif [[ $status -eq 2 ]]; then
+      die "Could not read $label's tags from $repository"
+    elif [[ $status -ne 0 ]]; then
       die "Could not compare $label with $repository: $destination"
-    [[ -z $unpublished ]] ||
-      die "$label has commits that are not on $repository: $destination (for example $(sed -n '1p' <<< "$unpublished")). Nothing was changed; keep them on a branch of your own, check out a commit from origin and rerun."
+    fi
+    if [[ -n $local_work ]]; then
+      unpublished=$(awk -F '\t' '
+        $1 == "head" { printf "%sHEAD at %s", sep, $2; sep = "; " }
+        $1 == "tag" { printf "%stag %s at %s", sep, $2, $3; sep = "; " }' <<< "$local_work")
+      die "$label has commits that are not on $repository: $destination ($unpublished). Nothing was changed: the update deletes tags origin does not have and moves HEAD. Keep the work on a branch of your own (git -C $destination branch <name> <commit>), delete those tags (git -C $destination tag -d <tag>), check out a commit from origin and rerun."
+    fi
     if [[ $origin != "$repository" ]]; then
       run git -C "$destination" remote set-url origin "$repository"
     fi

@@ -1088,6 +1088,78 @@ test_follow_release_checkout_protects_local_work() {
   rm -rf "$temp"
 }
 
+# A local tag is not evidence that origin has a commit: a fix committed and
+# tagged on the detached checkout stops the step before the fetch (which
+# prunes tags) deletes the tag and the checkout leaves the commit behind.
+test_follow_release_checkout_keeps_local_tags() {
+  local temp out checkout fix
+  temp=$(mktemp -d)
+  git() { fixture_git "$@"; }
+  github_origins_equivalent() { [[ $1 == "$2" ]]; }
+  fix_now
+  DRY_RUN=0
+  MIN_RELEASE_AGE=7
+  make_release_upstream "$temp"
+  checkout="$temp/plugins/tool"
+  FIXTURE_FOLLOW=tag
+  follow_release_checkout FIXTURE "$checkout" tool >/dev/null
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$C2"
+  fix=$(fixture_commit "$checkout" fix)
+  git -C "$checkout" tag my-fix
+  out=$( (follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a checkout at a locally tagged commit was moved"
+  assert_contains "$out" "tool has commits that are not on $FIXTURE_REPOSITORY"
+  assert_contains "$out" "HEAD at $fix; tag my-fix at $fix"
+  assert_contains "$out" "git -C $checkout tag -d <tag>"
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$fix"
+  assert_equals "$(git -C "$checkout" rev-parse --verify --quiet refs/tags/my-fix)" "$fix"
+  # Back at origin's release, the tag alone still holds the only copy.
+  git -C "$checkout" checkout -q --detach "$C2"
+  git -C "$checkout" tag -a -m 'annotated fix' my-fix-annotated "$fix"
+  out=$( (follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a local tag on a local commit was pruned"
+  assert_contains "$out" "(tag my-fix at $fix; tag my-fix-annotated at $fix)"
+  [[ $out != *"HEAD at"* ]] || fail "HEAD at origin's release was reported as local work: $out"
+  assert_equals "$(git -C "$checkout" rev-parse --verify --quiet 'refs/tags/my-fix-annotated^{commit}')" "$fix"
+  out=$( (DRY_RUN=1; follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a dry run accepted a local tag"
+  assert_contains "$out" "tag my-fix at $fix"
+  # Kept on a branch, with the tags deleted, the step goes ahead and the
+  # branch survives.
+  git -C "$checkout" branch my-work "$fix"
+  git -C "$checkout" tag -d my-fix my-fix-annotated >/dev/null
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "tool is at v1.1.0"
+  assert_equals "$(git -C "$checkout" rev-parse my-work)" "$fix"
+  rm -rf "$temp"
+}
+
+# Origin's own tags are evidence: a release tagged on a commit that is on no
+# branch upstream is published, even when the checkout has no tag for it.
+test_follow_release_checkout_trusts_origin_tags() {
+  local temp out checkout side
+  temp=$(mktemp -d)
+  git() { fixture_git "$@"; }
+  github_origins_equivalent() { [[ $1 == "$2" ]]; }
+  fix_now
+  DRY_RUN=0
+  MIN_RELEASE_AGE=0
+  make_release_upstream "$temp"
+  fixture_git -C "$FIXTURE_WORK" checkout -q -b side "$C4"
+  side=$(dated_commit "$FIXTURE_WORK" side 0 v1.3.0)
+  fixture_git -C "$FIXTURE_WORK" push -q "$FIXTURE_REPOSITORY" refs/tags/v1.3.0
+  checkout="$temp/plugins/tool"
+  FIXTURE_FOLLOW=tag
+  follow_release_checkout FIXTURE "$checkout" tool >/dev/null
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$side"
+  [[ -z $(git -C "$checkout" branch -r --contains "$side") ]] || fail "the fixture's release is on a branch"
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "tool is at v1.3.0"
+  # Without the local tag the commit is still origin's.
+  git -C "$checkout" tag -d v1.3.0 >/dev/null
+  out=$(follow_release_checkout FIXTURE "$checkout" tool) || fail "a commit origin tags was taken for local work"
+  assert_contains "$out" "tool is at v1.3.0"
+  assert_equals "$(git -C "$checkout" rev-parse --verify --quiet 'refs/tags/v1.3.0^{commit}')" "$side"
+  rm -rf "$temp"
+}
+
 # Every Git source has a follow mode, and the modes are the ones chosen:
 # commits for the two plugins whose tags lag years behind, ruby-build's
 # definitions without delay.
@@ -3509,6 +3581,8 @@ TESTS=(
   test_equivalent_github_origins
   test_follow_release_checkout_picks_by_mode_and_age
   test_follow_release_checkout_protects_local_work
+  test_follow_release_checkout_keeps_local_tags
+  test_follow_release_checkout_trusts_origin_tags
   test_git_sources_have_follow_modes
   test_git_checkout_at_release_rejects_branch_and_foreign_checkouts
   test_recommended_and_whole_group_closure

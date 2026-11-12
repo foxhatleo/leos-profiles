@@ -381,11 +381,17 @@ an ISO-8601 UTC string that compares with GitHub's `published_at` as text
   zsh-syntax-highlighting, whose last tags are from 2024 and 2023) or
   `tag-now` (the newest stable tag, no delay: ruby-build, so a Ruby security
   release is installable at once). A checkout may move backwards. Before
-  fetching, it refuses uncommitted changes and a checked-out commit that no
-  remote-tracking branch or tag contains (work made locally); a commit upstream
-  later force-pushed away is not local work, and the step says upstream
-  rewrote its history and moves on. The fetch prunes tags, so a tag upstream
-  deleted is not picked.
+  fetching, it refuses uncommitted changes, and (`checkout_local_work`) a
+  checked-out commit or a local tag on a commit that origin does not have:
+  none of the remote-tracking branches as of the last fetch, nor the tags
+  `git ls-remote --tags` reports origin has now, contains it. Local tags are
+  not evidence, since the fetch prunes tags: a fix tagged on the detached
+  checkout would otherwise pass, lose its tag and be left behind. A commit
+  upstream later force-pushed away is not local work (the remote-tracking
+  branches still hold it), and the step says upstream rewrote its history and
+  moves on; a local tag upstream deleted or moved, on a commit no branch
+  holds, stops the step until it is deleted. The fetch prunes tags, so a tag
+  upstream deleted is not picked.
 - **Not gated**: Homebrew formulae and OS packages (their package managers'
   current versions; inspect warns about formulae), npm's Yarn and pnpm, and
   Node (the current LTS). The bootstrap and raw URLs on `master` are not
