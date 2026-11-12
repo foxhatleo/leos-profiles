@@ -1866,6 +1866,14 @@ test_fedora_media_swaps_only_ffmpeg() {
   SELECTED_GROUPS=core-utils
   out=$(install_os_packages)
   [[ $out != *rpmfusion* && $out != *swap* && $out != *allowerasing* ]] || fail "a non-media install touched RPM Fusion: $out"
+  # No ffmpeg-free, but Fedora's split -free libraries may still be present as
+  # other packages' dependencies: the plain install replaces them, scoped.
+  DRY_RUN=0
+  run_root() { printf '+ %s\n' "$*"; }
+  pkg_install() { printf '+ pkg_install %s\n' "$*"; }
+  out=$(fedora_install_media ImageMagick ffmpeg)
+  assert_contains "$out" "+ dnf install -y --allowerasing ffmpeg"
+  [[ $(grep -c -- --allowerasing <<< "$out") == 1 ]] || fail "--allowerasing reached another command: $out"
 }
 
 # Debian/Ubuntu dev-tools take gh from GitHub CLI's apt repository: the

@@ -258,8 +258,13 @@ pkg_install() {
 # Fedora ships ffmpeg-free; the media group's full ffmpeg comes from RPM
 # Fusion. Everything else installs normally. ffmpeg alone then replaces
 # ffmpeg-free with `dnf swap ... --allowerasing`, RPM Fusion's documented
-# method, so package removal is scoped to that swap (SEC-4).
+# method, so package removal is scoped to that swap (SEC-4). Without
+# ffmpeg-free, Fedora's split libraries (libswresample-free, libavcodec-free,
+# ...) can still be installed as other packages' dependencies, and they
+# conflict with RPM Fusion's ffmpeg-libs; the plain install then needs the
+# same scoped --allowerasing to replace them.
 FEDORA_FFMPEG_SWAP=(dnf swap -y ffmpeg-free ffmpeg --allowerasing)
+FEDORA_FFMPEG_INSTALL=(dnf install -y --allowerasing ffmpeg)
 fedora_install_media() {
   local package
   local -a others=()
@@ -275,7 +280,7 @@ fedora_install_media() {
     if [[ $DRY_RUN -eq 1 ]] || rpm -q ffmpeg-free >/dev/null 2>&1; then
       run_root "${FEDORA_FFMPEG_SWAP[@]}"
     else
-      run_root dnf install -y ffmpeg
+      run_root "${FEDORA_FFMPEG_INSTALL[@]}"
     fi
   fi
 }
