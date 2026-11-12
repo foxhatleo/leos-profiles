@@ -117,7 +117,7 @@ once.
 pyenv/rbenv conflict (unless `--skip-existing-version-managers`), checks
 `--node-version` against a live resolution (exit 2 when they differ), and
 collects what the run needs from the user: when stdin is not a terminal, a
-passphrase prompt, chsh's password prompt (Linux, non-root) or a sudo password
+passphrase prompt or a sudo password (chsh runs as root, so it counts here)
 (`privileged_plan` is not empty and `sudo -n true` fails) ends the run with
 `manual-action run-in-terminal` carrying the exact command line, exit 3, before
 the lock exists. With a terminal, `sudo -v` asks once up front. Dry runs never
@@ -287,7 +287,7 @@ the guard on a workstation.
 
 Linux CI invokes `tests/provisioning-container.sh` inside native-architecture
 containers with the source checkout mounted read-only. Ubuntu 22.04/24.04/26.04,
-Debian 12/13, and Fedora 43/44 run on x86_64 and arm64; Arch runs on x86_64.
+Debian 12/13, and Fedora 44/45 run on x86_64 and arm64; Arch runs on x86_64.
 The containers create a non-root test user and exercise actual package managers.
 macOS CI uses fresh HOME directories on hosted Apple-silicon macOS 15 and 26
 runners (Homebrew Tier 1; macOS 14 and Intel Macs are unsupported). Those images already have developer tools and Homebrew: the

@@ -42,7 +42,7 @@ jobs:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
         # Tags, not digests: provisioning deliberately tests each distro's
         # current image, which is what a new user installs on.
-        image: ['ubuntu:22.04', 'ubuntu:24.04', 'ubuntu:26.04', 'debian:12', 'debian:13', 'fedora:43', 'fedora:44']
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'ubuntu:26.04', 'debian:12', 'debian:13', 'fedora:44', 'fedora:45']
         include:
           - runner: ubuntu-24.04
             image: archlinux:latest
@@ -116,3 +116,29 @@ jobs:
           name: provisioning-${{ matrix.runner }}
           path: ${{ runner.temp }}/provisioning-logs
           if-no-files-found: ignore
+
+  # A red weekly run is easy to miss: nothing blocks on it. Open (or comment on)
+  # one tracking issue so the failure reaches a notification.
+  report-scheduled-failure:
+    name: Report a failed scheduled run
+    needs: [provision-linux, provision-macos]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Scheduled provisioning is failing"
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          body="The scheduled provisioning run failed: $RUN_URL"
+          if [[ -n $number ]]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

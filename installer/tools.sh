@@ -514,6 +514,19 @@ install_fnm() {
   run "$fnm" install "$RESOLVED_NODE_VERSION"
   run "$fnm" default "$RESOLVED_NODE_VERSION"
   run "$fnm" use "$RESOLVED_NODE_VERSION"
+  fnm_node_runs "$fnm"
+}
+
+# fnm_node_runs <fnm>: run the default Node once and show why it does not
+# start (a missing shared library such as libatomic, a wrong architecture).
+# Verification only sees that the version check failed; the loader's message
+# is what tells the user what to fix.
+fnm_node_runs() {
+  local output
+  if ! output=$("$1" exec --using=default -- node --version 2>&1); then
+    printf '%s\n' "$output" | sed 's/^/  node: /' >&2
+    die "Node $RESOLVED_NODE_VERSION was installed but does not run; see the node output above"
+  fi
 }
 
 node_version_ok() { [[ ${1:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }

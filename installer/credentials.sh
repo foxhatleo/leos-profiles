@@ -122,7 +122,13 @@ queue_manual_action() {
 finish_manual_actions() {
   [[ -n $PENDING_MANUAL_ACTIONS ]] || return 0
   printf '%s' "$PENDING_MANUAL_ACTIONS"
-  warn "Manual action required (exit 3). Complete each manual-action record above, then resume with: bash $TARGET/install.sh reconcile --yes"
+  if [[ $PENDING_MANUAL_ACTIONS == *$'manual-action\trun-in-terminal\t'* ]]; then
+    # Preflight stopped before any change and before the profile was saved, so
+    # there is nothing for reconcile to resume: the command itself is the fix.
+    warn "Manual action required (exit 3). Nothing was changed; run the command above in your own terminal. There is nothing to resume."
+  else
+    warn "Manual action required (exit 3). Complete each manual-action record above, then resume with: bash $TARGET/install.sh reconcile --yes"
+  fi
   printf '%s' "$PENDING_MANUAL_EXPLANATIONS" | sed 's/^/  - /' >&2
   exit 3
 }

@@ -1549,6 +1549,7 @@ test_macos_login_path_block() {
 test_package_signature_is_ifs_independent() {
   local expected
   OS_FAMILY=apt
+  SELECTED_STEPS=packages
   SELECTED_GROUPS=shell,system
   # Newline-joined, as recorded by earlier versions, whatever IFS the caller has.
   expected=$'|shell,system|zsh\nsmartmontools'
@@ -1556,6 +1557,21 @@ test_package_signature_is_ifs_independent() {
   assert_equals "$(IFS=,; signature_packages)" "$expected"
   assert_equals "$(IFS=$'\n\t'; signature_packages)" "$expected"
   assert_equals "$(IFS=' '; step_signature packages)" "$(step_signature packages)"
+}
+
+# Official Node binaries for Linux link libatomic; selecting fnm adds the
+# package on the families whose minimal images lack it, and only there.
+test_fnm_pulls_libatomic_where_needed() {
+  SELECTED_GROUPS=""
+  SELECTED_STEPS=packages,fnm
+  OS_FAMILY=apt; collect_selected_packages
+  assert_equals "${SELECTED_PACKAGES[*]-}" libatomic1
+  OS_FAMILY=fedora; collect_selected_packages
+  assert_equals "${SELECTED_PACKAGES[*]-}" libatomic
+  OS_FAMILY=arch; collect_selected_packages
+  assert_equals "${SELECTED_PACKAGES[*]-}" ""
+  OS_FAMILY=apt; SELECTED_STEPS=packages; collect_selected_packages
+  assert_equals "${SELECTED_PACKAGES[*]-}" ""
 }
 
 # ONB-14: an empty package selection crashed Bash 3.2 under set -u when the
@@ -2281,6 +2297,9 @@ test_preflight_without_terminal_stops_before_any_change() {
   assert_equals "$status" 3
   assert_contains "$out" $'manual-action\trun-in-terminal\t\tbash /fixture/install.sh apply --yes'
   assert_contains "$out" "sudo needs a password"
+  # Nothing was saved yet, so the message must not point at reconcile.
+  assert_contains "$out" "There is nothing to resume"
+  [[ $out != *"reconcile --yes"* ]] || fail "run-in-terminal told the user to reconcile: $out"
   assert_equals "$(cat "$SUDO_LOG")" "-n true"
 }
 
@@ -2315,15 +2334,18 @@ test_preflight_refuses_prompts_without_terminal() {
   assert_equals "$status" 3
   assert_contains "$out" "passphrase"
   SSH_MODE=skip
-  # Linux chsh asks for the user's password.
+  # Linux chsh runs as root, so on its own it no longer stops a run without a
+  # terminal: sudo's own check (privileged_plan, stubbed empty here) covers it.
   SELECTED_STEPS=default-shell
   CHANGE_DEFAULT_SHELL=yes
   verify_default_shell() { return 1; }
   command() { if [[ ${1:-} == -v && ${2:-} == chsh ]]; then printf '/usr/bin/chsh\n'; return 0; fi; builtin command "$@"; }
   status=0
   out=$( (preflight) 2>&1 ) || status=$?
-  assert_equals "$status" 3
-  assert_contains "$out" "chsh asks for your password"
+  assert_equals "$status" 0
+  [[ $out != *"chsh asks"* ]] || fail "preflight still blames chsh: $out"
+  # Re-arm a stop so the dry-run assertion below still has one to report.
+  SSH_MODE=generate
   # Dry-run reports the stop instead of exiting, and never calls sudo.
   DRY_RUN=1
   : > "$SUDO_LOG"
@@ -2438,6 +2460,10 @@ test_privileged_and_behaviour_records() {
   preferred_zsh_path() { printf '/fixture/zsh\n'; }
   out=$(privileged_plan)
   assert_contains "$out" $'etc-shells\tsudo append /fixture/zsh to /etc/shells'
+  assert_contains "$out" $'login-shell\tsudo chsh -s /fixture/zsh '"$(id -un)"
+  # Linux changes the login shell as root too (no chsh password prompt).
+  OS_FAMILY=apt
+  out=$(privileged_plan)
   assert_contains "$out" $'login-shell\tsudo chsh -s /fixture/zsh '"$(id -un)"
 }
 
@@ -2699,6 +2725,7 @@ TESTS=(
   test_set_default_shell_uses_sudo_chsh_on_macos
   test_known_hosts_matches_metadata_and_dedupes
   test_package_signature_is_ifs_independent
+  test_fnm_pulls_libatomic_where_needed
   test_empty_package_selection_signs_and_runs
   test_pkg_install_uses_one_command_per_family
   test_root_runs_privileged_commands_without_sudo

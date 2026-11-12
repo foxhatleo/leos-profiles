@@ -265,9 +265,7 @@ privileged_plan() {
     if [[ ! -r /etc/shells ]] || ! grep -qxF "$zsh_path" /etc/shells; then
       printf 'etc-shells\t%sappend %s to /etc/shells\n' "$root" "$zsh_path"
     fi
-    if [[ $OS_FAMILY == macos ]]; then
-      printf 'login-shell\t%schsh -s %s %s\n' "$root" "$zsh_path" "$(login_user)"
-    fi
+    printf 'login-shell\t%schsh -s %s %s\n' "$root" "$zsh_path" "$(login_user)"
   fi
 }
 
@@ -304,16 +302,11 @@ report_behaviour() {
 # checked before the first change. Without a terminal, a run that would need
 # a sudo password, a passphrase prompt or chsh's password prompt stops with a
 # `manual-action run-in-terminal` record carrying the exact command, and exit
-# 3, having changed nothing. With a terminal, sudo asks once, up front.
+# 3, having changed nothing. With a terminal, sudo asks once, up front. chsh
+# runs as root (see set_default_shell), so it is covered by the sudo check.
 
 # The command that started this run, for run-in-terminal.
 INVOCATION=""
-
-chsh_needs_password() {
-  [[ $OS_FAMILY != macos && -n $SUDO ]] || return 1
-  command -v chsh >/dev/null 2>&1 || return 1
-  default_shell_change_needed
-}
 
 preflight() {
   local tool path reason reasons="" privileged
@@ -340,9 +333,6 @@ preflight() {
     fi
     if [[ $GPG_MODE == generate && $GPG_PASSPHRASE_MODE == prompt ]]; then
       reasons+="gpg must ask for the new key's passphrase (--gpg-passphrase prompt). "
-    fi
-    if chsh_needs_password; then
-      reasons+="chsh asks for your password to change the login shell. "
     fi
   fi
   privileged=$(privileged_plan)

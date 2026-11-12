@@ -141,7 +141,7 @@ so missing or corrupt tools are repaired.
 
 Besides the selection, packages, artifacts and files, `inspect` reports every
 action that runs as root (`privileged`: package-manager runs, Arch's
-`pacman -Syu`, Fedora's ffmpeg swap, the `/etc/shells` edit, macOS
+`pacman -Syu`, Fedora's ffmpeg swap, the `/etc/shells` edit,
 `sudo chsh`), side effects (`behaviour`: Debian's fd/bat links, GNU tools ahead
 of BSD on macOS, global Git identity writes, the Homebrew mirror), effects that
 cannot be undone automatically (`irreversible`), existing installations in the
@@ -152,7 +152,7 @@ old pinned layout (`migration`), and `warning`s such as an unsupported Mac.
 
 Before its first change, apply (and reconcile) checks what the run needs from
 you. Run without a terminal (as an AI agent does), a plan that needs a sudo
-password, a passphrase prompt or chsh's password prompt stops at once with a
+password or a passphrase prompt stops at once with a
 `manual-action run-in-terminal` record that carries the exact command, exit
 status 3, having changed nothing: run that command in your own terminal. With
 passwordless sudo it proceeds. In a terminal, sudo asks once, up front. A
@@ -548,7 +548,7 @@ remote and environment.
   [Canonical's standard-support lifecycle](https://ubuntu.com/about/release-cycle).
 - Debian 12 and 13 on x86_64 and arm64, following Debian's
   [oldstable/stable release table](https://www.debian.org/releases/index).
-- Fedora 43 and 44 on x86_64 and aarch64, following Fedora's approximately N
+- Fedora 44 and 45 on x86_64 and aarch64, following Fedora's approximately N
   and N-1 [release lifecycle](https://docs.fedoraproject.org/en-US/releases/).
 - Arch Linux rolling on x86_64. Arch Linux ARM uses compatible assets on a
   best-effort basis without a gating promise.

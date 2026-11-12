@@ -113,7 +113,7 @@ grep -q -- '--using=default -- node --version' "$TEST_EXEC_LOG" || fail 'the def
   RESOLVED_NODE_VERSION=""
   : > "$TEST_EXEC_LOG"
   install_fnm >/dev/null
-  equal "$(cat "$TEST_EXEC_LOG")" $'install v24.2.0\ndefault v24.2.0\nuse v24.2.0'
+  equal "$(cat "$TEST_EXEC_LOG")" $'install v24.2.0\ndefault v24.2.0\nuse v24.2.0\nexec --using=default -- node --version'
 )
 
 # Linux: yarn and pnpm are npm's latest release, installed with fnm's default

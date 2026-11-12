@@ -264,13 +264,33 @@ package_list_for_group() {
 
 # SELECTED_PACKAGES: every member of the selected groups, in group order, each
 # package once (two groups may share a member, such as python and languages).
+# component_os_packages <step>: OS packages a selected component needs at run
+# time, independent of the package groups. Official Node binaries for Linux
+# link libatomic, which minimal Debian/Ubuntu/Fedora installs lack (Arch has it
+# through gcc-libs), so fnm's Node would not start without it.
+component_os_packages() {
+  case "$OS_FAMILY:$1" in
+    apt:fnm) printf '%s\n' 'libatomic1' ;;
+    fedora:fnm) printf '%s\n' 'libatomic' ;;
+  esac
+}
+
 collect_selected_packages() {
-  local group package seen=" "
-  local -a groups=() group_packages=()
+  local group step package seen=" "
+  local -a groups=() steps=() group_packages=()
   SELECTED_PACKAGES=()
   csv_split groups "$SELECTED_GROUPS"
   for group in ${groups[@]+"${groups[@]}"}; do
     IFS=' ' read -r -a group_packages <<< "$(package_list_for_group "$group")"
+    for package in ${group_packages[@]+"${group_packages[@]}"}; do
+      [[ $seen != *" $package "* ]] || continue
+      seen="$seen$package "
+      SELECTED_PACKAGES+=("$package")
+    done
+  done
+  csv_split steps "$SELECTED_STEPS"
+  for step in ${steps[@]+"${steps[@]}"}; do
+    IFS=' ' read -r -a group_packages <<< "$(component_os_packages "$step")"
     for package in ${group_packages[@]+"${group_packages[@]}"}; do
       [[ $seen != *" $package "* ]] || continue
       seen="$seen$package "
