@@ -13,8 +13,8 @@ export HOME=$tmp/home XDG_CACHE_HOME=$tmp/cache
 mkdir -p "$HOME" "$tmp/bin"
 source "$root/zsh/cache.zsh"
 fail() { print -u2 -r -- "FAIL: $*"; exit 1; }
-puts() { :; }
-puts-err() { :; }
+__leos_puts() { :; }
+__leos_puts_err() { :; }
 
 cat > "$tmp/bin/generator" <<'GENERATOR'
 #!/bin/sh
@@ -183,10 +183,14 @@ export PYENV_ROOT=$tmp/python-two
 __leos_init_cache roots "$bin" one; second=$REPLY
 [[ $first != $second ]] || fail 'version-manager root identity collision'
 
-# Errors can include partial script output: never execute it or negative-cache
-# a transient error. A successful retry must work without manual clearing.
+# Errors can include partial script output: never execute it. A failing
+# generator (`fzf --zsh` on an fzf older than 0.48) is recorded like an empty
+# one, so it is reported once and not re-run on every shell; a changed launcher
+# retries. Launchers are backdated, so a later plain `touch` always changes
+# their mtime whatever the clock's granularity.
 cat > "$tmp/bin/transient" <<'GENERATOR'
 #!/bin/sh
+printf '%s\n' "$0" >> "$HOME/transient-calls"
 if [ ! -f "$HOME/recovered" ]; then
   printf 'typeset -g CACHE_VALUE=attacker\n'
   exit 1
@@ -194,35 +198,72 @@ fi
 printf 'typeset -g CACHE_VALUE=recovered\n'
 GENERATOR
 chmod +x "$tmp/bin/transient"
+touch -t 202001010000 "$tmp/bin/transient"
 CACHE_VALUE=unchanged
-if leos-source-cached transient "$tmp/bin/transient"; then fail 'failed generator accepted'; fi
+st=0; leos-source-cached transient "$tmp/bin/transient" || st=$?
+(( st == 1 )) || fail "failed generator returned $st, expected 1 (a fresh failure to report)"
 [[ $CACHE_VALUE == unchanged ]] || fail 'partial output executed'
-touch "$HOME/recovered"
+st=0; leos-source-cached transient "$tmp/bin/transient" || st=$?
+(( st == 2 )) || fail "recorded failure returned $st, expected 2 (already reported)"
+[[ $(wc -l < "$HOME/transient-calls") -eq 1 ]] || fail 'a failed generator ran again on the next shell'
+touch "$HOME/recovered" "$tmp/bin/transient"     # an upgrade changes the launcher
 leos-source-cached transient "$tmp/bin/transient"
-[[ $CACHE_VALUE == recovered ]] || fail 'transient generator never retried'
+[[ $CACHE_VALUE == recovered ]] || fail 'failed generator never retried after its launcher changed'
+# The status contract callers rely on (path/fzf.zsh falls back on any failure,
+# leos-node-completions and the -warn form report only status 1).
+__leos_puts_err() { print -r -- "$*" >> "$HOME/warnings"; }
+cat > "$tmp/bin/oldfzf" <<'GENERATOR'
+#!/bin/sh
+printf 'unknown option: --zsh\n' >&2
+exit 2
+GENERATOR
+chmod +x "$tmp/bin/oldfzf"
+leos-source-cached-warn 'oldfzf warned' oldfzf "$tmp/bin/oldfzf" --zsh
+leos-source-cached-warn 'oldfzf warned' oldfzf "$tmp/bin/oldfzf" --zsh
+[[ $(grep -c 'oldfzf warned' "$HOME/warnings") -eq 1 ]] || fail 'a failing generator was not reported exactly once'
+__leos_puts_err() { :; }
 
-# Freshness is the launcher's mtime: an unchanged launcher keeps the cached
-# script even when its output would now differ, and a newer one regenerates.
-# Backdate the cache rather than future-date the launcher, so no clock skew or
-# one-second mtime granularity can make the comparison a tie.
+# Freshness is the launcher's identity — device, inode, size and mtime —
+# compared for equality: an unchanged launcher keeps the cached script even
+# when its output would now differ, and any change regenerates.
 cat > "$tmp/bin/versioned" <<'GENERATOR'
 #!/bin/sh
 printf '%s\n' "$0" >> "$HOME/versioned-calls"
 printf 'typeset -g CACHE_VALUE=%s\n' "$(cat "$HOME/version")"
 GENERATOR
 chmod +x "$tmp/bin/versioned"
+touch -t 202001010000 "$tmp/bin/versioned"
 print -r -- one > "$HOME/version"
 leos-source-cached versioned "$tmp/bin/versioned"
 [[ $CACHE_VALUE == one ]] || fail 'versioned generator first run'
 print -r -- two > "$HOME/version"
 leos-source-cached versioned "$tmp/bin/versioned"
 [[ $CACHE_VALUE == one ]] || fail 'unchanged launcher did not reuse its cache'
-__leos_init_cache versioned "$tmp/bin/versioned"
-cache=$REPLY
-touch -t 202001010000 "$cache" "$cache.zwc"
+touch "$tmp/bin/versioned"
 leos-source-cached versioned "$tmp/bin/versioned"
 [[ $CACHE_VALUE == two ]] || fail 'launcher newer than its cache did not regenerate'
 [[ $(wc -l < "$HOME/versioned-calls") -eq 2 ]] || fail 'versioned generator ran an unexpected number of times'
+# dpkg and rpm install a package's files with their build-time mtime and
+# replace them by rename: the upgraded launcher can be OLDER than the cache.
+print -r -- three > "$HOME/version"
+cp -p "$tmp/bin/versioned" "$tmp/bin/versioned.new"
+print -r -- '# upgraded' >> "$tmp/bin/versioned.new"
+touch -t 201901010000 "$tmp/bin/versioned.new"
+mv -f "$tmp/bin/versioned.new" "$tmp/bin/versioned"
+leos-source-cached versioned "$tmp/bin/versioned"
+[[ $CACHE_VALUE == three ]] || fail 'an upgraded launcher with an older mtime kept the stale cache'
+# An implementation file the caller declares (rbenv's libexec/rbenv-init) is
+# part of the identity too.
+print -r -- 'init v1' > "$tmp/bin/versioned-init"
+print -r -- four > "$HOME/version"
+__leos_init_deps=$tmp/bin/versioned-init leos-source-cached versioned "$tmp/bin/versioned"
+[[ $CACHE_VALUE == four ]] || fail 'declaring an implementation file did not regenerate'
+print -r -- five > "$HOME/version"
+__leos_init_deps=$tmp/bin/versioned-init leos-source-cached versioned "$tmp/bin/versioned"
+[[ $CACHE_VALUE == four ]] || fail 'an unchanged implementation file did not reuse the cache'
+print -r -- 'init v2, longer' > "$tmp/bin/versioned-init"
+__leos_init_deps=$tmp/bin/versioned-init leos-source-cached versioned "$tmp/bin/versioned"
+[[ $CACHE_VALUE == five ]] || fail 'a changed implementation file did not regenerate'
 
 # A generator that succeeds with no output records a private negative marker
 # instead of publishing an empty script, and there is nothing to source.
@@ -248,8 +289,8 @@ zstat -H info -- "$marker"
 [[ ! -e ${marker%.failed}.zsh ]] || fail 'empty generator output was published as a cache script'
 
 # A planted marker suppresses the generator (status 3, and 2 from the public
-# wrapper) until the launcher is newer than the marker; then it retries, and a
-# successful generation clears the marker.
+# wrapper) until the launcher changes; then it retries, and a successful
+# generation clears the marker.
 cat > "$tmp/bin/suppressed" <<'GENERATOR'
 #!/bin/sh
 printf '%s\n' "$0" >> "$HOME/suppressed-calls"
@@ -269,7 +310,9 @@ st=0; __leos_init_cache suppressed "$tmp/bin/suppressed" || st=$?
 (( st == 0 )) || fail "a .failed without this identity suppressed the generator ($st)"
 rm -f -- "$cache" "$cache.zwc" "$HOME/suppressed-calls"
 __leos_init_cache_identity suppressed "${${:-$tmp/bin/suppressed}:A}"
-print -r -- "$REPLY" > "$failed"
+identity=$REPLY
+__leos_init_cache_stat "${${:-$tmp/bin/suppressed}:A}"
+print -r -- "$identity"$'\t'"$REPLY" > "$failed"
 chmod 600 "$failed"
 st=0; __leos_init_cache suppressed "$tmp/bin/suppressed" || st=$?
 (( st == 3 )) || fail "planted .failed returned $st, expected 3"
@@ -346,7 +389,7 @@ cache=$REPLY
 __leos_init_cache forge "$bin" $'one\n# leos-id: v1 forged'
 cache=$REPLY
 lines=("${(@f)$(<$cache)}")
-[[ $lines[1] == "# leos-id: v1 forge "*" \$'one\\n# leos-id: v1 forged'" ]] ||
+[[ $lines[1] == "# leos-id: v1 forge "*" \$'one\\n# leos-id: v1 forged'"$'\t'"stat="[0-9]* ]] ||
   fail "identity line does not escape a newline: $lines[1]"
 [[ $lines[2] == 'typeset -g CACHE_VALUE='* ]] || fail 'identity line must be a single line'
 print -rl -- '# leos-id: v1 someone-else' 'typeset -g CACHE_VALUE=forged' > "$cache"
@@ -405,8 +448,8 @@ printf '%s\n' "$*" >> "$HOME/brew-calls"
 printf 'typeset -g BREW_LOADED=yes\n'
 BREW
 chmod +x "$tmp/bin/brew"
-__leos_brew_bin() { print -r -- "$tmp/bin/brew"; }
-add-path() { :; }
+__leos_brew_bin() { REPLY="$tmp/bin/brew"; }
+__leos_add_path() { :; }
 LEOS_PROFILES=$tmp/profile
 export BREW_READY=1
 source "$root/zsh/path/brew.zsh"

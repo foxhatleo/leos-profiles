@@ -3,9 +3,12 @@
 
 # Deterministic tool scripts are cached privately. Homebrew shellenv and fnm
 # env are deliberately not cached: their output depends on the invoking shell.
-# The identity includes the launcher, arguments, HOME and version-manager roots.
-# Launcher mtimes invalidate entries; use leos-refresh-init-cache after upgrades
-# that change only a separate implementation file.
+# The identity includes the launcher, arguments, HOME and version-manager roots,
+# plus the launcher's (and any declared implementation file's) device, inode,
+# size and mtime, compared for equality: package managers such as dpkg and rpm
+# keep a file's build-time mtime, so an upgraded launcher can be OLDER than the
+# entry. Use leos-refresh-init-cache after upgrades that change only an
+# undeclared implementation file; the package checkups do.
 #
 # Every cache hit runs during shell startup, so the hit path stays fork-free:
 # the directory is fully validated once per shell and memoized, entries are
@@ -228,6 +231,26 @@ __leos_init_cache_identity() {
   REPLY="# leos-id: ${(j: :)${(@q+)fields}}"
 }
 
+# __leos_init_cache_stat <file...>
+# REPLY: `stat=` and then device:inode:size:mtime of each file (following
+# symlinks), `-` for one that cannot be read. zstat is a builtin, so this costs
+# no fork. It is appended to the identity line after a TAB, which (q+) never
+# leaves unquoted inside the identity, so the two parts cannot run together.
+__leos_init_cache_stat() {
+  emulate -L zsh
+  local f sig=stat=
+  local -A info
+  zmodload -F zsh/stat b:zstat 2>/dev/null || { REPLY=$sig; return 0; }
+  for f in "$@"; do
+    if [[ -n $f ]] && zstat -H info -- "$f" 2>/dev/null; then
+      sig+="$info[device]:$info[inode]:$info[size]:$info[mtime] "
+    else
+      sig+="- "
+    fi
+  done
+  REPLY=$sig
+}
+
 # __leos_init_cache_name <key> <identity-line>
 # REPLY: the file stem for an entry, computed without a fork. The key is kept
 # readable: every byte outside [A-Za-z0-9_-] becomes %XX (so `%` itself is
@@ -262,17 +285,26 @@ __leos_init_cache_name() {
 # A caller may name a filter function for the generated text with a prefix
 # assignment: `__leos_init_filter=fn leos-source-cached ...`. Bump the key when
 # the filter's behaviour changes; its name alone is part of the identity.
+# Likewise `__leos_init_deps=<file>` (newline-separated for several) names
+# implementation files beside the launcher whose stat is part of the identity
+# too, such as rbenv's libexec/rbenv-init.
 # 0: REPLY is a verified script path; 1: REPLY is fresh text to eval;
-# 2: fresh empty/failed generation; 3: a previously recorded empty generation.
+# 2: fresh empty/failed generation; 3: a previously recorded empty or failed
+# generation.
 __leos_init_cache() {
   emulate -L zsh
   local key=$1 bin=$2
   shift 2
-  local real=${bin:A} dir cache failed generated stage identity line= rc=0
+  local real=${bin:A} dir cache failed generated stage identity header line= rc=0
   local usable=0 untrusted=0 f
   local -A info
   __leos_init_cache_identity "$key" "$real" "$@"
   identity=$REPLY
+  # The file name comes from the identity alone, so a changed launcher
+  # replaces its entry in place; the first line, compared in full, also
+  # carries the stat part.
+  __leos_init_cache_stat "$real" ${(f)__leos_init_deps-}
+  header=$identity$'\t'$REPLY
   if __leos_cache_dir; then
     dir=$REPLY
     __leos_init_cache_name "$key" "$identity"
@@ -301,18 +333,18 @@ __leos_init_cache() {
     fi
     if (( usable )); then
       # `read` from a redirection runs in this shell: the identity check costs
-      # no fork. A different identity under the same stem (a digest collision)
-      # is simply regenerated over.
-      if [[ -s $cache && ! $real -nt $cache ]] &&
+      # no fork. A different identity under the same stem (a digest collision),
+      # or the same one with a changed launcher, is simply regenerated over.
+      if [[ -s $cache ]] &&
           { IFS= read -r line || [[ -n $line ]]; } < "$cache" 2>/dev/null &&
-          [[ $line == "$identity" ]]; then
+          [[ $line == "$header" ]]; then
         REPLY=$cache
         return 0
       fi
       line=
-      if [[ -f $failed && ! $real -nt $failed ]] &&
+      if [[ -f $failed ]] &&
           { IFS= read -r line || [[ -n $line ]]; } < "$failed" 2>/dev/null &&
-          [[ $line == "$identity" ]]; then
+          [[ $line == "$header" ]]; then
         return 3
       fi
     fi
@@ -321,35 +353,41 @@ __leos_init_cache() {
   (( usable )) || __leos_cache_warn_fallback
   generated=$("$bin" "$@" 2>/dev/null) || rc=$?
   # Failed generators may print diagnostics or partial code on stdout. Never
-  # execute or persist that output, and allow the next shell to retry.
-  (( rc == 0 )) || return 2
-  # An optional filter function, named in the caller's __leos_init_filter (and
-  # part of the identity), edits the output in REPLY before it is used or kept.
-  if [[ -n ${__leos_init_filter-} ]]; then
+  # execute or persist that output. A failure is recorded like an empty
+  # generation below: a generator that does not support the arguments (`fzf
+  # --zsh` before fzf 0.48) would otherwise run again on every shell. The
+  # marker carries the launcher's stat, so an upgrade retries.
+  if (( rc )); then
+    generated=
+  elif [[ -n ${__leos_init_filter-} ]]; then
+    # An optional filter function, named in the caller's __leos_init_filter (and
+    # part of the identity), edits the output in REPLY before it is used or kept.
     (( $+functions[$__leos_init_filter] )) || return 2
     REPLY=$generated
     "$__leos_init_filter" || return 2
     generated=$REPLY
   fi
+  if [[ -z $generated ]]; then
+    if (( usable )); then
+      # mktemp creates the staging file with mode 600 even under a permissive
+      # umask. The marker carries the identity too: it only suppresses this
+      # generator.
+      stage=$(mktemp "$dir/.init.XXXXXXXX" 2>/dev/null) &&
+        { print -r -- "$header" > "$stage" && mv -f -- "$stage" "$failed"; } 2>/dev/null ||
+        { [[ -z $stage ]] || rm -f -- "$stage"; }
+    fi
+    return 2
+  fi
   if (( ! usable )); then
-    [[ -n $generated ]] || return 2
     REPLY=$generated
     return 1
   fi
 
-  # mktemp creates the staging file with mode 600 even under a permissive umask.
   stage=$(mktemp "$dir/.init.XXXXXXXX" 2>/dev/null) || {
     __leos_cache_warn_fallback
-    [[ -n $generated ]] || return 2
     REPLY=$generated; return 1
   }
-  if [[ -z $generated ]]; then
-    # The marker carries the identity too: it only suppresses this generator.
-    { print -r -- "$identity" > "$stage" && mv -f -- "$stage" "$failed"; } 2>/dev/null ||
-      rm -f -- "$stage"
-    return 2
-  fi
-  if ! print -rl -- "$identity" "$generated" > "$stage"; then
+  if ! print -rl -- "$header" "$generated" > "$stage"; then
     __leos_cache_warn_fallback
     rm -f -- "$stage"
     REPLY=$generated; return 1
@@ -415,8 +453,9 @@ leos-source-cached() {
 
 # leos-source-cached-warn <message> <key> <bin> [args...]
 # The form every startup file should use. As leos-source-cached, but:
-#   - reports <message> the FIRST time the generator yields nothing, and stays
-#     quiet afterwards (repeating it on every shell would just be noise);
+#   - reports <message> the FIRST time the generator fails or yields nothing,
+#     and stays quiet afterwards until its launcher changes (repeating it on
+#     every shell would just be noise);
 #   - always returns 0, so a bare call cannot abort the calling file under
 #     ERR_RETURN. Note `(( guard )) && leos-source-cached …` is NOT safe: a
 #     failing command on the right of && does trip ERR_RETURN.
@@ -425,7 +464,7 @@ leos-source-cached-warn() {
   shift
   local __leos_warn_status=0
   leos-source-cached "$@" || __leos_warn_status=$?
-  (( __leos_warn_status == 1 )) && puts-err "$__leos_warn_msg"
+  (( __leos_warn_status == 1 )) && __leos_puts_err "$__leos_warn_msg"
   return 0
 }
 
@@ -442,14 +481,14 @@ leos-refresh-init-cache() {
   local dir=${XDG_CACHE_HOME:-$HOME/.cache}/leos-profiles/init
   [[ -z ${LEOS_PROFILES_ZSH-} ]] || __leos_zcompile_profile "$LEOS_PROFILES_ZSH" || true
   if [[ ! -d $dir ]]; then
-    puts "No init cache to clear."
+    __leos_puts "No init cache to clear."
     return 0
   fi
   # Validate in full: the user may have just fixed (or broken) the permissions
   # this shell memoized.
   __leos_cache_forget
   if ! __leos_cache_dir; then
-    puts-err "Refusing to clear an unsafe init cache: $dir"
+    __leos_puts_err "Refusing to clear an unsafe init cache: $dir"
     return 1
   fi
   # (N) is required, not decorative: with the default NOMATCH, a single pattern
@@ -457,9 +496,9 @@ leos-refresh-init-cache() {
   local -a stale=($dir/*.zsh(N) $dir/*.zwc(N) $dir/*.failed(N))
   if (( $#stale )); then
     rm -f -- $stale
-    puts "Cleared $#stale cached init file(s) in $dir. Restart the shell to regenerate."
+    __leos_puts "Cleared $#stale cached init file(s) in $dir. Restart the shell to regenerate."
   else
-    puts "Init cache in $dir is already empty."
+    __leos_puts "Init cache in $dir is already empty."
   fi
   return 0
 }

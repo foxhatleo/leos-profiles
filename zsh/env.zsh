@@ -116,25 +116,35 @@ __leos_ls_eza_compatible() {
   return 0
 }
 
-# Colourful command wrappers. Set LEOS_DISABLE_ALIASES=1 for scripts, recovery
-# shells, or users who prefer the underlying commands unchanged; to drop one of
-# them on a single machine, `unfunction ls` (or cat) in local/private.zsh.
+# Colourful command wrappers. Set LEOS_DISABLE_ALIASES=1 (in the environment
+# or in local/private.zsh) for scripts, recovery shells, or users who prefer
+# the underlying commands unchanged; to drop one of them on a single machine,
+# `unfunction ls` (or cat) in local/private.zsh.
+#
+# What this block defines is recorded in __leos_wrappers, so start.zsh can
+# remove exactly that again when local/private.zsh sets LEOS_DISABLE_ALIASES=1
+# (this file has already run by then); see __leos_drop_wrappers below.
 #
 # `function name { }` rather than `name() { }`: a system zshrc that already
 # aliases ls would otherwise expand that alias inside the definition.
+typeset -gA __leos_wrappers=()
 if [[ ${LEOS_DISABLE_ALIASES:-0} != 1 ]]; then
   (( ! ${+aliases[ls]} )) || unalias ls
   (( ! ${+aliases[cat]} )) || unalias cat
   if command -v eza >/dev/null 2>&1; then
+    # eza only for a terminal, as cat below: a pipe or redirection (`ls | wc
+    # -l`, `ls > list`) keeps the real ls's one-name-per-line output.
     function ls {
-      if __leos_ls_eza_compatible "$@"; then
+      if [[ -t 1 ]] && __leos_ls_eza_compatible "$@"; then
         command eza --color=auto --group-directories-first "$@"
       else
         command ls "${__leos_ls_color[@]}" "$@"
       fi
     }
+    __leos_wrappers[ls]=$functions[ls]
   elif (( $#__leos_ls_color )); then
     function ls { command ls "${__leos_ls_color[@]}" "$@"; }
+    __leos_wrappers[ls]=$functions[ls]
   fi
   if command -v bat >/dev/null 2>&1; then
     # bat only where it is a drop-in: a terminal reading plain file operands.
@@ -147,14 +157,18 @@ if [[ ${LEOS_DISABLE_ALIASES:-0} != 1 ]]; then
         command cat "$@"
       fi
     }
+    __leos_wrappers[cat]=$functions[cat]
     # Colorized man pages from the same pager. `col -bx` strips the overstrike
     # sequences groff emits, which bat would otherwise render literally.
     # MANROFFOPT keeps groff from re-adding those sequences. A pager the user
     # already chose wins.
     if [[ -z ${MANPAGER:-} ]]; then
       export MANPAGER="sh -c 'col -bx | bat -l man -p'"
-      : ${MANROFFOPT:=-c}
-      export MANROFFOPT
+      __leos_wrappers[MANPAGER]=$MANPAGER
+      if [[ -z ${MANROFFOPT:-} ]]; then
+        export MANROFFOPT=-c
+        __leos_wrappers[MANROFFOPT]=$MANROFFOPT
+      fi
     fi
   fi
   # GNU and BSD grep both take --color; BusyBox builds may not, so only a grep
@@ -167,11 +181,37 @@ if [[ ${LEOS_DISABLE_ALIASES:-0} != 1 ]]; then
     # egrep/fgrep are obsolescent: GNU grep 3.8+ warns on every call.
     alias fgrep='grep -F --color=auto'
     alias egrep='grep -E --color=auto'
+    __leos_wrappers[alias:grep]=$aliases[grep]
+    __leos_wrappers[alias:fgrep]=$aliases[fgrep]
+    __leos_wrappers[alias:egrep]=$aliases[egrep]
   fi
 fi
 
-# History — shared, dedup, trimmed
-HISTFILE=$HOME/.zsh_history
+# Undo the block above: every wrapper, alias and variable it set that still has
+# the value it set. One that local/private.zsh already replaced is left alone.
+__leos_drop_wrappers() {
+  local name
+  for name in ls cat; do
+    if [[ -n ${__leos_wrappers[$name]-} && ${functions[$name]-} == "$__leos_wrappers[$name]" ]]; then
+      unfunction -- "$name"
+    fi
+  done
+  for name in grep fgrep egrep; do
+    if [[ -n ${__leos_wrappers[alias:$name]-} && ${aliases[$name]-} == "$__leos_wrappers[alias:$name]" ]]; then
+      unalias -- "$name"
+    fi
+  done
+  for name in MANPAGER MANROFFOPT; do
+    if [[ -n ${__leos_wrappers[$name]-} && ${(P)name-} == "$__leos_wrappers[$name]" ]]; then
+      unset -- "$name"
+    fi
+  done
+  return 0
+}
+
+# History — shared, dedup, trimmed. Beside the other startup files, where zsh
+# itself and the installer's ZDOTDIR handling put them.
+HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history
 HISTSIZE=100000
 SAVEHIST=100000
 # SHARE_HISTORY already implies incremental appending (plus import from other
@@ -184,10 +224,14 @@ setopt SHARE_HISTORY HIST_IGNORE_ALL_DUPS HIST_IGNORE_SPACE HIST_REDUCE_BLANKS H
 # Interactive behavior
 setopt AUTO_CD EXTENDED_GLOB INTERACTIVE_COMMENTS NO_BEEP NO_CASE_GLOB NUMERIC_GLOB_SORT
 # EXTENDED_GLOB makes `^` a negation operator, so `git reset HEAD^` fails with
-# "no matches found". Keep the rest of extended globbing and drop only `^`
-# (`~` still excludes). Functions running under `emulate -L zsh`, which
-# includes the completion system and the plugins, get every pattern back.
-disable -p '^'
+# "no matches found", and `#`/`##` repetition operators, so `nix run
+# nixpkgs#hello` and an unquoted `https://host/page#fragment` fail the same
+# way. Keep the rest of extended globbing and drop only those two (`~` still
+# excludes). Disabling `#` also turns off `(#i)`-style flags on the command
+# line. Functions running under `emulate -L zsh`, which includes the
+# completion system, the plugins and this profile's own helpers, get every
+# pattern back.
+disable -p '^' '#'
 
 # Completion styling (compinit itself runs in interactive.zsh)
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'   # case-insensitive

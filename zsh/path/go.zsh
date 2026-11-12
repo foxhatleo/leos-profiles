@@ -22,7 +22,7 @@ if whence -p go >/dev/null; then
   fi
   : ${_leos_gopath:=$HOME/go}
   for _leos_go_workspace in ${(s.:.)_leos_gopath}; do
-    add-path "$_leos_go_workspace/bin"
+    __leos_add_path "$_leos_go_workspace/bin"
   done
   unset _leos_gopath _leos_go_workspace _leos_go_envfile _leos_go_lines
 fi

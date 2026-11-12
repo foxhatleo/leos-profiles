@@ -68,7 +68,9 @@ zle -N down-line-or-beginning-search
 # compinit — rebuild and audit at most once a day, else the fast path.
 #
 # Fast path: the dump was (re)written or confirmed in the last 24 hours and was
-# built from the same fpath directories. `compinit -C` then just loads it, with
+# built from the same fpath directories, each with the same mtime (adding or
+# removing a completion file changes its directory's mtime, so a new `_tool`
+# is picked up by the next shell). `compinit -C` then just loads it, with
 # no audit and no scan of every fpath file. Slow path, otherwise: compaudit
 # first, then a full compinit, which rebuilds the dump if its file count no
 # longer matches. compinit leaves an up-to-date dump untouched, so the dump is
@@ -80,15 +82,17 @@ zle -N down-line-or-beginning-search
 # The dump lives in the same validated, private cache root as the init cache,
 # named per Zsh version so an upgrade never reads an older version's dump. If
 # that storage is unsafe it falls back to Zsh's usual ${ZDOTDIR:-$HOME}. The
-# fpath the dump was built from is kept beside it in the cache root only.
+# fpath the dump was built from (one `directory<TAB>mtime` line per entry) is
+# kept beside it in the cache root only.
 autoload -Uz compinit compaudit
 () {
   # Localize options so the freshness qualifier below (which needs EXTENDED_GLOB,
   # normally enabled in env.zsh) works regardless of the ambient option set.
   emulate -L zsh
   setopt extended_glob
-  local dump insecure stamp fpath_record= fresh=0
-  local -a legacy
+  local dump insecure stamp fpath_record= fresh=0 dir fpath_state=
+  local -a legacy fpath_lines mtime
+  local -A info
   if (( $+functions[__leos_cache_dir] )) && __leos_cache_dir; then
     dump=${REPLY:h}/zcompdump-$ZSH_VERSION
     fpath_record=$dump.fpath
@@ -108,22 +112,33 @@ autoload -Uz compinit compaudit
   else
     dump=${ZDOTDIR:-$HOME}/.zcompdump
   fi
+  if [[ -n $fpath_record ]]; then
+    # zstat is a builtin: one stat per fpath entry, no fork. A missing
+    # directory records `-`.
+    zmodload -F zsh/stat b:zstat 2>/dev/null
+    for dir in $fpath; do
+      mtime=(-)
+      zstat -A mtime +mtime -- "$dir" 2>/dev/null || mtime=(-)
+      fpath_lines+=("$dir"$'\t'"$mtime[1]")
+    done
+    fpath_state=${(pj:\n:)fpath_lines}
+  fi
   if [[ -n $dump(#qN.mh-24) ]]; then
     fresh=1
-    # A tool that added an fpath directory since (rbenv, heroku, a new plugin)
-    # must not wait a day for its completions. `$(<file)` reads in-process.
+    # A tool that added an fpath directory since (rbenv, heroku, a new plugin),
+    # or a completion file to one, must not wait a day for its completions.
+    # `$(<file)` reads in-process.
     if [[ -n $fpath_record ]]; then
-      [[ -f $fpath_record && ! -L $fpath_record && "$(<$fpath_record)" == "${(pj:\n:)fpath}" ]] || fresh=0
+      [[ -f $fpath_record && ! -L $fpath_record && "$(<$fpath_record)" == "$fpath_state" ]] || fresh=0
     fi
   fi
   if (( fresh )); then
-    compinit -C -d "$dump" || { puts-err "Cached Zsh completion initialization failed; retrying safely."; compinit -i -d "$dump" || return 0; }
+    compinit -C -d "$dump" || { __leos_puts_err "Cached Zsh completion initialization failed; retrying safely."; compinit -i -d "$dump" || return 0; }
   else
     # Whether the compiled dump matches the dump now, and the dump's mtime: if
     # compinit leaves it as it is, the .zwc is touched with it below rather
     # than recompiled.
     local zwc_current=0 old_mtime=
-    local -A info
     zmodload -F zsh/stat b:zstat 2>/dev/null
     if [[ -f $dump && -f $dump.zwc && ! -L $dump.zwc && -O $dump.zwc && ! $dump -nt $dump.zwc ]] &&
         zstat -H info -- "$dump" 2>/dev/null; then
@@ -132,10 +147,10 @@ autoload -Uz compinit compaudit
     fi
     insecure=$(compaudit 2>/dev/null) || true
     if [[ -n $insecure ]]; then
-      puts-err "Ignoring insecure Zsh completion path(s): ${(j:, :)${(f)insecure}}"
-      compinit -i -d "$dump" || { puts-err "Zsh completion initialization failed; continuing without completion."; return 0; }
+      __leos_puts_err "Ignoring insecure Zsh completion path(s): ${(j:, :)${(f)insecure}}"
+      compinit -i -d "$dump" || { __leos_puts_err "Zsh completion initialization failed; continuing without completion."; return 0; }
     else
-      compinit -d "$dump" || { puts-err "Zsh completion initialization failed; continuing without completion."; return 0; }
+      compinit -d "$dump" || { __leos_puts_err "Zsh completion initialization failed; continuing without completion."; return 0; }
     fi
     # Mark the dump as confirmed today, even when compinit found nothing to
     # rewrite. Only this user's regular file is touched.
@@ -153,7 +168,7 @@ autoload -Uz compinit compaudit
           [[ ! -f $fpath_record || -L $fpath_record || ! -O $fpath_record ]]; then
         rm -f -- "$fpath_record" 2>/dev/null
       fi
-      print -r -- "${(pj:\n:)fpath}" > "$fpath_record" 2>/dev/null || true
+      print -r -- "$fpath_state" > "$fpath_record" 2>/dev/null || true
     fi
   fi
   # Compile the dump so later shells map it instead of re-parsing ~60KB of Zsh
@@ -171,11 +186,11 @@ autoload -Uz compinit compaudit
 # heroku stays first: current CLIs skip their own compinit once compdef exists
 # (heroku/cli#3839), but an older CLI's zsh_setup still runs a second compinit,
 # which would discard every compdef registered before it — including zoxide's
-# `cd` completion.
-entry "path/heroku"
-entry "path/fzf"
-entry "path/zoxide"
-entry "path/uv"
+# `z` completion.
+__leos_entry "path/heroku"
+__leos_entry "path/fzf"
+__leos_entry "path/zoxide"
+__leos_entry "path/uv"
 
 # fzf-tab must load after compinit but BEFORE plugins that wrap ZLE widgets.
 _leos_plugin fzf-tab/fzf-tab.plugin.zsh
@@ -206,9 +221,9 @@ if (( $+functions[compdef] )); then
   _leos_bye() {
     _values 'option' \
       '--no-exit[Do not quit the terminal]' \
-      '--keep-history[Preserve history files]' \
+      '--wipe-history[Also clear shell and REPL history files]' \
       '--non-interactive[Run upgrades without confirmation prompts]' \
-      '--aggressive-history[Also remove legacy history and HSTS matches]' \
+      '--aggressive-history[Wipe history, plus legacy history and HSTS matches]' \
       '--purge-recycle-bins[Permit removal of macOS recycle-bin directories]' \
       '--shutdown-wsl[Shut down WSL after maintenance]'
   }
@@ -231,12 +246,20 @@ typeset -g _leos_fallback_prompt='%F{cyan}%n@%m%f %F{blue}%~%f %# '
 # cached init below then takes the binary's path from $commands.
 if whence -p starship >/dev/null; then
   # Keep Leo's established themed prompt as the default.  The plain prompt is
-  # an explicit fallback for terminals without Nerd Font support.
-  if [[ ${LEOS_PLAIN_PROMPT:-0} == 1 ]]; then
-    export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship-plain.toml"
-  else
-    export STARSHIP_CONFIG="$LEOS_PROFILES_ZSH/starship.toml"
+  # an explicit fallback for terminals without Nerd Font support, and the
+  # automatic one on the Linux virtual console, whose font has no Nerd Font
+  # glyphs. A STARSHIP_CONFIG the user already set (environment or
+  # local/private.zsh) wins over both; one of these two files inherited from a
+  # parent shell does not, so `LEOS_PLAIN_PROMPT=1 zsh` still switches.
+  if [[ -z ${STARSHIP_CONFIG:-} ||
+        $STARSHIP_CONFIG == "$LEOS_PROFILES_ZSH"/starship(|-plain).toml ]]; then
+    if [[ ${LEOS_PLAIN_PROMPT:-0} == 1 || ${TERM:-} == linux ]]; then
+      STARSHIP_CONFIG=$LEOS_PROFILES_ZSH/starship-plain.toml
+    else
+      STARSHIP_CONFIG=$LEOS_PROFILES_ZSH/starship.toml
+    fi
   fi
+  export STARSHIP_CONFIG
   # Cached: the init script is deterministic, and the part that must vary per
   # shell (the session key) is expanded when it is sourced. The filter below
   # turns the script's `PROMPT2="$(starship prompt --continuation)"`, a
@@ -278,18 +301,22 @@ if whence -p starship >/dev/null; then
   if (( _leos_starship_status )); then
     # Only warn on a fresh failure (1); 2 means an earlier shell already said so.
     (( _leos_starship_status == 1 )) &&
-      puts-err "starship init produced no output; using the built-in fallback prompt."
+      __leos_puts_err "starship init produced no output; using the built-in fallback prompt."
     # Actually install that fallback, rather than leaving the prompt unset.
     PROMPT=$_leos_fallback_prompt
   fi
   unset _leos_starship_status
 else
   if [[ ! -f $_leos_root/local/flags/no-starship-warning ]]; then
-    puts-err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore it, or touch local/flags/no-starship-warning under the profile root to silence this."
+    __leos_puts_err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore it, or touch local/flags/no-starship-warning under the profile root to silence this."
   fi
   PROMPT=$_leos_fallback_prompt
 fi
 unset _leos_fallback_prompt
+
+# An init script or plugin sourced above that runs a plain (non-local)
+# `emulate zsh` re-enables every pattern env.zsh disabled; disable them again.
+disable -p '^' '#'
 
 # Tool init scripts above may have prepended PATH/fpath entries again.
 typeset -gU path fpath

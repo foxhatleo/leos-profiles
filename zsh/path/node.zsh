@@ -2,11 +2,11 @@
 # running `yarn global bin`, which spawns a Node process on every interactive
 # shell (and Yarn Berry has no global bin at all). A non-default global prefix
 # can be added in local/private.zsh.
-add-path "$HOME/.yarn/bin"
+__leos_add_path "$HOME/.yarn/bin"
 
-# bun's own global bin dir, where `bun add -g` puts binaries. add-path no-ops
+# bun's own global bin dir, where `bun add -g` puts binaries. __leos_add_path no-ops
 # when it does not exist, so this costs nothing until bun installs something.
-add-path "$HOME/.bun/bin"
+__leos_add_path "$HOME/.bun/bin"
 
 # Node package-manager completions.
 #
@@ -45,7 +45,7 @@ leos-node-completions() {
     # Only status 1 is a fresh failure; 2 means it was already reported on an
     # earlier shell, and repeating it every startup would just be noise.
     (( status_ == 1 )) &&
-      puts-err "$tool did not produce a Zsh completion script; skipping its completions. Run leos-refresh-init-cache to retry."
+      __leos_puts_err "$tool did not produce a Zsh completion script; skipping its completions. Run leos-refresh-init-cache to retry."
   done
   return 0
 }

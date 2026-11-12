@@ -121,7 +121,12 @@ The entire ignored `local/` directory is machine-owned:
 - `local/private.zsh` contains private machine overrides and loads after public
   commands but before the interactive layer; `local/private-interactive.zsh`
   loads last, after completion, plugins and the prompt, for `compdef` and ZLE
-  overrides.
+  overrides. While they load, both can call the helpers `puts`, `puts-err`,
+  `add-path <dir>` and `entry <name>`; those names are removed once the
+  profile has loaded, so they do not linger in every shell. A function that
+  runs later should use the profile's private names (`__leos_puts`,
+  `__leos_puts_err`, `__leos_add_path`, `__leos_entry`) or plain `print`. A
+  helper name an override file defines itself is left alone.
 - `local/flags/` stores GNU preference, Homebrew mirror, and optional-tool
   warning choices.
 
@@ -319,8 +324,11 @@ stops Debian and Ubuntu's global `compinit` from building a completion dump
 before the profile has its full `fpath`. The trade-off: a **non-interactive**
 shell (`ssh host cmd`, cron, scripts) sees only `~/.local/bin` and
 `~/.local/npm/bin` in front of the system PATH — no Homebrew, fnm, pyenv, rbenv
-or Go — so remote one-liners that need those tools should use absolute paths or
-activate just the required tool explicitly. On macOS, a login shell's
+or Go. The block adds each of them only when it is missing, so a child shell
+keeps the order its parent set up (version-manager shims stay in front), and
+it adds nothing for root with another user's HOME (`sudo -s`). Remote
+one-liners that need those tools should use absolute paths or activate just
+the required tool explicitly. On macOS, a login shell's
 `/etc/zprofile` runs `path_helper`, which would push those two directories
 behind the system and Homebrew paths; the managed `.zprofile` block puts them
 back in front, so `zsh -l -c` sees the same order. A non-interactive login
@@ -350,7 +358,10 @@ Starship, and npm/pnpm/Bun/uv/uvx completions are cached under
 `${XDG_CACHE_HOME:-~/.cache}/leos-profiles/init`. Each entry's first line
 records its full identity: the key, the resolved binary path, the arguments,
 HOME, and the version-manager roots, each field quoted so no value can fake a
-boundary. An entry is used only when that line matches; zoxide's identity also
+boundary, followed by the launcher's device, inode, size and mtime (and those
+of rbenv's and pyenv's `libexec/*-init`). An entry is used only when that line
+matches exactly, so an upgrade is noticed even when the package manager kept an
+older build-time mtime; zoxide's identity also
 covers `_ZO_ECHO` and `_ZO_RESOLVE_SYMLINKS`, which change its generated code.
 Newly created directories are private; ownership, permissions, ancestors, and
 symlinks are checked before cached code or compiled siblings are used. The
@@ -358,7 +369,9 @@ directory is validated in full once per shell; later lookups in the same shell
 re-check only the cache root and its two profile-owned levels, and any change
 there triggers full validation again. Unsafe storage falls back to fresh
 initialization without trusting its contents. Failed generators'
-partial output is not evaluated. The completion dump lives beside that cache
+partial output is not evaluated; a generator that fails or prints nothing (such
+as `fzf --zsh` on an fzf older than 0.48) is recorded, reported once, and
+retried only when its launcher changes or the cache is cleared. The completion dump lives beside that cache
 as `zcompdump-<zsh version>` (falling back to `${ZDOTDIR:-~}/.zcompdump` if
 the cache root is unsafe); `.zcompdump*` files earlier versions left in the
 home directory are removed once.
@@ -369,9 +382,9 @@ also runs per shell because it creates a unique `FNM_MULTISHELL_PATH`; a nested
 shell drops the multishell directory it inherited first, and once a day a
 background job deletes multishell links older than a day whose shell has
 exited (fnm itself never removes them).
-Cache freshness follows launcher mtimes. After an update changes only a separate
-implementation file, run `leos-refresh-init-cache`; `brew-checkup` does this
-automatically. pyenv/rbenv use `--no-rehash` and refresh their shims in the
+After an update changes only some other implementation file, run
+`leos-refresh-init-cache`; `brew-checkup`, `apt-checkup`, `dnf-checkup` and
+`pacman-checkup` do this automatically. pyenv/rbenv use `--no-rehash` and refresh their shims in the
 background at most once a day. Yarn uses the bundled `_yarn` completion.
 
 Startup latency depends on the host and installed tools. See the reproducible
@@ -383,7 +396,8 @@ Performance notes:
 - A warm shell runs no cache bookkeeping forks: the cache directory is
   validated once per shell and entries are named and checked in-process.
 - The completion system is audited and rebuilt at most once a day, or when
-  the completion search path changes; other shells load the dump with
+  the completion search path changes (a directory added, or a completion file
+  added to or removed from one, which changes its mtime); other shells load the dump with
   `compinit -C`.
 - pyenv starts without forking bash to rewrite PATH and without its legacy
   `compctl` completion; `zsh/completions/_pyenv` completes pyenv through the
@@ -415,12 +429,14 @@ constructs its runtime PATH.
 
 Command wrappers stay compatible with the commands they replace:
 
-- `ls` runs eza (with `--group-directories-first`) only when every argument
+- `ls` runs eza (with `--group-directories-first`) only when its output is a
+  terminal and every argument
   means the same to eza as to ls: operands, `-1 -l -a -A -d -R` in any
   combination, and long options that only eza has (`--git`, `--tree`,
   `--icons`, …) or that GNU ls spells the same way. Anything else, such as
   `ls -ltr`, `ls -lh` or `ls --sort=time`, runs the real `ls` with the
-  platform's colour flag. The full routing table is in `zsh/env.zsh`.
+  platform's colour flag, as does any pipe or redirection (`ls | wc -l`). The
+  full routing table is in `zsh/env.zsh`.
 - `cat` runs `bat --style=plain --paging=never` only when its output is a
   terminal and it has no options; `cat -v`, `cat -n` and every pipe or
   redirection get the real `cat`.
@@ -428,19 +444,29 @@ Command wrappers stay compatible with the commands they replace:
   `grep -E`/`grep -F`, since GNU grep warns that egrep/fgrep are obsolescent).
 - With bat installed and no `MANPAGER` of your own, man pages use bat.
 
-Set `LEOS_DISABLE_ALIASES=1` to disable all of these, or `unfunction ls` (or
-`cat`) in `local/private.zsh` to drop one. `EXTENDED_GLOB` is on, but its `^`
-negation is disabled so `git reset HEAD^` works; `~` still excludes. Set
-`LEOS_PLAIN_PROMPT=1` for the ASCII prompt, or `LEOS_WARN_OPTIONAL_TOOLS=1` for
-optional pyenv/rbenv warnings. Both prompts show `user@host` over SSH and just
-the user name locally.
+Set `LEOS_DISABLE_ALIASES=1` (in the environment or in `local/private.zsh`) to
+disable all of these, or `unfunction ls` (or `cat`) in `local/private.zsh` to
+drop one. `EXTENDED_GLOB` is on, but its `^` negation and `#`/`##` repetition
+are disabled, so `git reset HEAD^`, `nix run nixpkgs#hello` and unquoted URLs
+with a `#fragment` work; `~` still excludes, and `(#i)`-style flags need
+`setopt extended_glob` inside an `emulate -L zsh` function. Set
+`LEOS_PLAIN_PROMPT=1` for the ASCII prompt (chosen automatically on the Linux
+console, `TERM=linux`), set `STARSHIP_CONFIG` yourself to use your own Starship
+configuration, or set `LEOS_WARN_OPTIONAL_TOOLS=1` for optional pyenv/rbenv
+warnings. Both prompts show `user@host` over SSH and just the user name
+locally, in red for root. The themed prompt leaves out Java and Kotlin versions:
+reading them starts a JVM on every prompt. History is kept in
+`${ZDOTDIR:-~}/.zsh_history`.
 
 Interactive conveniences: the keymap is always emacs (even when `EDITOR` is
 vim); Home, End, Delete and Ctrl-Left/Right work; Up/Down search history for
 lines starting with what is already typed. When fd (or Debian's `fdfind`) is
 installed, fzf's Ctrl-T, Alt-C and `**<Tab>` use it, so they honour
 `.gitignore`; with bat, Ctrl-T previews files. Existing `FZF_*` settings win.
-fzf-tab's `cd` preview uses eza, or `ls` where eza is not packaged.
+fzf-tab's `cd` preview uses eza, or `ls` where eza is not packaged. zoxide
+adds `z <words>` (jump to the best-ranked directory matching them; a plain path
+works as with `cd`) and `zi` (pick one interactively); `cd` itself stays the
+shell builtin.
 
 ### Optional integrations
 
@@ -508,16 +534,17 @@ upgrade such as `do-release-upgrade` or `dnf system-upgrade`. Arch is rolling,
 so `pacman -Syu` is inherently in-release.
 
 `bye` remains the full maintenance-and-exit command. By default it runs package
-maintenance, uses native `claude update`/`codex update` only for detected
-installed AI CLIs, safely clears known history files, performs the intended
-system-wide macOS metadata scan, restarts Finder/Dock/SystemUIServer, and exits
-the current shell.
+maintenance (including autoremove, cache cleanup and orphan removal), uses
+native `claude update`/`codex update` only for detected installed AI CLIs,
+performs the intended system-wide macOS metadata scan, restarts
+Finder/Dock/SystemUIServer, and exits the current shell. History is kept.
 
 Options:
 
-- `--keep-history`: preserve history.
-- `--aggressive-history`: add legacy broad history/HSTS file and symlink
-  matches; directories are never recursively removed.
+- `--wipe-history`: also clear known shell and REPL history files.
+- `--aggressive-history`: wipe history, adding legacy broad history/HSTS file
+  and symlink matches; directories are never recursively removed.
+- `--keep-history`: accepted for compatibility; keeping history is the default.
 - `--purge-recycle-bins`: explicitly allow `$RECYCLE.BIN` directory removal.
 - `--shutdown-wsl`: shut down WSL after maintenance; normal WSL behavior exits
   only the current shell.

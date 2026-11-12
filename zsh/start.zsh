@@ -18,12 +18,14 @@ if (( EUID == 0 )) && [[ ! -O $HOME ]]; then
   return 0
 fi
 
-puts()     { print -Pn "%B%F{blue}===>%f%b "; print -r -- "$*"; }
-puts-err() { print -Pn "%B%F{red}===>%f%b " >&2; print -r -- "$*" >&2; }
+# Helpers. The profile's own code calls only these private __leos_* names; the
+# short public names are defined further down, for the override files only.
+__leos_puts()     { print -Pn "%B%F{blue}===>%f%b "; print -r -- "$*"; }
+__leos_puts_err() { print -Pn "%B%F{red}===>%f%b " >&2; print -r -- "$*" >&2; }
 
 # Prepend $1 to PATH (dedup, move-to-front) if it is a real dir.
-# add-path <dir> [required]  — with "required", warn + return 1 when missing.
-add-path() {
+# __leos_add_path <dir> [required]  — with "required", warn + return 1 when missing.
+__leos_add_path() {
   local dir=$1 mode=${2:-}
   if [[ -d $dir ]]; then
     # (b) escapes pattern metacharacters in $dir. Belt and braces rather than a
@@ -35,24 +37,27 @@ add-path() {
     typeset -gU path
     return 0
   elif [[ $mode == required ]]; then
-    puts-err "$dir is not found."
+    __leos_puts_err "$dir is not found."
     return 1
   fi
   return 0
 }
 
+# REPLY: the brew executable, from PATH or a standard prefix. Returned in REPLY
+# rather than printed, so the caller needs no command substitution: that forked
+# a subshell on every startup, even on machines without Homebrew.
 __leos_brew_bin() {
-  if command -v brew >/dev/null 2>&1; then command -v brew; return 0; fi
+  if whence -p brew >/dev/null; then REPLY=$commands[brew]; return 0; fi
   local b
   for b in /opt/homebrew/bin/brew /usr/local/bin/brew "$HOME/.linuxbrew/bin/brew" /home/linuxbrew/.linuxbrew/bin/brew; do
-    [[ -x $b ]] && { print -r -- "$b"; return 0; }
+    if [[ -x $b && ! -d $b ]]; then REPLY=$b; return 0; fi
   done
   return 1
 }
 
 __leos_brew_prefix() {
-  local b; b=$(__leos_brew_bin) || return 1
-  "$b" --prefix
+  __leos_brew_bin || return 1
+  "$REPLY" --prefix
 }
 
 # Shell-internal: not exported into child environments. Prefer an explicit
@@ -63,21 +68,48 @@ typeset -g LEOS_PROFILES="${LEOS_PROFILES_HOME:-${__leos_start_file:A:h:h}}"
 typeset -g LEOS_PROFILES_ZSH=$LEOS_PROFILES/zsh
 
 # Source zsh/<name>.zsh; warn unless mode is "optional".
-entry() {
+__leos_entry() {
   local name=$1 mode=${2:-}
   if [[ -e $LEOS_PROFILES_ZSH/$name.zsh ]]; then
     source "$LEOS_PROFILES_ZSH/$name.zsh"
   elif [[ $mode != optional ]]; then
-    puts-err "$name is not found. Check $LEOS_PROFILES_ZSH/entries.zsh."
+    __leos_puts_err "$name is not found. Check $LEOS_PROFILES_ZSH/entries.zsh."
   fi
+}
+
+# The short public names exist only while the profile loads, so
+# local/private.zsh and local/private-interactive.zsh can still call them.
+# __leos_drop_public_helpers removes them at the end of this file, so generic
+# names like `puts` and `entry` do not leak into every shell. A function
+# that needs one at run time should call the __leos_* name, or plain `print`.
+puts()     { __leos_puts "$@"; }
+puts-err() { __leos_puts_err "$@"; }
+add-path() { __leos_add_path "$@"; }
+entry()    { __leos_entry "$@"; }
+typeset -gA __leos_public_helpers=(
+  puts "$functions[puts]" puts-err "$functions[puts-err]"
+  add-path "$functions[add-path]" entry "$functions[entry]"
+)
+
+# Remove the public names again, except one an override file redefined: that
+# definition is the user's to keep.
+__leos_drop_public_helpers() {
+  local name
+  for name in ${(k)__leos_public_helpers}; do
+    if [[ ${functions[$name]-} == "$__leos_public_helpers[$name]" ]]; then
+      unfunction -- "$name"
+    fi
+  done
+  unset __leos_public_helpers
+  unfunction __leos_drop_public_helpers
 }
 
 # Shared init-cache helpers, loaded before entries.zsh so every path/ entry can
 # use them. Kept in their own file so tests can exercise them in isolation.
-entry cache
+__leos_entry cache
 
 # PATH, environment, aliases and public commands.
-entry entries
+__leos_entry entries
 
 # __leos_private_mode_warn <file>
 # Local override files routinely hold API keys, and a group-traversable home
@@ -113,6 +145,14 @@ if [[ -r $LEOS_PROFILES/local/private.zsh ]]; then
   source "$LEOS_PROFILES/local/private.zsh"
 fi
 
+# env.zsh defined the command wrappers before private.zsh could set
+# LEOS_DISABLE_ALIASES, so honour a value set there now.
+if [[ ${LEOS_DISABLE_ALIASES:-0} == 1 ]] && (( $+functions[__leos_drop_wrappers] )); then
+  __leos_drop_wrappers
+fi
+(( ! $+functions[__leos_drop_wrappers] )) || unfunction __leos_drop_wrappers
+unset __leos_wrappers
+
 # Dumb terminals (Emacs TRAMP, `M-x shell`, some IDE runners) get the PATH and
 # environment above but no line editor, plugins or themed prompt: those emit
 # escape sequences such a terminal shows literally, and TRAMP waits for a
@@ -120,11 +160,12 @@ fi
 if [[ ${TERM:-} == dumb ]]; then
   unsetopt zle
   PS1='$ '
+  __leos_drop_public_helpers
   return 0
 fi
 
 # Plugins, completion and the prompt.
-entry interactive
+__leos_entry interactive
 
 # Machine-local interactive overrides, last of all: the counterpart to
 # local/private.zsh for anything that needs `compdef`, a ZLE widget, or the final
@@ -133,6 +174,9 @@ if [[ -r $LEOS_PROFILES/local/private-interactive.zsh ]]; then
   __leos_private_mode_warn "$LEOS_PROFILES/local/private-interactive.zsh"
   source "$LEOS_PROFILES/local/private-interactive.zsh"
 fi
+
+# The public helper names were for the override files above only.
+__leos_drop_public_helpers
 
 # Convention: every profile zsh file ends with a bare `:` so `source`
 # reports success when the file's last real command is a guard that
