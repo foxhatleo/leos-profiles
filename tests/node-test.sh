@@ -170,6 +170,9 @@ legacy_npm_copy() {
     fail "Corepack's shims were not enabled in the npm prefix: $(cat "$TEST_EXEC_LOG")"
   grep -qxF -- "exec --using=default -- env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 $npm_prefix/bin/corepack install --global pnpm@latest yarn@stable" "$TEST_EXEC_LOG" ||
     fail "pnpm@latest and yarn@stable were not installed without a prompt: $(cat "$TEST_EXEC_LOG")"
+  # Each runs once with the network allowed (pnpm fetches its native binary).
+  grep -qxF -- "exec --using=default -- env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 $npm_prefix/bin/pnpm --version" "$TEST_EXEC_LOG" ||
+    fail "pnpm was not run once after installation: $(cat "$TEST_EXEC_LOG")"
   # The retired yarn package is gone, and only it.
   [[ ! -e $npm_prefix/lib/node_modules/yarn ]] || fail 'the legacy npm-prefix yarn package was left'
   [[ -e $npm_prefix/lib/node_modules/left-pad && -L $npm_prefix/bin/left-pad ]] || fail 'another global npm package was removed'
@@ -180,7 +183,7 @@ legacy_npm_copy() {
   # Verification runs each shim on fnm's default Node, offline.
   : > "$TEST_EXEC_LOG"
   verify_corepack || fail "Corepack's shims did not verify"
-  grep -qxF -- "exec --using=default -- env COREPACK_ENABLE_NETWORK=0 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 $npm_prefix/bin/yarn --version" "$TEST_EXEC_LOG" ||
+  grep -qxF -- "exec --using=default -- env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_NETWORK=0 $npm_prefix/bin/yarn --version" "$TEST_EXEC_LOG" ||
     fail "yarn was not verified through fnm's Node without network: $(cat "$TEST_EXEC_LOG")"
   equal "$(signature_corepack)" "|npm|corepack@latest|$npm_prefix|pnpm@latest yarn@stable"
   # A rerun keeps Corepack's own shims: they are no legacy copy.

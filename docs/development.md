@@ -233,8 +233,10 @@ pnpm@latest yarn@stable` (with `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`), and first
 removes what the retired yarn/pnpm steps left: their npm packages
 (`legacy_npm_copy_present` never mistakes Corepack's own shims for one) and, on
 macOS, the Homebrew formulae their state rows show the profile installed.
-`verify_corepack` runs each shim with `COREPACK_ENABLE_NETWORK=0`, so inspect
-downloads nothing. Run npm and Corepack commands and verification with
+The step then runs each shim once with the network allowed (current pnpm
+releases fetch their native binary on first use); `verify_corepack` runs each
+with `COREPACK_ENABLE_NETWORK=0`, so inspect downloads nothing. Both run from
+`/`, so no project's `packageManager` field picks another version. Run npm and Corepack commands and verification with
 explicit `fnm exec --using=default` so a non-interactive installer does not
 accidentally use an older system Node.
 

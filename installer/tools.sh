@@ -396,7 +396,7 @@ remove_retired_npm_tools() {
 }
 
 install_corepack() {
-  local prefix
+  local prefix tool
   prefix=$(corepack_prefix)
   if [[ $DRY_RUN -eq 1 ]]; then
     remove_retired_npm_tools
@@ -409,7 +409,22 @@ install_corepack() {
   fnm_exec "$prefix/bin/corepack" enable --install-directory "$prefix/bin"
   # shellcheck disable=SC2086  # the defaults are separate words
   fnm_exec env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "$prefix/bin/corepack" install --global $COREPACK_DEFAULTS
+  # Run each once while the network is allowed: current pnpm releases fetch
+  # their native binary on first use, and verify_corepack runs offline.
+  for tool in $COREPACK_TOOLS; do
+    corepack_tool_version "$tool" >/dev/null || die "Corepack's $tool does not run after installation"
+  done
   verify_corepack || die "Corepack's pnpm or Yarn does not run after installation"
+}
+
+# corepack_tool_version <pnpm|yarn> [VAR=value...]: the tool's --version
+# through its Corepack shim on fnm's default Node, run from / so that no
+# project's packageManager field picks another version.
+corepack_tool_version() {
+  local tool=$1 prefix
+  shift
+  prefix=$(corepack_prefix)
+  (cd / && fnm_exec env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 ${1+"$@"} "$prefix/bin/$tool" --version) 2>/dev/null
 }
 
 machine_arch() {
@@ -478,7 +493,7 @@ remove_legacy_npm_copy() {
   local package=$1 command prefix="$HOME/.local/npm"
   # The name becomes part of an `rm -rf` path: never a traversal or another package.
   [[ $package == yarn || $package == pnpm ]] || die "No legacy npm copy to remove for: $package"
-  [[ -e $prefix/bin/$package || -d $prefix/lib/node_modules/$package ]] || return 0
+  [[ -e $prefix/bin/$package || -L $prefix/bin/$package || -d $prefix/lib/node_modules/$package ]] || return 0
   run rm -rf -- "$prefix/lib/node_modules/$package"
   for command in "$package" yarnpkg pnpx; do
     case $package:$command in

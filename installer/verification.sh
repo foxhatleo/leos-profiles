@@ -93,8 +93,7 @@ verify_corepack() {
   [[ -x $prefix/bin/corepack ]] || return 1
   for tool in $COREPACK_TOOLS; do
     [[ -x $prefix/bin/$tool && $(readlink "$prefix/bin/$tool" 2>/dev/null || true) == *corepack* ]] || return 1
-    fnm_exec env COREPACK_ENABLE_NETWORK=0 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "$prefix/bin/$tool" --version >/dev/null 2>&1 ||
-      return 1
+    corepack_tool_version "$tool" COREPACK_ENABLE_NETWORK=0 >/dev/null || return 1
   done
 }
 
