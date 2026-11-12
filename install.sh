@@ -642,6 +642,10 @@ inspect_tsv() {
     if [[ $OS_FAMILY == apt ]] && has_csv_item "$SELECTED_GROUPS" dev-tools; then
       printf 'action\trepository\tGitHub CLI apt repository\n'
       printf 'artifact\tdirect\tgithub-cli-keyring\t%s\t%s\n' "$GH_APT_KEYRING_URL" "$GH_APT_KEYRING_SHA256"
+      if message=$(gh_apt_disabled_source); then
+        printf 'warning\tgithub-cli-apt-disabled\t%s names GitHub CLI'"'"'s apt repository but is disabled; it is left as it is and %s is added\n' \
+          "$message" "$(gh_apt_list)"
+      fi
     fi
     if message=$(apt_zoxide_outdated); then printf 'warning\tzoxide-outdated\t%s\n' "$message"; fi
   fi
