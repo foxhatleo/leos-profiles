@@ -72,8 +72,8 @@ jobs:
           printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/$archive" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/shellcheck-$VERSION" >> "$GITHUB_PATH"
-      - name: Lint deterministic installer
-        run: shellcheck --version && shellcheck -s bash -x install.sh installer/*.sh tests/*.sh
+      - name: Lint the installer and bootstrap
+        run: shellcheck --version && shellcheck -s bash -x install.sh bootstrap.sh installer/*.sh tests/*.sh
       # Each linter below runs even when an earlier one failed, so one push
       # reports every finding instead of the first failing tool's.
       - name: Install pinned actionlint
@@ -119,7 +119,7 @@ jobs:
             "https://github.com/mvdan/sh/releases/download/$VERSION/shfmt_${VERSION}_linux_amd64"
           printf '%s  %s\n' "$SHA256" "$binary" | sha256sum -c -
           chmod +x "$binary"
-          "$binary" -d -i 2 -ci install.sh installer/*.sh tests/*.sh
+          "$binary" -d -i 2 -ci install.sh bootstrap.sh installer/*.sh tests/*.sh
 
   install-checks:
     name: Installer + util checks (gating)
@@ -148,30 +148,20 @@ jobs:
         run: zsh tests/runtime-cache-test.zsh
       - name: Test legacy-copy migrations in a fixture HOME
         run: bash tests/migration-test.sh
-      - name: Syntax-check installer modules and shell tests
+      - name: Syntax-check the installer, bootstrap and shell tests
         run: |
-          for script in install.sh installer/*.sh tests/*.sh; do
+          for script in install.sh bootstrap.sh installer/*.sh tests/*.sh; do
             bash -n "$script"
           done
       - name: Validate starship TOML
         run: python3 -c "import tomllib; tomllib.load(open('zsh/starship.toml','rb')); tomllib.load(open('zsh/starship-plain.toml','rb'))"
-      - name: Syntax-check the installer's fenced bash blocks
+      - name: Check the bootstrap one-liner README gives
         run: |
-          # Validate every deterministic bootstrap snippet in the AI runbook.
-          awk '/^```bash$/{f=1;n++;next} /^```$/{f=0;next} f{print > ("blk-" n ".sh")}' QUICK-INSTALL.md
-          shopt -s nullglob   # zero bash blocks -> empty loop, not a literal "blk-*.sh" false error
-          # The runbook is known to contain bash blocks, so extracting none means
-          # the fence format drifted and this check silently validated nothing.
-          if ! compgen -G 'blk-*.sh' >/dev/null; then
-            echo 'no bash blocks extracted from QUICK-INSTALL.md - did the fence format change?'
-            exit 1
-          fi
-          rc=0
-          for b in blk-*.sh; do
-            bash -n "$b" || { echo "bash syntax error in QUICK-INSTALL.md block: $b"; rc=1; }
-          done
-          rm -f blk-*.sh
-          exit "$rc"
+          # The README's command must fetch this repository's bootstrap.sh from
+          # master, and that script must parse with the Bash a new Mac has.
+          # shellcheck disable=SC2016  # the literal command, $(...) included
+          grep -qF 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/bootstrap.sh)"' README.md
+          bash -n bootstrap.sh
       - name: Smoke-test the deterministic apply in dry-run (apt)
         run: bash tests/apply-dryrun-test.sh
       - name: Prove inspect and dry-run apply are read-only (apt)

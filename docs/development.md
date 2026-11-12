@@ -4,10 +4,15 @@
 
 `install.sh` owns argument parsing, validation, inspection, and orchestration.
 Sourced modules share its context and do not invoke provisioning when loaded.
-The implementation stays compatible with macOS Bash 3.2.
+The implementation stays compatible with macOS Bash 3.2, and so does
+`bootstrap.sh`. `AGENTS.md` summarises the rules and checks for anyone
+changing the repository.
 
 | File | Responsibility |
 | --- | --- |
+| `bootstrap.sh` | The curl entry point: installs Git, clones or fast-forwards the checkout, execs `install.sh setup` on `/dev/tty` (see "Setup") |
+| `installer/setup.sh` | The setup wizard's stages, the release-tag warm-up and `render_plan` |
+| `installer/ui.sh` | Prompt primitives (gum or plain numbered prompts) and `ensure_gum` |
 | `installer/registry.sh` | Ordered component registry, dependency closure, handler validation, the tool-artifact table, and which steps a full upgrade re-runs |
 | `installer/state.sh` | Saved profiles, schema migration, state signatures, locking and cleanup |
 | `installer/packages.sh` | Platform bootstrap, package maps, package-manager operations and the extra repositories they need (RPM Fusion, GitHub CLI's apt repository) |
@@ -106,7 +111,7 @@ Manual-action names cover registration, login, email-read scope,
 the exact `gh auth refresh -h github.com -s read:public_key,read:gpg_key`
 command, with the scopes the selected keys need), key selection,
 SSH identity configuration, `run-in-terminal` (the destination is the exact
-command to run in a terminal; see "Apply flow" below), `set-login-shell`
+command to run in a terminal; see "Apply flow" below; never in setup), `set-login-shell`
 (chsh is missing) and `install-windows-font` (WSL). An empty public-path field is valid for actions
 such as login. Only public artifacts are referenced: never emit private key
 contents, tokens or passphrases. On registration pauses, save the explicit
@@ -121,15 +126,34 @@ local signing and confirmed GitHub registration.
 ## Apply flow
 
 `main` runs, in order: argument parsing; `remove-blocks` and `inventory`
-(dispatched before platform detection, so they work anywhere); the saved
-profile for `reconcile` and `inspect --saved`; validation, dependency closure
-and `detect_os`; `inspect` stops here. Apply and reconcile then warn about an
-unsupported platform, capture the existing Node, and run `preflight`; only
-after it do they take the lock, migrate local state, write the profile, apply
-the Homebrew mirror, bootstrap, resolve Node, run each component, compile the
-Zsh sources, and last provision credentials. `finish_manual_actions` prints
-every queued `manual-action` and exits 3; a credential pause calls it at
-once.
+(dispatched before platform detection, so they work anywhere); `setup` (see
+"Setup" below); the saved profile for `reconcile` and `inspect --saved`;
+`prepare_selection` (validation, dependency closure, `detect_os` and the
+OS-specific refusals); `inspect` stops here. Apply and reconcile need `--yes`
+and then run `apply_selection`: warn about an unsupported platform and run
+`preflight`; only after it take the lock, migrate local state, write the
+profile, apply the Homebrew mirror, bootstrap, resolve Node, run each
+component, compile the Zsh sources, and last provision credentials.
+`finish_manual_actions` prints every queued `manual-action` and exits 3; a
+credential pause calls it at once.
+
+`install.sh` with no arguments (`bare_invocation`) is `setup` when stdin is a
+terminal and `/dev/tty` opens. Without a terminal, when `CODESPACES`,
+`REMOTE_CONTAINERS` or `DEVCONTAINER` is set (Codespaces and dev containers
+run a dotfiles repository's executable `install.sh` that way), it is
+`apply --yes` with the lean profile: `LEAN_STEPS` (`zsh-config,plugins,starship`),
+no package groups beyond what they imply, no full upgrade, fonts `no`,
+default shell `no`, SSH and GPG `skip`. Anywhere else it prints the usage and
+exits 2. `install.sh` is committed with mode 100755.
+
+The Homebrew installer runs as `NONINTERACTIVE=1 /bin/bash install.sh`:
+the plan was approved already and preflight validated sudo, which the
+installer then uses with `sudo -n`. Preflight sets `SUDO_PLANNED` when the
+plan runs anything through sudo; `run_step` then renews a cached sudo login
+(`sudo -n -v`, never a prompt) before each step, and around the Ruby compile
+`refresh_sudo` (`sudo -n -v`, else `sudo -v` at a terminal) and a background
+keepalive (`sudo_keepalive_start`/`_stop`, killed by `cleanup` too) keep it
+from expiring before chsh or the credential packages.
 
 `preflight` (installer/plan.sh) changes nothing. It stops on a blocking
 rbenv conflict (unless `--skip-existing-version-managers`), checks
@@ -159,6 +183,78 @@ status explicitly.
 A component that needs the user (a missing chsh) calls `queue_manual_action`
 and sets `STEP_AWAITS_MANUAL_ACTION`: `run_step` then leaves it unrecorded and
 the run continues.
+
+## Setup
+
+`setup_main` (install.sh) is the interactive front end. It requires a
+terminal: `UI_TTY` (default `/dev/tty`; tests point it at a file of answers)
+must open, and when it is `/dev/tty` and stdin is not a terminal, stdin is
+moved to it, so sudo, ssh-keygen, gpg and gh can prompt and preflight's
+`run-in-terminal` stop never fires inside setup (preflight dies instead,
+which cannot happen at a terminal). Then:
+
+1. `detect_os`, `ui_init` (installer/ui.sh): fd 7 reads `UI_TTY`; gum is
+   used when fd 7 and stderr are terminals, `TERM` is not `dumb`, `--plain`
+   (`UI_PLAIN=1`) is not given and `ensure_gum` finds one: gum on PATH, else
+   on macOS `brew install gum` (not in a dry run), else
+   `github_release_pick charmbracelet/gum 'gum_{version}_{os}_{arch}.tar.gz'`
+   installed by `install_archive_binary` into a tracked temporary directory
+   (in a subshell with `TMPDIR` there, so a failure falls back to the plain
+   prompts; downloaded in a dry run too, since it changes nothing on the
+   host).
+2. `setup_wizard` (installer/setup.sh): `setup_mode` (Recommended,
+   Customize, or the saved choices through `read_profile` when the profile
+   exists), then for Customize `setup_components`, `setup_package_groups`
+   (heroku on macOS only), `setup_fonts`, `setup_full_upgrade`,
+   `setup_casks` (macOS, with a full upgrade), `setup_default_shell`,
+   `setup_release_age`; for all but the saved choices `setup_ssh` and
+   `setup_gpg`; then `setup_git_identity` (GPG only, missing values only) and
+   `setup_conflicts` (a blocking `version_manager_conflicts rbenv` becomes
+   `SKIP_EXISTING_VERSION_MANAGERS=1` or a stop). Each stage only sets the
+   globals the matching apply option sets; validation stays
+   `validate_options`'s.
+3. `prepare_selection`, `INTERACTIVE_MANUAL=1`, `warm_release_picks` (each
+   selected release artifact's tag is picked in this shell, so inspect's
+   subshells and apply see the same one), `inspect_tsv` into a temporary
+   file in this shell (globals such as the resolved Node and runtime lines
+   do not survive `$(...)`), `render_plan` on it (grouped by record type,
+   every type but `meta`, ending with each `postcondition` as to do / done /
+   skipped and the counts), and one `ui_confirm`.
+4. `apply_selection` in the same process, with `COMMAND=setup` (it writes
+   the profile as apply does).
+
+The UI primitives (`ui_choose`, `ui_multi`, `ui_confirm`, `ui_input`, plus
+`ui_header`, `ui_section`, `ui_note`) draw on stderr and return in
+`UI_REPLY`/`UI_INDEX`, never through `$(...)`. The plain prompts re-ask on a
+bad answer; end of input (or cancelling a gum prompt) exits 130. Option
+labels contain no commas (gum's `--selected` splits on them).
+
+Manual actions: with `INTERACTIVE_MANUAL=1`, `credential_manual_action` calls
+`await_manual_action`, which shows the explanation and offers "Run it for
+me now" (when the caller set `MANUAL_ACTION_OFFER`: `gh auth login
+--hostname github.com --scopes <what the checks need>`, or the
+`gh auth refresh` for a missing scope), "Done: check again" and "Stop here".
+The callers loop (`until <check>; do credential_manual_action ...; done`):
+`ensure_github_auth`, `github_key_list`, `github_email_is_verified`, and in
+`provision_ssh`/`provision_gpg` registration and the SSH probes. Stopping
+falls back to the queued action and exit 3. In setup,
+`finish_manual_actions` prints a checklist instead of TSV records, and at
+the end of a run (`finish_manual_actions final`) lists the component actions
+(chsh missing, the WSL font) and returns 0. Outside setup
+(`INTERACTIVE_MANUAL=0`) nothing waits.
+
+`bootstrap.sh` runs every statement inside `main`, called on its last line,
+so a truncated download runs nothing (a test runs each truncation). `bs_os`
+picks macos, apt, fedora or arch; `bs_install_git` (only when `git` does not
+run; on macOS when `xcode-select -p` fails) runs `xcode-select --install`
+and polls (`BS_POLL_SECONDS`, `BS_POLL_LIMIT`), or installs git and
+ca-certificates through sudo (Arch: `pacman -Syu --needed`). `bs_checkout`
+clones `https://github.com/foxhatleo/leos-profiles.git` into
+`${LEOS_PROFILES_HOME:-~/.leos-profiles}`, or for an existing directory
+requires a Git checkout whose raw `remote.origin.url` names this repository
+(HTTPS or SSH), a clean `git status --porcelain` and a successful
+`git pull --ff-only`. `bs_start_setup` execs `bash <dir>/install.sh setup
+"$@" </dev/tty`. Tests set `LEOS_BOOTSTRAP_LIB_ONLY=1` to source it.
 
 ## Zsh startup files
 
@@ -250,9 +346,9 @@ configured OS release/repositories; they do not run distribution-upgrade tools.
 Run these from the repository root:
 
 ```bash
-for file in install.sh installer/*.sh tests/*.sh; do bash -n "$file" || exit; done
+for file in install.sh bootstrap.sh installer/*.sh tests/*.sh; do bash -n "$file" || exit; done
 for file in zsh/*.zsh zsh/path/*.zsh tests/*.zsh; do zsh -n "$file" || exit; done
-shellcheck -s bash -x install.sh installer/*.sh tests/*.sh
+shellcheck -s bash -x install.sh bootstrap.sh installer/*.sh tests/*.sh
 bash tests/install-test.sh
 /bin/bash tests/install-test.sh  # macOS: the system Bash 3.2 a fresh Mac runs
 bash tests/apply-dryrun-test.sh
@@ -275,10 +371,13 @@ tool-root, Homebrew and Git variables first, so its exact command-line
 assertions do not depend on the caller's environment.
 `migration-test.sh` runs the destructive macOS legacy-copy migrations in a
 fixture HOME and checks that they remove nothing else. `readonly-test.sh`
-snapshots the fixture HOME and checkout around `inspect`, `apply --dry-run` and
-`reconcile --dry-run` through the real CLI, with package managers and network
-clients replaced by PATH fakes, and checks every inspect record against the
-table above. `profile-test.zsh` runs each Zsh block through `run_block`, which
+snapshots the fixture HOME and checkout around `inspect`, `apply --dry-run`,
+`reconcile --dry-run` and `setup --dry-run` through the real CLI, with package
+managers and network clients replaced by PATH fakes, and checks every inspect
+record against the table above. The setup tests (in `install-test.sh` and
+both CLI suites) answer the plain prompts from a file named by `UI_TTY` with
+`UI_PLAIN=1`; the bootstrap tests run the real git against a local upstream
+(`url.<path>.insteadOf` in a fixture `GIT_CONFIG_GLOBAL`). `profile-test.zsh` runs each Zsh block through `run_block`, which
 fails unless the block reaches an appended sentinel: a shell error inside a
 block (an unmatched glob, an unset parameter) otherwise ends `zsh -c` with
 status 0 and silently skips the remaining assertions. Where a behaviour depends
@@ -293,7 +392,7 @@ CI also lints the workflows and Python. With the same pinned versions:
 actionlint                                  # 1.7.12; uses shellcheck from PATH
 zizmor --no-progress .github                # 1.30.1
 ruff check --no-cache util tests            # 0.16.10; ruff.toml targets Python 3.9
-shfmt -d -i 2 -ci install.sh installer/*.sh tests/*.sh  # informational only
+shfmt -d -i 2 -ci install.sh bootstrap.sh installer/*.sh tests/*.sh  # informational only
 ```
 
 Credential tests mock all GitHub and SSH connections. Where GPG, gpgconf and
@@ -317,7 +416,8 @@ and the picked Nerd Fonts archive, and then, on Linux, installs and runs each
 picked release (a second install must find it current) plus npm's Corepack
 with its pnpm and Yarn on the current LTS; on macOS it checks that each Homebrew formula
 exists. Plugin checks check out each plugin's release and load the combined
-real Zsh plugin integration. CI also checks TOML and fenced Bash in the runbook.
+real Zsh plugin integration. CI also checks the Starship TOML and that the
+README's bootstrap one-liner names `bootstrap.sh` on master.
 None of these alone substitutes for actual package installation.
 
 ## CI layout
