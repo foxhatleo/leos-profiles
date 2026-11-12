@@ -405,9 +405,10 @@ install_os_packages() {
       if has_csv_item "$SELECTED_GROUPS" heroku; then run brew tap heroku/brew; fi
       if [[ $FULL_UPGRADE -eq 1 ]]; then
         run brew update
-        run brew upgrade
+        # A bare `brew upgrade` covers outdated casks too, so name formulae.
         # Casks are GUI apps, often updating themselves, and some cask
         # upgrades run installers that ask for sudo: only on request.
+        run brew upgrade --formula
         if [[ $UPGRADE_CASKS -eq 1 ]]; then run brew upgrade --cask; fi
       fi
       pkg_install "${requested[@]}"

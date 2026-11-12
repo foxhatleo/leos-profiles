@@ -2894,12 +2894,14 @@ test_cask_upgrade_is_opt_in() {
   DRY_RUN=1
   ensure_brew() { :; }
   out=$(install_os_packages 2>&1)
-  assert_contains "$out" "+ brew upgrade "
+  # A bare `brew upgrade` would also upgrade casks: the full upgrade names
+  # formulae, and no cask upgrade runs.
+  assert_equals "$(printf '%s\n' "$out" | grep '^+ brew upgrade')" "+ brew upgrade --formula "
   [[ $out != *"--cask"* ]] || fail "casks were upgraded without --upgrade-casks: $out"
   [[ $(privileged_plan) != *cask* && $(report_behaviour) != *cask* ]] || fail "a cask upgrade was disclosed while off"
   UPGRADE_CASKS=1
   out=$(install_os_packages 2>&1)
-  assert_contains "$out" "+ brew upgrade --cask"
+  assert_equals "$(printf '%s\n' "$out" | grep '^+ brew upgrade')" $'+ brew upgrade --formula \n+ brew upgrade --cask '
   assert_contains "$(privileged_plan)" $'cask-upgrade\tbrew upgrade --cask'
   assert_contains "$(report_behaviour)" $'behaviour\tcask-upgrade\tfull upgrade also upgrades every Homebrew cask (GUI apps; some ask for sudo)'
   # Without a full upgrade nothing is upgraded, so nothing is disclosed.
