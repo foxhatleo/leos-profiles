@@ -399,12 +399,24 @@ render_plan() {
       }
       if (count("release") + count("artifact") + count("external") > 0) {
         head("Releases and sources")
+        # A Linux release tool has an artifact row (where from) and a release
+        # row (which release now): one line each, joined by name.
         for (i = 1; i <= count("release"); i++) {
-          if (field("release", i, 3) == "unresolved") item(field("release", i, 2) ": release not resolved yet (apply picks it)")
-          else item(field("release", i, 2) " " field("release", i, 3) ", published " field("release", i, 4) ", checked by " field("release", i, 5))
+          if (field("release", i, 3) == "unresolved") rel[i] = "release not resolved yet (apply picks it)"
+          else rel[i] = field("release", i, 3) ", published " field("release", i, 4) ", checked by " field("release", i, 5)
+          relidx[field("release", i, 2)] = i
         }
-        for (i = 1; i <= count("artifact"); i++)
-          item(field("artifact", i, 3) ": " field("artifact", i, 2) " " field("artifact", i, 4) " " field("artifact", i, 5))
+        for (i = 1; i <= count("artifact"); i++) {
+          name = field("artifact", i, 3)
+          text = name ": " field("artifact", i, 2) " " field("artifact", i, 4) " " field("artifact", i, 5)
+          if (field("artifact", i, 2) == "release" && (name in relidx)) {
+            text = text ", " rel[relidx[name]]
+            used[relidx[name]] = 1
+          }
+          item(text)
+        }
+        for (i = 1; i <= count("release"); i++)
+          if (!(i in used)) item(field("release", i, 2) ": " rel[i])
         for (i = 1; i <= count("external"); i++) item("contacts " field("external", i, 2) ": " field("external", i, 3))
       }
       if (count("privileged") > 0) {
