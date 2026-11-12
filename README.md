@@ -213,10 +213,10 @@ When GitHub cannot be reached (or refuses, at that limit), a tool that is
 already installed and works is kept with a warning; only a missing or broken
 one stops the run.
 
-On macOS the full upgrade runs `brew update` and `brew upgrade` (formulae). It
-upgrades casks (GUI apps; some cask installers ask for sudo) only with
-`--upgrade-casks`, which apply saves for later reconciles; `bye`'s
-`brew-checkup` still upgrades casks as before.
+On macOS the full upgrade runs `brew update` and `brew upgrade --formula` (a
+bare `brew upgrade` would include casks). It upgrades casks (GUI apps; some
+cask installers ask for sudo) only with `--upgrade-casks`, which apply saves
+for later reconciles; `bye`'s `brew-checkup` still upgrades casks as before.
 
 Two downloads stay pinned to a reviewed URL and SHA-256 digest rather than
 following upstream: Homebrew's installer script (it runs once, on a Mac
@@ -237,8 +237,9 @@ earlier from the
 distribution moves to the repository's version on the next full upgrade.
 
 Equivalent GitHub HTTPS/SSH origins are accepted and normalized; dirty
-installer-managed checkouts, and checkouts at a commit made locally, are
-refused rather than overwritten.
+installer-managed checkouts, and checkouts at a commit made locally or with a
+local tag on one (the update deletes tags origin does not have), are refused
+rather than overwritten. Keep such work on a branch and delete the tag.
 
 Machines set up before 2026-10 carry pinned copies. Inspect reports each
 as a `migration` record and the next approved run moves it: on macOS the
