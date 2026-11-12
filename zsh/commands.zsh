@@ -12,7 +12,8 @@ __rmdsstore() {
   # (ignores PYTHON* env and user site; drops the script dir from sys.path on
   # 3.11+). rmdsstore.py is stdlib-only, so the system Python is sufficient.
   # Note: the script itself lives in the user-owned checkout by design (see the
-  # README trust model); this closes the interpreter/env vectors, not that one.
+  # "Maintenance commands" in docs/development.md); this closes the
+  # interpreter/env vectors, not that one.
   if [[ ! -x /usr/bin/python3 ]]; then
     __leos_puts_err "/usr/bin/python3 (the system Python) is required for rmdsstore."
     return 1

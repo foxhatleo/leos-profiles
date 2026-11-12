@@ -112,7 +112,7 @@ report_conflicts() {
 }
 
 # ---------------------------------------------------------------------------
-# Existing shell frameworks and version managers (ONB-6). README's
+# Existing shell frameworks and version managers (ONB-6). docs/development.md's
 # "Existing setups" section explains how each coexists with the profile.
 report_existing_setups() {
   local path prefix
