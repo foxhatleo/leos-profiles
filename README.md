@@ -148,8 +148,10 @@ so missing or corrupt tools are repaired.
 
 Besides the selection, packages, artifacts and files, `inspect` reports every
 action that runs as root (`privileged`: package-manager runs, Arch's
-`pacman -Syu`, Fedora's ffmpeg swap, the `/etc/shells` edit,
-`sudo chsh`, cask upgrades), side effects (`behaviour`: Debian's fd/bat links,
+`pacman -Syu`, Fedora's RPM Fusion and ffmpeg swap, the GitHub CLI apt
+repository on Debian/Ubuntu, the `/etc/shells` edit,
+`sudo chsh`, cask upgrades), side effects (`behaviour`: Debian's fd/bat links, gh
+from GitHub CLI's apt repository,
 GNU tools ahead of BSD on macOS, global Git identity writes, the Homebrew
 mirror, cask upgrades), effects that
 cannot be undone automatically (`irreversible`), existing installations in the
@@ -207,6 +209,16 @@ upgrades casks (GUI apps; some cask installers ask for sudo) only with
 Two downloads stay pinned to a reviewed URL and SHA-256 digest, because there
 is nothing newer to follow: Homebrew's installer script (it runs once, on a
 Mac without Homebrew) and rpatool (its GitHub repository is archived).
+
+On Debian and Ubuntu, dev-tools takes gh from GitHub CLI's own apt repository
+(`https://cli.github.com/packages`), because the distributions' gh is years
+old (2.4 on Ubuntu 22.04, 2.23 on Debian 12). The packages step installs its
+keyring, checked against the SHA-256 GitHub publishes, as
+`/etc/apt/keyrings/githubcli-archive-keyring.gpg` and its source line as
+`/etc/apt/sources.list.d/github-cli.list`, before the apt install; the plan
+lists both as a root action. An existing correct setup, or any other apt
+source for that repository, is left as it is. A gh installed earlier from the
+distribution moves to the repository's version on the next full upgrade.
 
 Equivalent GitHub HTTPS/SSH origins are accepted and normalized; dirty
 installer-managed checkouts, and checkouts with commits that are not on their

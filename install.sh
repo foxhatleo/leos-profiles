@@ -550,6 +550,10 @@ inspect_tsv() {
     if [[ $OS_FAMILY == fedora ]] && has_csv_item "$SELECTED_GROUPS" media; then
       printf 'action\trepository\tRPM Fusion free\n'
     fi
+    if [[ $OS_FAMILY == apt ]] && has_csv_item "$SELECTED_GROUPS" dev-tools; then
+      printf 'action\trepository\tGitHub CLI apt repository\n'
+      printf 'artifact\tdirect\tgithub-cli-keyring\t%s\t%s\n' "$GH_APT_KEYRING_URL" "$GH_APT_KEYRING_SHA256"
+    fi
   fi
   if [[ $SSH_MODE != skip ]]; then
     printf 'action\tssh\tprepare explicit local key and verify manual GitHub registration\n'

@@ -19,6 +19,8 @@ unset HOMEBREW_PREFIX HOMEBREW_BREW_GIT_REMOTE HOMEBREW_BOTTLE_DOMAIN HOMEBREW_A
 unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GITHUB_TOKEN GH_TOKEN NERD_FONTS_TEST_RELEASE_URL
 # shellcheck source=../install.sh
 source "$ROOT/install.sh"
+# The host's apt sources must not steer the GitHub CLI repository checks.
+APT_ETC=/nonexistent/leos-test-apt
 
 CURRENT_TEST=""
 fail() { printf '%s\n' "FAIL [${CURRENT_TEST:-?}]: $*" >&2; exit 1; }
@@ -1739,6 +1741,89 @@ test_fedora_media_swaps_only_ffmpeg() {
   [[ $out != *rpmfusion* && $out != *swap* && $out != *allowerasing* ]] || fail "a non-media install touched RPM Fusion: $out"
 }
 
+# Debian/Ubuntu dev-tools take gh from GitHub CLI's apt repository: the
+# pinned keyring and the source line are installed as root before apt's index
+# refresh, disclosed in the plan, and never added twice.
+test_apt_dev_tools_add_the_github_cli_repository() {
+  local temp out keyring list
+  temp=$(mktemp -d)
+  OS_FAMILY=apt
+  DRY_RUN=1
+  SUDO=sudo
+  FULL_UPGRADE=0
+  APT_ETC="$temp/etc/apt"
+  keyring="$APT_ETC/keyrings/githubcli-archive-keyring.gpg"
+  list="$APT_ETC/sources.list.d/github-cli.list"
+  mkdir -p "$APT_ETC/sources.list.d"
+  dpkg() { [[ $* == --print-architecture ]] && printf 'arm64\n'; }
+  package_installed() { return 1; }
+  ensure_sudo() { :; }
+  apt_compat_links() { :; }
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=dev-tools
+  # The bootstrap already refreshed the index; the new repository needs another.
+  APT_INDEX_UPDATED=1
+  out=$(install_os_packages)
+  assert_contains "$out" "Would download and SHA-256 verify https://cli.github.com/packages/githubcli-archive-keyring.gpg"
+  assert_contains "$out" "+ sudo install -d -m 755 $APT_ETC/keyrings $APT_ETC/sources.list.d"
+  assert_contains "$out" "+ sudo install -m 644 "
+  assert_contains "$out" " $keyring "
+  assert_contains "$out" " $list "
+  [[ $(grep -n "github-cli.list" <<< "$out" | head -1 | cut -d: -f1) -lt $(grep -n "apt-get update" <<< "$out" | cut -d: -f1) ]] ||
+    fail "the GitHub CLI repository was not added before apt's index refresh: $out"
+  [[ $(grep -n "apt-get update" <<< "$out" | cut -d: -f1) -lt $(grep -n "install -y" <<< "$out" | cut -d: -f1) ]] ||
+    fail "apt installed before refreshing the index: $out"
+  assert_contains "$(privileged_plan)" $'repository\tsudo install of GitHub CLI\'s apt keyring ('"$keyring"') and source list ('"$list"')'
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  verify_step() { return 1; }
+  out=$(inspect_tsv)
+  assert_contains "$out" $'action\trepository\tGitHub CLI apt repository'
+  assert_contains "$out" $'artifact\tdirect\tgithub-cli-keyring\thttps://cli.github.com/packages/githubcli-archive-keyring.gpg\t'"$GH_APT_KEYRING_SHA256"
+  assert_contains "$out" $'behaviour\tgithub-cli-apt\t'
+  # Without dev-tools, nothing about it.
+  SELECTED_GROUPS=shell
+  out=$(install_os_packages)
+  [[ $out != *cli.github.com* && $out != *github-cli* ]] || fail "a dev-tools-free install touched the GitHub CLI repository: $out"
+  [[ $(privileged_plan) != *GitHub* ]] || fail "a dev-tools-free plan discloses the GitHub CLI repository"
+  # A real run, as root: the keyring (mode 644) and the exact source line.
+  SELECTED_GROUPS=dev-tools
+  DRY_RUN=0
+  SUDO=""
+  FIXTURE_KEYRING="$temp/keyring.gpg"
+  printf 'fixture keyring' > "$FIXTURE_KEYRING"
+  GH_APT_KEYRING_SHA256=$(sha256 "$FIXTURE_KEYRING")
+  # ensure_gh_apt_repository has its own local $temp.
+  download_verified() { cp "$FIXTURE_KEYRING" "$3"; }
+  ensure_gh_apt_repository >/dev/null
+  assert_equals "$(cat "$list")" "deb [arch=arm64 signed-by=$keyring] https://cli.github.com/packages stable main"
+  assert_equals "$(cat "$keyring")" "fixture keyring"
+  assert_equals "$(file_mode "$keyring")" 644
+  assert_equals "$(file_mode "$list")" 644
+  assert_equals "$APT_INDEX_UPDATED" 0
+  # Idempotent: the same setup is left alone, in the plan and in a run.
+  assert_equals "$(gh_apt_repository_state)" configured
+  download_verified() { fail "downloaded the keyring for a configured repository"; }
+  APT_INDEX_UPDATED=1
+  out=$(ensure_gh_apt_repository)
+  assert_equals "$out" ""
+  DRY_RUN=1
+  SUDO=sudo
+  out=$(install_os_packages)
+  [[ $out != *github-cli* ]] || fail "a configured repository was added again: $out"
+  [[ $(privileged_plan) != *GitHub* ]] || fail "a configured repository is still a planned root action"
+  # A stale line (an older signed-by path) is replaced.
+  printf 'deb [signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' > "$list"
+  assert_equals "$(gh_apt_repository_state)" missing
+  # Another source for the same repository (here deb822) stays the only one.
+  rm -f "$list"
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\n' > "$APT_ETC/sources.list.d/gh.sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  out=$(install_os_packages)
+  [[ $out != *github-cli* ]] || fail "a second GitHub CLI source was added next to an existing one: $out"
+  rm -rf "$temp"
+}
+
 # BP-8: missing packages on Arch sync and upgrade in one transaction, with or
 # without the full-upgrade policy; there is never a bare -S.
 test_arch_installs_with_a_synced_database() {
@@ -3101,6 +3186,7 @@ TESTS=(
   test_linux_artifacts_use_static_musl_builds
   test_apt_upgrade_keeps_local_configuration
   test_fedora_media_swaps_only_ffmpeg
+  test_apt_dev_tools_add_the_github_cli_repository
   test_arch_installs_with_a_synced_database
   test_version_manager_extension_compile_is_best_effort
   test_nerd_font_rejects_unknown_names_before_downloading

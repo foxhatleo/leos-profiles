@@ -100,6 +100,75 @@ apt_get() {
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
 }
 
+# GitHub CLI's own apt repository, for dev-tools on Debian/Ubuntu: the
+# distributions' gh is years old (2.4 on Ubuntu 22.04, 2.23 on Debian 12).
+# This follows cli/cli's docs/install_linux.md: the binary keyring in
+# /etc/apt/keyrings (mode 644) and a one-line source naming it. The keyring is
+# checked against the SHA-256 GitHub publishes there; it holds the signing
+# keys 2C6106201985B60E6C7AC87323F3D4EA75716059 and
+# 7F38BBB59D064DBCB3D84D725612B36462313325. tests/release-artifacts-test.sh
+# checks the digest against the live file. Like Fedora's RPM Fusion, the
+# repository is added only when the packages step runs the package manager,
+# and never twice: a correct existing setup, or any other apt source that
+# already names the repository (which a second Signed-By would make apt
+# reject), is left alone. APT_ETC moves /etc/apt for tests.
+GH_APT_REPOSITORY="https://cli.github.com/packages"
+GH_APT_KEYRING_URL="https://cli.github.com/packages/githubcli-archive-keyring.gpg"
+GH_APT_KEYRING_SHA256="6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b"
+APT_ETC=/etc/apt
+gh_apt_keyring() { printf '%s/keyrings/githubcli-archive-keyring.gpg\n' "$APT_ETC"; }
+gh_apt_list() { printf '%s/sources.list.d/github-cli.list\n' "$APT_ETC"; }
+gh_apt_source_line() {
+  printf 'deb [arch=%s signed-by=%s] %s stable main\n' \
+    "$(dpkg --print-architecture)" "$(gh_apt_keyring)" "$GH_APT_REPOSITORY"
+}
+
+# gh_apt_repository_state: `configured` (our source line and the pinned
+# keyring are in place), `other` (another apt source names the repository) or
+# `missing`.
+gh_apt_repository_state() {
+  local list keyring file
+  list=$(gh_apt_list)
+  keyring=$(gh_apt_keyring)
+  if [[ -f $list && -f $keyring ]] && [[ $(cat "$list") == "$(gh_apt_source_line)" ]] &&
+    [[ $(sha256 "$keyring") == "$GH_APT_KEYRING_SHA256" ]]; then
+    printf 'configured\n'
+    return 0
+  fi
+  for file in "$APT_ETC/sources.list" "$APT_ETC"/sources.list.d/*.list "$APT_ETC"/sources.list.d/*.sources; do
+    [[ -f $file && $file != "$list" ]] || continue
+    if grep -Eq '^[^#]*cli\.github\.com/packages' "$file"; then
+      printf 'other\n'
+      return 0
+    fi
+  done
+  printf 'missing\n'
+}
+
+gh_apt_repository_needed() {
+  [[ $OS_FAMILY == apt ]] || return 1
+  has_csv_item "$SELECTED_GROUPS" dev-tools || return 1
+  [[ $(gh_apt_repository_state) == missing ]]
+}
+
+ensure_gh_apt_repository() {
+  gh_apt_repository_needed || return 0
+  local keyring list temp
+  keyring=$(gh_apt_keyring)
+  list=$(gh_apt_list)
+  say "Adding GitHub CLI's apt repository ($GH_APT_REPOSITORY): the distribution's gh is outdated"
+  temp=$(mktemp -d "${TMPDIR:-/tmp}/leos-gh-apt.XXXXXX")
+  track_temp "$temp"
+  download_verified "$GH_APT_KEYRING_URL" "$GH_APT_KEYRING_SHA256" "$temp/keyring.gpg"
+  say "GitHub CLI keyring SHA-256: $GH_APT_KEYRING_SHA256"
+  gh_apt_source_line > "$temp/github-cli.list"
+  run_root install -d -m 755 "${keyring%/*}" "${list%/*}"
+  run_root install -m 644 "$temp/keyring.gpg" "$keyring"
+  run_root install -m 644 "$temp/github-cli.list" "$list"
+  # The next apt-get install must see the new repository's index.
+  APT_INDEX_UPDATED=0
+}
+
 # pkg_install <packages...>: install packages with the host package manager.
 # The bootstrap, the packages step and the credential prerequisites all use
 # this one definition (CQ-3).
@@ -416,6 +485,7 @@ install_os_packages() {
       pkg_install "${requested[@]}"
       BREW_FORMULAE="" ;;
     apt)
+      ensure_gh_apt_repository
       apt_update_once
       [[ $FULL_UPGRADE -eq 0 ]] || apt_get upgrade -y
       pkg_install "${requested[@]}"

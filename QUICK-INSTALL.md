@@ -80,11 +80,13 @@ installer is only your deterministic execution engine.
    - every package member and the full-upgrade effect; explain that
      `--no-full-upgrade` requests only missing selected packages but dependency
      resolution may still upgrade dependencies;
-   - external repositories/taps and where each tool comes from (`artifact`
-     records): Homebrew formulae on macOS, latest GitHub releases checked
-     against GitHub's digests on Linux, default-branch Git checkouts, and the
-     two pinned downloads; say that tools follow upstream, so a full upgrade
-     moves them forward;
+   - external repositories (`action repository` records: RPM Fusion on
+     Fedora with `media`, GitHub CLI's apt repository on Debian/Ubuntu with
+     `dev-tools`) and where each tool comes from (`artifact` records):
+     Homebrew formulae on macOS, latest GitHub releases checked against
+     GitHub's digests on Linux, default-branch Git checkouts, and the pinned
+     downloads (including GitHub CLI's apt keyring); say that tools follow
+     upstream, so a full upgrade moves them forward;
    - the Node version: the current LTS fnm will install, or the installed
      default a run without a full upgrade keeps;
    - credential actions, selected references, and manual GitHub registration

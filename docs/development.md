@@ -10,7 +10,7 @@ The implementation stays compatible with macOS Bash 3.2.
 | --- | --- |
 | `installer/registry.sh` | Ordered component registry, dependency closure, handler validation, the tool-artifact table, and which steps a full upgrade re-runs |
 | `installer/state.sh` | Saved profiles, schema migration, state signatures, locking and cleanup |
-| `installer/packages.sh` | Platform bootstrap, package maps and package-manager operations |
+| `installer/packages.sh` | Platform bootstrap, package maps, package-manager operations and the extra repositories they need (RPM Fusion, GitHub CLI's apt repository) |
 | `installer/tools.sh` | Tool installs (Homebrew formulae, latest GitHub releases, npm), default-branch checkouts and Node LTS activation |
 | `installer/config.sh` | Managed shell blocks, symlink-aware rewrites and default-shell changes |
 | `installer/credentials.sh` | Local key preparation, read-only GitHub checks and manual-action pauses |
@@ -79,7 +79,7 @@ update it together with the emitter in `install.sh`.
 | `global` | 3 | `git`, keys | Global Git settings the plan configures |
 | `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone: `host-upgrade` (package upgrades), `login-shell` (chsh) |
 | `privileged` | 3 | action, command or description | An action run as root (through sudo, or directly when root): `homebrew-bootstrap`, `bootstrap`, `package-manager`, `repository`, `dnf-swap`, `pacman-sync`, `credential-packages`, `etc-shells`, `login-shell`, `cask-upgrade` (macOS `--upgrade-casks`: some cask installers ask for sudo) |
-| `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`), `cask-upgrade` (the full upgrade also runs `brew upgrade --cask`; only with `--upgrade-casks`) |
+| `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `github-cli-apt` (Debian/Ubuntu dev-tools take gh from GitHub CLI's apt repository), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`), `cask-upgrade` (the full upgrade also runs `brew upgrade --cask`; only with `--upgrade-casks`) |
 | `conflict` | 4 | component, path, reason | An existing installation in the way of `pyenv`/`rbenv`: `not-a-git-checkout`, `unexpected-origin`, `local-changes` (apply stops unless `--skip-existing-version-managers`), or `homebrew-install` (informational) |
 | `existing` | 4 | name, path, effect | A shell framework or version manager the profile coexists with: `oh-my-zsh`, `powerlevel10k`, `nvm`, `conda`, `asdf`, `mise` |
 | `shadow` | 4 | executable, other copy, profile copy | Linux: a Homebrew copy of a tool that the profile's `~/.local/bin` copy will shadow |
@@ -354,9 +354,14 @@ Tools are not pinned, so there is no routine dependency bump. What needs care:
    uploaded since mid-2025); the installer refuses an asset without one.
 3. Keep the version line in `artifact_registry` matching what the tool prints;
    verification accepts any version but checks that shape.
-4. The two pinned downloads change deliberately: update the URL and SHA-256
+4. The pinned downloads change deliberately: update the URL and SHA-256
    together in `installer/sources.sh` (Homebrew's installer at a reviewed
    commit; rpatool's repository is archived, so it should never change).
+   GitHub CLI's apt keyring (`GH_APT_KEYRING_SHA256` in
+   `installer/packages.sh`) follows the SHA-256 listed in cli/cli's
+   `docs/install_linux.md`; when GitHub rotates or re-signs its keys the
+   live check fails, and the new digest must come from that page and the
+   fingerprints from `gpg --show-keys` on the new file.
 5. Behaviour changes upstream (a new major pnpm, a Node LTS that a tool does
    not support yet) reach users on their next full upgrade. Run the real
    provisioning matrix when a failure points there, and say in the change
