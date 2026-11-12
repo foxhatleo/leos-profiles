@@ -854,7 +854,7 @@ test_bootstrap_installs_unzip_when_missing() {
 }
 
 test_concurrent_lock_rejection() {
-  local temp
+  local temp owner err
   temp=$(mktemp -d)
   LOCAL_DIR="$temp/local"
   LOCK_DIR="$LOCAL_DIR/.install.lock"
@@ -862,10 +862,34 @@ test_concurrent_lock_rejection() {
   LOCK_HELD=0
   prepare_local_dir
   mkdir "$LOCK_DIR"
-  printf '%s\n' $$ > "$LOCK_DIR/pid"
-  if (acquire_lock) >/dev/null 2>&1; then
-    fail "concurrent live lock was accepted"
-  fi
+  # A live process running install.sh holds it.
+  "$BASH" -c 'sleep 60; :' "$temp/install.sh" & owner=$!
+  printf '%s\n' "$owner" > "$LOCK_DIR/pid"
+  err=$( (acquire_lock) 2>&1 ) && { kill "$owner"; fail "concurrent live lock was accepted"; }
+  kill "$owner" 2>/dev/null || true
+  assert_contains "$err" "Another Leo's Profiles operation is running (PID $owner)"
+  rm -rf "$temp"
+}
+
+# After an unclean exit the lock's PID can be reused by an unrelated process:
+# that lock is stale, and the message says how to remove it.
+test_lock_held_by_a_reused_pid_is_reported_stale() {
+  local temp owner err
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  LOCK_DIR="$LOCAL_DIR/.install.lock"
+  DRY_RUN=0
+  LOCK_HELD=0
+  prepare_local_dir
+  mkdir "$LOCK_DIR"
+  sleep 60 & owner=$!
+  printf '%s\n' "$owner" > "$LOCK_DIR/pid"
+  err=$( (acquire_lock) 2>&1 ) && { kill "$owner"; fail "a reused-PID lock was accepted"; }
+  kill "$owner" 2>/dev/null || true
+  assert_contains "$err" "looks stale"
+  assert_contains "$err" "rm -rf -- '$LOCK_DIR'"
+  [[ $err != *"operation is running"* ]] || fail "a reused PID was reported as a running operation: $err"
+  [[ -d $LOCK_DIR ]] || fail "the stale lock was removed automatically"
   rm -rf "$temp"
 }
 
@@ -944,6 +968,19 @@ test_follow_default_branch_moves_detached_checkouts_onto_the_branch() {
   fixture_commit "$temp/plugins/tool" local >/dev/null
   out=$( (follow_default_branch "$upstream" "$temp/plugins/tool" tool) 2>&1 ) && fail "a diverged checkout was updated"
   assert_contains "$out" "tool has commits that are not on origin/trunk"
+  [[ $out != *rewrote* ]] || fail "a local commit was blamed on upstream: $out"
+  # Upstream force-pushed: the checkout holds no local work, so the message
+  # says so and gives the reset to run; nothing is reset automatically.
+  git -C "$temp/plugins/tool" reset -q --hard origin/trunk
+  fixture_git -C "$work" reset -q --hard "$first"
+  third=$(fixture_commit "$work" rewritten)
+  fixture_git -C "$work" push -q --force "$upstream" trunk
+  head=$(git -C "$temp/plugins/tool" rev-parse HEAD)
+  out=$( (follow_default_branch "$upstream" "$temp/plugins/tool" tool) 2>&1 ) && fail "a force-pushed upstream was merged"
+  assert_contains "$out" "tool's upstream rewrote its history"
+  assert_contains "$out" "git -C '$temp/plugins/tool' reset --hard origin/trunk"
+  [[ $out != *"has commits that are not on"* ]] || fail "upstream's rewrite was blamed on local commits: $out"
+  assert_equals "$(git -C "$temp/plugins/tool" rev-parse HEAD)" "$head"
   # Anything else at the destination is refused.
   mkdir -p "$temp/plugins/plain"
   out=$( (follow_default_branch "$upstream" "$temp/plugins/plain" plain) 2>&1 ) && fail "a non-Git directory was taken over"
@@ -1900,21 +1937,29 @@ test_github_release_asset_record_parses_release_json() {
 }
 
 # github_latest_asset fetches the latest release over HTTPS and accepts only
-# a GitHub download with a SHA-256 digest; GITHUB_TOKEN, when set, is sent.
+# a GitHub download with a SHA-256 digest; GITHUB_TOKEN, when set, is sent on
+# curl's stdin, never in its argv. A failed lookup returns a status (4, or 5
+# for 403/429) instead of dying, so artifact_install can keep a good copy.
 test_github_latest_asset_requires_a_sha256_digest() {
-  local temp out a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  local temp out status a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   temp=$(mktemp -d)
   CURL_LOG="$temp/curl-argv"
-  curl() { printf '<%s>' "$@" >> "$CURL_LOG"; printf '\n' >> "$CURL_LOG"; release_json_fixture; }
+  curl() {
+    printf '<%s>' "$@" >> "$CURL_LOG"; printf '\n' >> "$CURL_LOG"
+    [[ $1 != --config ]] || cat >> "$CURL_LOG.stdin"
+    release_json_fixture; printf '\n200'
+  }
   unset GITHUB_TOKEN
   out=$(github_latest_asset fixture/tool tool-linux-x64.tar.gz) || fail "a published SHA-256 digest was refused"
   assert_equals "$out" $'v1.4.2\thttps://github.com/fixture/tool/releases/download/v1.4.2/tool-linux-x64.tar.gz\t'"$a"
   assert_contains "$(cat "$CURL_LOG")" '<--proto><=https><--tlsv1.2>'
   assert_contains "$(cat "$CURL_LOG")" '<https://api.github.com/repos/fixture/tool/releases/latest>'
-  [[ $(cat "$CURL_LOG") != *Authorization* ]] || fail "an Authorization header was sent without GITHUB_TOKEN"
+  [[ $(cat "$CURL_LOG") != *Authorization* && ! -e $CURL_LOG.stdin ]] || fail "an Authorization header was sent without GITHUB_TOKEN"
   : > "$CURL_LOG"
   GITHUB_TOKEN=fixture-token github_latest_asset fixture/tool tool-linux-x64.tar.gz >/dev/null
-  assert_contains "$(cat "$CURL_LOG")" '<-H><Authorization: Bearer fixture-token>'
+  assert_contains "$(cat "$CURL_LOG")" '<--config><->'
+  [[ $(cat "$CURL_LOG") != *fixture-token* ]] || fail "GITHUB_TOKEN was passed in curl's argv: $(cat "$CURL_LOG")"
+  assert_equals "$(cat "$CURL_LOG.stdin")" 'header = "Authorization: Bearer fixture-token"'
   out=$( (github_latest_asset fixture/tool tool-linux-arm64.tar.gz) 2>&1 ) && fail "an asset with a null digest was accepted"
   assert_contains "$out" "GitHub publishes no SHA-256 digest for tool-linux-arm64.tar.gz in fixture/tool v1.4.2"
   out=$( (github_latest_asset fixture/tool tool-sha512.tar.gz) 2>&1 ) && fail "a non-SHA-256 digest was accepted"
@@ -1923,9 +1968,55 @@ test_github_latest_asset_requires_a_sha256_digest() {
   assert_contains "$out" "Unexpected download URL"
   out=$( (github_latest_asset fixture/tool tool-linux-riscv64.tar.gz) 2>&1 ) && fail "a missing asset was accepted"
   assert_contains "$out" "The latest fixture/tool release has no tool-linux-riscv64.tar.gz"
-  curl() { return 22; }
-  out=$( (github_latest_asset fixture/tool tool-linux-x64.tar.gz) 2>&1 ) && fail "an API failure was accepted"
-  assert_contains "$out" "Could not read the latest fixture/tool release"
+  # Unreachable (curl fails; --write-out still prints 000) and refused (the
+  # rate limit's 403, or 429): a status, no output, no exit.
+  curl() { printf '\n000'; return 7; }
+  status=0; out=$(github_latest_asset fixture/tool tool-linux-x64.tar.gz) || status=$?
+  assert_equals "$status:$out" "$GITHUB_LOOKUP_UNREACHABLE:"
+  curl() { printf '{"message": "API rate limit exceeded"}\n403'; }
+  status=0; out=$(github_latest_asset fixture/tool tool-linux-x64.tar.gz) || status=$?
+  assert_equals "$status:$out" "$GITHUB_LOOKUP_REFUSED:"
+  curl() { printf '{}\n429'; }
+  status=0; github_latest_asset fixture/tool tool-linux-x64.tar.gz >/dev/null || status=$?
+  assert_equals "$status" "$GITHUB_LOOKUP_REFUSED"
+  rm -rf "$temp"
+}
+
+# When GitHub cannot be read, a release tool that is installed and verifies is
+# kept with a warning; without one the run stops, naming GITHUB_TOKEN when the
+# API refused (the anonymous rate limit).
+test_release_lookup_failure_keeps_a_verified_install() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME/.local/bin"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  uname() { if [[ ${1:-} == -m ]]; then printf 'x86_64\n'; else command uname "$@"; fi; }
+  download_verified() { fail "downloaded without a release lookup"; }
+  github_latest_asset() { return "$GITHUB_LOOKUP_UNREACHABLE"; }
+  printf '#!/bin/sh\nprintf "starship 1.22.0\\n"\n' > "$HOME/.local/bin/starship"
+  chmod 755 "$HOME/.local/bin/starship"
+  out=$(artifact_install starship 2>&1) || fail "an installed, verified starship failed the run: $out"
+  assert_contains "$out" "kept the installed starship; could not reach GitHub releases"
+  github_latest_asset() { return "$GITHUB_LOOKUP_REFUSED"; }
+  out=$(artifact_install starship 2>&1) || fail "a rate-limited lookup failed a verified starship: $out"
+  # Nothing installed: the run stops with the reason.
+  rm -f "$HOME/.local/bin/starship"
+  out=$( (artifact_install starship) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "rate limit"
+  assert_contains "$out" "GITHUB_TOKEN"
+  github_latest_asset() { return "$GITHUB_LOOKUP_UNREACHABLE"; }
+  out=$( (artifact_install starship) 2>&1 ) && fail "an unreachable GitHub installed nothing and passed"
+  assert_contains "$out" "Could not read the latest starship/starship release from GitHub"
+  [[ $out != *GITHUB_TOKEN* ]] || fail "an unreachable GitHub was blamed on the rate limit"
+  # A release that publishes no usable asset still fails, even with a copy.
+  printf '#!/bin/sh\nprintf "starship 1.22.0\\n"\n' > "$HOME/.local/bin/starship"
+  chmod 755 "$HOME/.local/bin/starship"
+  github_latest_asset() { die "GitHub publishes no SHA-256 digest for x"; }
+  out=$( (artifact_install starship) 2>&1 ) && fail "a release without a digest kept passing"
+  assert_contains "$out" "no SHA-256 digest"
   rm -rf "$temp"
 }
 
@@ -2654,6 +2745,214 @@ test_success_names_the_terminal_font_and_wsl_action() {
   rm -rf "$temp"
 }
 
+# CQ-2: a command that fails unexpectedly (here a stray `return 2` inside
+# preflight) ends the run with status 1 and its location, never with 2 or 3,
+# which mean "the plan changed" and "manual action required".
+test_unexpected_failures_never_exit_2_or_3() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  make_fixture_checkout "$temp/profile"
+  printf '%s\n' 'stray_failure() { return 2; }' 'preflight() { stray_failure; }' >> "$temp/profile/installer/plan.sh"
+  out=$(run_cli "$temp/profile" "$temp/home" apply --yes --dry-run --groups none --package-groups none 2>&1) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "ERROR: unexpected failure (status 2) at $temp/profile/installer/plan.sh:"
+  # A deliberate exit keeps its meaning.
+  printf '%s\n' 'preflight() { exit 3; }' >> "$temp/profile/installer/plan.sh"
+  status=0
+  run_cli "$temp/profile" "$temp/home" apply --yes --dry-run --groups none --package-groups none >/dev/null 2>&1 || status=$?
+  assert_equals "$status" 3
+  rm -rf "$temp"
+}
+
+# The checksum list and the archive come from one release: the latest tag is
+# resolved once, so a release published mid-run cannot pair them wrongly. The
+# font signature keeps its old URL text, so installs do not re-run.
+test_nerd_font_release_is_resolved_once() {
+  local temp
+  temp=$(mktemp -d)
+  make_font_release "$temp/release" || { rm -rf "$temp"; return 0; }
+  unset NERD_FONTS_TEST_RELEASE_URL
+  HOME="$temp/home"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  NERD_FONT_TAG=v3.4.0
+  curl() {
+    [[ ${1:-} == --help ]] && return 0
+    local out="" want=0 a url="" redirect=0
+    for a in "$@"; do
+      [[ $want == 1 ]] && { out=$a; want=0; continue; }
+      [[ $a == --output ]] && want=1
+      [[ $a == *redirect_url* ]] && redirect=1
+      url=$a
+    done
+    printf '%s\n' "$url" >> "$FONT_RELEASE_DIR/curl.log"
+    if (( redirect )); then
+      printf 'https://github.com/ryanoasis/nerd-fonts/releases/tag/%s' "$NERD_FONT_TAG"
+      return 0
+    fi
+    cp "$FONT_RELEASE_DIR/${url##*/}" "$out"
+  }
+  NERD_FONTS_CHECKSUMS_FILE="$temp/SHA-256.txt"
+  fetch_nerd_font_checksums "$NERD_FONTS_CHECKSUMS_FILE"
+  NERD_FONT_TAG=v3.5.0   # a release published in between is not used
+  install_nerd_font Fixture "$NERD_FONTS_CHECKSUMS_FILE"
+  assert_equals "$(cat "$temp/release/curl.log")" \
+    "$NERD_FONTS_LATEST_URL"$'\n'"$NERD_FONTS_DOWNLOAD_URL/v3.4.0/SHA-256.txt"$'\n'"$NERD_FONTS_DOWNLOAD_URL/v3.4.0/Fixture.tar.xz"
+  [[ -f $HOME/.local/share/fonts/NerdFonts/FixtureNerdFont-Regular.ttf ]] || fail "the font was not installed"
+  INSTALL_FONTS=yes
+  FONT_NAME=Fixture
+  assert_equals "$(signature_fonts)" "|yes|Fixture|https://github.com/ryanoasis/nerd-fonts/releases/latest/download"
+  # A redirect that is not a release tag stops the run.
+  NERD_FONTS_RELEASE_BASE=""
+  curl() { printf 'https://github.com/login'; }
+  local err
+  err=$( (resolve_nerd_fonts_release) 2>&1 ) && fail "a non-release redirect was accepted"
+  assert_contains "$err" "Could not find the latest Nerd Fonts release"
+  rm -rf "$temp"
+}
+
+# /etc/shells without a final newline: the zsh path goes on a line of its own.
+test_etc_shells_append_keeps_lines_separate() {
+  local temp name
+  temp=$(mktemp -d)
+  mkdir -p "$temp/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$temp/bin/zsh"
+  printf '#!/bin/sh\nexit 0\n' > "$temp/bin/chsh"
+  # Only the fixture file may be written.
+  printf '#!/bin/sh\ncase "$2" in "%s"/*) exec %s "$@" ;; esac\necho "refused: $*" >&2; exit 1\n' "$temp" "$(command -v tee)" > "$temp/bin/tee"
+  chmod +x "$temp/bin/zsh" "$temp/bin/chsh" "$temp/bin/tee"
+  PATH="$temp/bin:$PATH"
+  ETC_SHELLS="$temp/shells"
+  printf '/bin/sh\n/bin/bash' > "$ETC_SHELLS"
+  SUDO=""
+  DRY_RUN=0
+  OS_FAMILY=apt
+  CHANGE_DEFAULT_SHELL=yes
+  current_login_shell() { printf '%s\n' /bin/bash; }
+  set_default_shell </dev/null >/dev/null
+  assert_equals "$(cat "$ETC_SHELLS")" $'/bin/sh\n/bin/bash\n'"$temp/bin/zsh"
+  # A file that ends with a newline gets no blank line.
+  printf '/bin/sh\n' > "$ETC_SHELLS"
+  set_default_shell </dev/null >/dev/null
+  assert_equals "$(cat "$ETC_SHELLS")" $'/bin/sh\n'"$temp/bin/zsh"
+  rm -rf "$temp"
+}
+
+# ONB-2: a default `gh auth login` cannot list keys (GitHub answers 404 without
+# read:public_key / read:gpg_key). That is a manual action with the exact
+# refresh command, not a network failure.
+test_github_key_listing_without_scope_is_a_manual_action() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  printf '%s\n' 'ssh-ed25519 AAAATEST comment' > "$temp/key.pub"
+  gh() {
+    printf '%s\n' 'gh: Not Found (HTTP 404)' 'This API operation needs the "read:public_key" scope.' >&2
+    return 1
+  }
+  SSH_MODE=reuse
+  GPG_MODE=skip
+  out=$( (github_ssh_key_present "$temp/key.pub") 2>"$temp/err" ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" $'manual-action\tgithub-key-scope\t\tgh auth refresh -h github.com -s read:public_key'
+  assert_contains "$(cat "$temp/err")" "gh auth refresh -h github.com -s read:public_key"
+  # Both kinds selected: one refresh grants both scopes.
+  GPG_MODE=generate
+  status=0
+  out=$( (github_gpg_key_present ABCDEF1234567890) 2>/dev/null ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" $'\tgh auth refresh -h github.com -s read:public_key,read:gpg_key'
+  rm -rf "$temp"
+}
+
+# SEC-7: a symlinked ~/.ssh/known_hosts is updated where it points; the link
+# stays a link.
+test_known_hosts_symlink_is_written_through() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME/.ssh" "$temp/dotfiles"
+  printf '%s\n' 'example.com ssh-ed25519 AAAAOTHER' > "$temp/dotfiles/known_hosts"
+  ln -s "$temp/dotfiles/known_hosts" "$HOME/.ssh/known_hosts"
+  gh() { printf '%s\n' 'ssh-ed25519 AAAAGOOD'; }
+  ssh-keyscan() { printf '%s\n' 'github.com ssh-ed25519 AAAAGOOD'; }
+  ensure_github_known_hosts
+  [[ -L $HOME/.ssh/known_hosts ]] || fail "the known_hosts symlink was replaced by a file"
+  assert_equals "$(cat "$temp/dotfiles/known_hosts")" $'example.com ssh-ed25519 AAAAOTHER\ngithub.com ssh-ed25519 AAAAGOOD'
+  rm -rf "$temp"
+}
+
+# macOS casks (GUI apps; some ask for sudo) upgrade only with
+# --upgrade-casks, which is disclosed, preflighted for sudo and saved.
+test_cask_upgrade_is_opt_in() {
+  local temp out
+  temp=$(mktemp -d)
+  OS_FAMILY=macos
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=dev-tools
+  FULL_UPGRADE=1
+  DRY_RUN=1
+  ensure_brew() { :; }
+  out=$(install_os_packages 2>&1)
+  assert_contains "$out" "+ brew upgrade "
+  [[ $out != *"--cask"* ]] || fail "casks were upgraded without --upgrade-casks: $out"
+  [[ $(privileged_plan) != *cask* && $(report_behaviour) != *cask* ]] || fail "a cask upgrade was disclosed while off"
+  UPGRADE_CASKS=1
+  out=$(install_os_packages 2>&1)
+  assert_contains "$out" "+ brew upgrade --cask"
+  assert_contains "$(privileged_plan)" $'cask-upgrade\tbrew upgrade --cask'
+  assert_contains "$(report_behaviour)" $'behaviour\tcask-upgrade\tfull upgrade also upgrades every Homebrew cask (GUI apps; some ask for sudo)'
+  # Without a full upgrade nothing is upgraded, so nothing is disclosed.
+  FULL_UPGRADE=0
+  [[ $(report_behaviour) != *cask* ]] || fail "a cask upgrade was disclosed without a full upgrade"
+  # The choice is saved; a profile from before the flag reads as off.
+  LOCAL_DIR="$temp/local"
+  PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
+  DRY_RUN=0
+  write_profile
+  UPGRADE_CASKS=0
+  read_profile
+  assert_equals "$UPGRADE_CASKS" 1
+  grep -v '^upgrade-casks' "$PROFILE_FILE" > "$temp/old-profile"
+  mv "$temp/old-profile" "$PROFILE_FILE"
+  read_profile
+  assert_equals "$UPGRADE_CASKS" 0
+  # The flag parses for apply, and Linux refuses it.
+  UPGRADE_CASKS=0
+  parse_args apply --yes --upgrade-casks
+  assert_equals "$UPGRADE_CASKS" 1
+  make_fixture_checkout "$temp/profile"
+  if [[ $(uname -s) != Darwin ]]; then
+    out=$(run_cli "$temp/profile" "$temp/home" inspect --upgrade-casks 2>&1) && fail "Linux accepted --upgrade-casks"
+    assert_contains "$out" "--upgrade-casks applies to Homebrew on macOS only"
+  fi
+  rm -rf "$temp"
+}
+
+# A GPG key --gpg generate created is remembered across apply's profile
+# rewrite, so retrying the same apply after its pause reuses it.
+test_generated_gpg_key_survives_the_apply_profile_rewrite() {
+  local temp fingerprint=0123456789ABCDEF0123456789ABCDEF01234567
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
+  DRY_RUN=0
+  GPG_MODE=reuse
+  GPG_KEY_ID=$fingerprint
+  GPG_GENERATED_KEY=$fingerprint
+  write_profile
+  # The retried apply: --gpg generate again, no key in its options.
+  GPG_MODE=generate
+  GPG_KEY_ID=""
+  GPG_GENERATED_KEY=""
+  remember_generated_gpg_key
+  write_profile
+  assert_equals "$GPG_GENERATED_KEY" "$fingerprint"
+  GPG_GENERATED_KEY=""
+  read_profile
+  assert_equals "$GPG_GENERATED_KEY" "$fingerprint"
+  rm -rf "$temp"
+}
+
 # Explicit order: each test runs in its own subshell, so stubs and globals it
 # changes (OS_FAMILY, INSTALL_FONTS, HOME, function overrides) cannot leak into
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
@@ -2774,6 +3073,15 @@ TESTS=(
   test_inventory_lists_managed_items
   test_remove_blocks_and_inventory_need_no_supported_platform
   test_success_names_the_terminal_font_and_wsl_action
+  test_release_lookup_failure_keeps_a_verified_install
+  test_lock_held_by_a_reused_pid_is_reported_stale
+  test_unexpected_failures_never_exit_2_or_3
+  test_nerd_font_release_is_resolved_once
+  test_etc_shells_append_keeps_lines_separate
+  test_github_key_listing_without_scope_is_a_manual_action
+  test_known_hosts_symlink_is_written_through
+  test_cask_upgrade_is_opt_in
+  test_generated_gpg_key_survives_the_apply_profile_rewrite
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

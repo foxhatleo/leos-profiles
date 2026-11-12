@@ -42,7 +42,8 @@ while IFS= read -r artifact; do
     record=$(artifact_release_asset "$artifact")
     unset -f uname
     IFS=$'\t' read -r repository asset <<< "$record"
-    record=$(github_latest_asset "$repository" "$asset")
+    record=$(github_latest_asset "$repository" "$asset") ||
+      die "Could not read the latest $repository release (status $?; set GITHUB_TOKEN past the rate limit)"
     IFS=$'\t' read -r tag url digest <<< "$record"
     printf 'resolved %s %s (%s)\n' "$artifact" "$(release_version "$tag")" "$asset"
   done

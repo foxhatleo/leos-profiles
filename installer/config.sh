@@ -384,6 +384,9 @@ preferred_zsh_path() {
   command -v zsh
 }
 
+# The login-shell list; a variable so tests can use a fixture.
+ETC_SHELLS=/etc/shells
+
 set_default_shell() {
   [[ $CHANGE_DEFAULT_SHELL == no ]] && { say "Skipping default shell (--default-shell no)"; return 0; }
   local zsh_path
@@ -414,12 +417,15 @@ set_default_shell() {
   # passed as an argument rather than interpolated into the program text: this is
   # the one place that would otherwise regress from the argv-safe `run` used
   # everywhere else, and string-built commands are invisible to shellcheck.
-  if ! grep -qxF "$zsh_path" /etc/shells; then
-    # "$1" and "$2" are expanded by the inner bash, not here — that is the
-    # whole point. $1 is the root prefix (empty when already root).
+  if ! grep -qxF "$zsh_path" "$ETC_SHELLS"; then
+    # "$1", "$2" and "$3" are expanded by the inner bash, not here — that is
+    # the whole point. $1 is the root prefix (empty when already root). A file
+    # whose last line has no newline gets one first, or the path would be
+    # glued onto that line.
     # shellcheck disable=SC2016
-    run_shell "Add $zsh_path to /etc/shells" \
-      'printf "%s\n" "$2" | ${1:+"$1"} tee -a /etc/shells >/dev/null' "$SUDO" "$zsh_path"
+    run_shell "Add $zsh_path to $ETC_SHELLS" \
+      '{ [ -z "$(tail -c 1 "$3" 2>/dev/null)" ] || printf "\n"; printf "%s\n" "$2"; } | ${1:+"$1"} tee -a "$3" >/dev/null' \
+      "$SUDO" "$zsh_path" "$ETC_SHELLS"
   fi
   # As root on every family: chsh run as the user asks for the user's own
   # password, which an unattended or passwordless-sudo run cannot answer, while

@@ -63,8 +63,9 @@ case "$1" in
     case "$1" in
       node) printf '%s\n' "${TEST_FNM_ACTUAL:-v22.14.0}" ;;
       npm)
-        prefix=$5
-        package=${6%@latest}
+        # npm install --global --ignore-scripts --prefix <dir> <package>@latest
+        prefix=$6
+        package=${7%@latest}
         mkdir -p "$prefix/bin"
         printf '#!/bin/sh\nexit 0\n' > "$prefix/bin/$package"
         chmod +x "$prefix/bin/$package" ;;
@@ -124,7 +125,7 @@ grep -q -- '--using=default -- node --version' "$TEST_EXEC_LOG" || fail 'the def
   npm() { fail 'ambient npm was invoked'; }
   : > "$TEST_EXEC_LOG"
   install_pnpm
-  grep -qxF -- "exec --using=default -- npm install --global --prefix $HOME/.local/npm pnpm@latest" "$TEST_EXEC_LOG" ||
+  grep -qxF -- "exec --using=default -- npm install --global --ignore-scripts --prefix $HOME/.local/npm pnpm@latest" "$TEST_EXEC_LOG" ||
     fail "pnpm was not installed with fnm's default Node: $(cat "$TEST_EXEC_LOG")"
   verify_pnpm
   install_yarn

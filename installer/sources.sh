@@ -20,8 +20,16 @@ readonly ZSH_COMPLETIONS_REPOSITORY="https://github.com/zsh-users/zsh-completion
 readonly FZF_TAB_REPOSITORY="https://github.com/Aloxaf/fzf-tab.git"
 
 # Nerd Fonts: one font's archive, <Font>.tar.xz, from the latest release,
-# checked against that release's SHA-256.txt.
+# checked against that release's SHA-256.txt. A run resolves which release is
+# latest once (NERD_FONTS_LATEST_URL redirects to its tag) and downloads both
+# files from NERD_FONTS_DOWNLOAD_URL/<tag>, so a release published mid-run
+# cannot pair one release's checksums with another's archive.
+# NERD_FONTS_RELEASE_URL names the moving source in inspect, the font
+# signature (unchanged, so existing installs do not re-run) and the WSL
+# download link.
 readonly NERD_FONTS_RELEASE_URL="https://github.com/ryanoasis/nerd-fonts/releases/latest/download"
+readonly NERD_FONTS_LATEST_URL="https://github.com/ryanoasis/nerd-fonts/releases/latest"
+readonly NERD_FONTS_DOWNLOAD_URL="https://github.com/ryanoasis/nerd-fonts/releases/download"
 
 # Two sources stay pinned, because neither has anything newer to follow.
 # Homebrew's installer runs once, as the first thing on a new Mac, so it is

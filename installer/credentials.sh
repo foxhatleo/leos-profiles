@@ -2,37 +2,39 @@
 # Sourced by install.sh; shares the installer context.
 # shellcheck disable=SC2034
 
+# credential_package_candidates: on Linux, the packages credentials need
+# (gh, plus the SSH and GPG clients the selected modes use), one per line;
+# fails on any other family. macOS has its own rule (system OpenSSH, Homebrew
+# gh/gnupg) in install_credential_prerequisites.
+credential_package_candidates() {
+  local gh=gh ssh gpg=gnupg
+  case $OS_FAMILY in
+    apt) ssh=openssh-client ;;
+    fedora) ssh=openssh-clients; gpg=gnupg2 ;;
+    arch) gh=github-cli; ssh=openssh ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$gh"
+  [[ $SSH_MODE == skip ]] || printf '%s\n' "$ssh"
+  [[ $GPG_MODE == skip ]] || printf '%s\n' "$gpg"
+}
+
 # credential_prerequisites_missing: on Linux, the credential packages this
 # host lacks, space-separated (they install as root).
 credential_prerequisites_missing() {
   [[ $SSH_MODE == skip && $GPG_MODE == skip ]] && return 0
-  local package missing=""
-  local -a candidates=()
-  case $OS_FAMILY in
-    apt)
-      candidates=(gh)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh-client)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
-    fedora)
-      candidates=(gh)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh-clients)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg2) ;;
-    arch)
-      candidates=(github-cli)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
-    *) return 0 ;;
-  esac
-  for package in "${candidates[@]}"; do
+  local package candidates missing=""
+  candidates=$(credential_package_candidates) || return 0
+  while IFS= read -r package; do
     package_installed "$package" || missing+=" $package"
-  done
+  done <<< "$candidates"
   printf '%s' "${missing# }"
 }
 
 install_credential_prerequisites() {
   [[ $SSH_MODE == skip && $GPG_MODE == skip ]] && return 0
-  local package tool
-  local -a candidates=() missing=()
+  local tool
+  local -a missing=()
   case $OS_FAMILY in
     macos)
       if [[ $SSH_MODE != skip ]]; then
@@ -44,23 +46,10 @@ install_credential_prerequisites() {
       if [[ $GPG_MODE != skip ]] && ! command -v gpg >/dev/null 2>&1; then missing+=(gnupg); fi
       pkg_install ${missing[@]+"${missing[@]}"}
       return ;;
-    apt)
-      candidates=(gh)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh-client)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
-    fedora)
-      candidates=(gh)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh-clients)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg2) ;;
-    arch)
-      candidates=(github-cli)
-      [[ $SSH_MODE == skip ]] || candidates+=(openssh)
-      [[ $GPG_MODE == skip ]] || candidates+=(gnupg) ;;
+    apt|fedora|arch) ;;
     *) die "Unsupported credential package family: $OS_FAMILY" ;;
   esac
-  for package in "${candidates[@]}"; do
-    package_installed "$package" || missing+=("$package")
-  done
+  IFS=' ' read -r -a missing <<< "$(credential_prerequisites_missing)"
   (( ${#missing[@]} > 0 )) || return 0
   ensure_sudo
   pkg_install "${missing[@]}"
@@ -88,13 +77,46 @@ ssh_public_material() {
   awk 'NF >= 2 { print $1 " " $2; exit }' "$1"
 }
 
+# github_key_scopes: the read scopes listing the selected keys needs. A
+# default `gh auth login` grants neither.
+github_key_scopes() {
+  local scopes=""
+  [[ $SSH_MODE == skip ]] || scopes=read:public_key
+  [[ $GPG_MODE == skip ]] || scopes="${scopes:+$scopes,}read:gpg_key"
+  printf '%s\n' "$scopes"
+}
+
+# github_key_list <endpoint> <jq> <SSH|GPG>: GITHUB_KEY_LIST becomes the
+# account's keys from that endpoint. GitHub answers 404 (or 403) when the
+# token lacks the read scope: that is the github-key-scope manual action with
+# the exact `gh auth refresh`. Any other failure dies rather than guess that a
+# key is unregistered. Runs in the current shell (a manual action exits 3).
+GITHUB_KEY_LIST=""
+github_key_list() {
+  local endpoint=$1 jq=$2 kind=$3 output errors refresh
+  output=$(mktemp)
+  errors=$(mktemp)
+  track_temp "$output"
+  track_temp "$errors"
+  if gh api --hostname github.com --paginate "$endpoint" --jq "$jq" > "$output" 2> "$errors"; then
+    GITHUB_KEY_LIST=$(cat "$output")
+    return 0
+  fi
+  if grep -Eq 'HTTP 40[34]|needs the "(read|admin):' "$errors"; then
+    refresh="gh auth refresh -h github.com -s $(github_key_scopes)"
+    credential_manual_action github-key-scope '' "$refresh" \
+      "GitHub CLI may not read your $kind keys: its token lacks the scope (a default gh auth login does not grant it). Grant read access yourself with: $refresh, then rerun."
+  fi
+  cat "$errors" >&2
+  die "Could not list GitHub $kind keys; refusing to guess (check network and gh auth)"
+}
+
 github_ssh_key_present() {
-  local public_key=$1 material remote_keys
+  local public_key=$1 material
   material=$(ssh_public_material "$public_key")
   [[ -n $material ]] || return 1
-  remote_keys=$(gh api --hostname github.com --paginate user/keys --jq '.[].key') \
-    || die "Could not list GitHub SSH keys; refusing to guess (check network and gh auth)"
-  awk 'NF >= 2 { print $1 " " $2 }' <<< "$remote_keys" | grep -qxF "$material"
+  github_key_list user/keys '.[].key' SSH
+  awk 'NF >= 2 { print $1 " " $2 }' <<< "$GITHUB_KEY_LIST" | grep -qxF "$material"
 }
 
 # Manual actions end the run with status 3. A component that needs one (a
@@ -182,7 +204,7 @@ github_email_is_verified() {
 }
 
 ensure_github_known_hosts() {
-  local approved scanned verified known_tmp host key_type key material existing
+  local approved scanned verified known_file known_tmp host key_type key material existing
   approved=$(mktemp)
   scanned=$(mktemp)
   verified=$(mktemp)
@@ -201,16 +223,23 @@ ensure_github_known_hosts() {
   [[ -s $verified ]] || die "GitHub SSH host keys did not match GitHub's published metadata"
   mkdir -p "$HOME/.ssh"
   chmod 700 "$HOME/.ssh"
-  known_tmp=$(mktemp "$HOME/.ssh/.known-hosts.tmp.XXXXXX")
+  # A symlinked known_hosts (dotfile managers do this) is updated where it
+  # points, keeping the link: the new file replaces the target, in the
+  # target's directory.
+  known_file=$(resolve_config_path "$HOME/.ssh/known_hosts")
+  [[ ! -e $known_file || -f $known_file ]] || die "$HOME/.ssh/known_hosts is not a regular file: $known_file"
+  [[ -d $(dirname -- "$known_file") ]] ||
+    die "$HOME/.ssh/known_hosts links to $known_file, whose directory does not exist; create it or remove the link"
+  known_tmp=$(mktemp "$(dirname -- "$known_file")/.known-hosts.tmp.XXXXXX")
   track_temp "$known_tmp"
-  if [[ -f $HOME/.ssh/known_hosts ]]; then cp "$HOME/.ssh/known_hosts" "$known_tmp"; fi
+  if [[ -f $known_file ]]; then cp "$known_file" "$known_tmp"; fi
   while IFS=$' \t' read -r host key_type key; do
     material="$key_type $key"
     existing=$(ssh-keygen -F "$host" -f "$known_tmp" 2>/dev/null | awk 'NF >= 3 && $1 !~ /^#/ { print $2 " " $3 }' || true)
     grep -qxF "$material" <<< "$existing" || printf '%s %s %s\n' "$host" "$key_type" "$key" >> "$known_tmp"
   done < "$verified"
   chmod 600 "$known_tmp"
-  mv -f "$known_tmp" "$HOME/.ssh/known_hosts"
+  mv -f "$known_tmp" "$known_file"
 }
 
 provision_ssh() {
@@ -260,12 +289,14 @@ provision_ssh() {
   fi
   ensure_github_known_hosts
   local ssh_output expected="Hi $GITHUB_LOGIN! You've successfully authenticated"
-  ssh_output=$(ssh -i "$key" -F /dev/null -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
+  # BatchMode: a probe never prompts (for a passphrase, a password or a host
+  # key); a key that needs one fails the probe and gets the manual action.
+  ssh_output=$(ssh -i "$key" -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
   if [[ $ssh_output != *"$expected"* ]]; then
     credential_manual_action verify-ssh-key "$key.pub" https://github.com/settings/keys \
       "The selected SSH key did not authenticate as $GITHUB_LOGIN. Check the selected key and GitHub account, then rerun."
   fi
-  ssh_output=$(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
+  ssh_output=$(ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
   if [[ $ssh_output != *"$expected"* ]]; then
     warn "Effective ordinary SSH settings for github.com:"
     ssh -G github.com 2>/dev/null | awk '$1 == "identityfile" || $1 == "identitiesonly" || $1 == "hostname" || $1 == "user"' >&2 || true
@@ -288,9 +319,8 @@ gpg_key_has_email() {
 }
 
 github_gpg_key_present() {
-  local fingerprint=$1 remote_ids
-  remote_ids=$(gh api --hostname github.com --paginate user/gpg_keys --jq '.[].key_id') \
-    || die "Could not list GitHub GPG keys; refusing to guess (check network and gh auth)"
+  local fingerprint=$1
+  github_key_list user/gpg_keys '.[].key_id' GPG
   awk -v fingerprint="$fingerprint" '
     BEGIN { fingerprint=toupper(fingerprint) }
     {
@@ -299,7 +329,19 @@ github_gpg_key_present() {
           substr(fingerprint, length(fingerprint) - length(remote) + 1) == remote) found=1
     }
     END { exit !found }
-  ' <<< "$remote_ids"
+  ' <<< "$GITHUB_KEY_LIST"
+}
+
+# previously_generated_gpg_key <email>: print the key an earlier run generated
+# (GPG_GENERATED_KEY, kept in the saved profile) when its secret key is still
+# in the keyring with a user ID for <email>.
+previously_generated_gpg_key() {
+  local email=$1 recorded=${GPG_GENERATED_KEY:-} found
+  [[ $recorded =~ ^[A-Fa-f0-9]{40}$ || $recorded =~ ^[A-Fa-f0-9]{64}$ ]] || return 1
+  found=$(gpg_secret_fingerprint "$recorded") || return 1
+  [[ $(printf '%s' "$found" | tr '[:lower:]' '[:upper:]') == "$(printf '%s' "$recorded" | tr '[:lower:]' '[:upper:]')" ]] || return 1
+  gpg_key_has_email "$found" "$email" || return 1
+  printf '%s\n' "$found"
 }
 
 provision_gpg() {
@@ -324,9 +366,14 @@ provision_gpg() {
   github_email_is_verified "$email" || die "Git email is not verified on the authenticated GitHub account: $email"
   if [[ $GPG_MODE == reuse ]]; then
     [[ $GPG_KEY_ID =~ ^[A-Fa-f0-9]{40}$ || $GPG_KEY_ID =~ ^[A-Fa-f0-9]{64}$ ]] || die "Select a full GPG fingerprint"
-    keyid=$(gpg_secret_fingerprint "$GPG_KEY_ID")
-    [[ $(printf '%s' "$keyid" | tr '[:lower:]' '[:upper:]') == "$(printf '%s' "$GPG_KEY_ID" | tr '[:lower:]' '[:upper:]')" ]] || die "GPG returned a different key from the selected fingerprint"
+    # gpg exits 2 for a key it does not have; that is the "not found" below.
+    keyid=$(gpg_secret_fingerprint "$GPG_KEY_ID") || keyid=""
     [[ -n $keyid ]] || die "The selected GPG secret key was not found: $GPG_KEY_ID"
+    [[ $(printf '%s' "$keyid" | tr '[:lower:]' '[:upper:]') == "$(printf '%s' "$GPG_KEY_ID" | tr '[:lower:]' '[:upper:]')" ]] || die "GPG returned a different key from the selected fingerprint"
+  elif keyid=$(previously_generated_gpg_key "$email"); then
+    # A retried generate (after the registration pause, say) must not create
+    # a second key: the one this profile generated is still here.
+    say "Reusing the GPG key an earlier run generated: $keyid"
   else
     if [[ $GPG_PASSPHRASE_MODE == prompt ]]; then
       creation_output=$(gpg --status-fd 1 --quick-generate-key "$name <$email>" ed25519 sign never)
@@ -335,6 +382,7 @@ provision_gpg() {
       creation_output=$(gpg --batch --status-fd 1 --pinentry-mode loopback --passphrase '' --quick-generate-key "$name <$email>" ed25519 sign never)
     fi
     keyid=$(awk '$2 == "KEY_CREATED" {print $4; exit}' <<< "$creation_output")
+    GPG_GENERATED_KEY=$keyid
   fi
   [[ $keyid =~ ^[A-Fa-f0-9]{40}$ || $keyid =~ ^[A-Fa-f0-9]{64}$ ]] || die "No valid GPG fingerprint found"
   gpg_key_has_email "$keyid" "$email" || die "Selected GPG key has no user ID for the Git email $email"

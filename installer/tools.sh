@@ -55,11 +55,24 @@ follow_default_branch() {
   branch=${remote_head#origin/}
   current=$(git -C "$destination" symbolic-ref --quiet --short HEAD || true)
   if [[ $current == "$branch" ]]; then
-    run git -C "$destination" merge --quiet --ff-only "$remote_head" ||
+    if ! run git -C "$destination" merge --quiet --ff-only "$remote_head"; then
+      upstream_history_rewritten "$destination" "$remote_head" &&
+        die "$label's upstream rewrote its history (a force-push): $destination is at a commit $remote_head no longer contains, with no commits of your own. Nothing was changed. To follow upstream, run: git -C '$destination' reset --hard $remote_head"
       die "$label has commits that are not on $remote_head: $destination"
+    fi
   else
     run git -C "$destination" checkout --quiet -B "$branch" "$remote_head"
   fi
+}
+
+# upstream_history_rewritten <checkout> <origin/branch>: the checkout's HEAD
+# is a commit origin's branch used to point at (its remote-tracking reflog
+# has it), so it holds no local work and a failed fast-forward means upstream
+# force-pushed. A local commit was never on origin and is not in the reflog.
+upstream_history_rewritten() {
+  local destination=$1 remote_head=$2 head
+  head=$(git -C "$destination" rev-parse --verify --quiet HEAD) || return 1
+  git -C "$destination" rev-list --walk-reflogs "refs/remotes/$remote_head" 2>/dev/null | grep -qxF "$head"
 }
 
 install_local_bins() { artifact_install rpatool; }
@@ -126,10 +139,34 @@ nerd_font_archive_digest() {
   ' "$1"
 }
 
-# fetch_nerd_font_checksums <destination>: the latest release's SHA-256.txt.
-# The release URL can be overridden for tests.
+# resolve_nerd_fonts_release: NERD_FONTS_RELEASE_BASE becomes the download
+# URL of the release that is latest now (.../releases/download/<tag>), once
+# per run; the checksum list and the archive both come from it. It sets a
+# global, so call it in the current shell, never inside $(...).
+# NERD_FONTS_TEST_RELEASE_URL replaces the base in tests.
+NERD_FONTS_RELEASE_BASE=""
+resolve_nerd_fonts_release() {
+  [[ -z $NERD_FONTS_RELEASE_BASE ]] || return 0
+  if [[ -n ${NERD_FONTS_TEST_RELEASE_URL:-} ]]; then
+    NERD_FONTS_RELEASE_BASE=$NERD_FONTS_TEST_RELEASE_URL
+    return 0
+  fi
+  local location tag
+  # The latest-release page redirects to the tag; read the redirect without
+  # following it.
+  location=$(curl --fail --proto '=https' --tlsv1.2 --silent --show-error --connect-timeout 15 --max-time 60 \
+    --retry 3 --output /dev/null --write-out '%{redirect_url}' "$NERD_FONTS_LATEST_URL") ||
+    die "Could not find the latest Nerd Fonts release at $NERD_FONTS_LATEST_URL"
+  tag=${location##*/releases/tag/}
+  [[ $location == https://github.com/*/releases/tag/* && $tag =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die "Could not find the latest Nerd Fonts release: $NERD_FONTS_LATEST_URL redirected to '${location}'"
+  NERD_FONTS_RELEASE_BASE="$NERD_FONTS_DOWNLOAD_URL/$tag"
+}
+
+# fetch_nerd_font_checksums <destination>: the resolved release's SHA-256.txt.
 fetch_nerd_font_checksums() {
-  download_file "${NERD_FONTS_TEST_RELEASE_URL:-$NERD_FONTS_RELEASE_URL}/SHA-256.txt" "$1"
+  resolve_nerd_fonts_release
+  download_file "$NERD_FONTS_RELEASE_BASE/SHA-256.txt" "$1"
 }
 
 # require_known_nerd_font <SHA-256.txt> <font>: die, before any font download,
@@ -142,8 +179,10 @@ require_known_nerd_font() {
 # install_nerd_font <font> [verified SHA-256.txt]: download the font's release
 # archive, verify it against the checksum list and install its font files.
 install_nerd_font() {
-  local font=$1 checksums=${2:-} release=${NERD_FONTS_TEST_RELEASE_URL:-$NERD_FONTS_RELEASE_URL}
+  local font=$1 checksums=${2:-} release
   local temp digest directory file found=0
+  resolve_nerd_fonts_release
+  release=$NERD_FONTS_RELEASE_BASE
   temp=$(mktemp -d)
   track_temp "$temp"
   if [[ -z $checksums ]]; then
@@ -220,7 +259,9 @@ npm_tool_install() {
       say "Would install the latest $package from npm with fnm's default Node"
       return 0
     fi
-    fnm_exec npm install --global --prefix "$HOME/.local/npm" "$package@latest"
+    # --ignore-scripts: neither package needs an install script, and none of
+    # their dependencies' scripts should run.
+    fnm_exec npm install --global --ignore-scripts --prefix "$HOME/.local/npm" "$package@latest"
   fi
   [[ $DRY_RUN -eq 1 ]] || npm_tool_verify "$package" || die "$package does not run after installation"
 }
@@ -316,17 +357,39 @@ remove_legacy_npm_copy() {
 # github_latest_asset <owner/repo> <asset>: print "<tag><TAB><url><TAB><sha256>"
 # for the asset in the project's latest release. The digest is the one GitHub
 # computes for every release asset. GITHUB_TOKEN, when set, lifts the API's
-# anonymous limit of 60 requests an hour.
+# anonymous limit of 60 requests an hour; it goes to curl on stdin (--config),
+# never on the command line other processes can read.
+# When the release cannot be read it prints nothing and returns
+# GITHUB_LOOKUP_UNREACHABLE, or GITHUB_LOOKUP_REFUSED for HTTP 403/429 (most
+# likely the anonymous rate limit), so the caller can keep an installed copy.
+# A release that does not publish the asset properly still dies.
+GITHUB_LOOKUP_UNREACHABLE=4
+GITHUB_LOOKUP_REFUSED=5
 github_latest_asset() {
-  local repository=$1 asset=$2 api json record tag url digest
-  local -a curl_args=(--fail --location --proto '=https' --tlsv1.2 --silent --show-error
-    --connect-timeout 15 --max-time 60 --retry 3 -H 'Accept: application/vnd.github+json')
+  local repository=$1 asset=$2 api response="" code="" json="" record tag url digest
+  local -a curl_args=(--location --proto '=https' --tlsv1.2 --silent --show-error
+    --connect-timeout 15 --max-time 60 --retry 3 -H 'Accept: application/vnd.github+json'
+    --write-out '\n%{http_code}')
   api="https://api.github.com/repos/$repository/releases/latest"
-  if [[ -n ${GITHUB_TOKEN:-} ]] && json=$(curl "${curl_args[@]}" -H "Authorization: Bearer $GITHUB_TOKEN" "$api" 2>/dev/null); then
-    :
-  else
-    json=$(curl "${curl_args[@]}" "$api") || die "Could not read the latest $repository release from GitHub"
+  if [[ -n ${GITHUB_TOKEN:-} && ! ${GITHUB_TOKEN} =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    warn "GITHUB_TOKEN is not a GitHub token (unexpected characters); asking GitHub anonymously"
+  elif [[ -n ${GITHUB_TOKEN:-} ]]; then
+    response=$(printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" |
+      curl --config - "${curl_args[@]}" "$api" 2>/dev/null) || response=""
+    code=${response##*$'\n'}
   fi
+  if [[ $code != 200 ]]; then
+    # Without a token, or when the token was refused: anonymously.
+    response=$(curl "${curl_args[@]}" "$api") || response=""
+    code=${response##*$'\n'}
+  fi
+  if [[ $code != 200 ]]; then
+    case $code in
+      403|429) return "$GITHUB_LOOKUP_REFUSED" ;;
+      *) return "$GITHUB_LOOKUP_UNREACHABLE" ;;
+    esac
+  fi
+  json=${response%$'\n'*}
   record=$(github_release_asset_record "$asset" <<< "$json") ||
     die "The latest $repository release has no $asset"
   IFS=$'\t' read -r tag url digest <<< "$record"
@@ -431,6 +494,7 @@ artifact_path() {
 # or the directory.
 artifact_install() {
   local name=$1 directory=${2:-$HOME/.local/bin} url sha main record repository asset tag version present=1 executable
+  local lookup_status=0
   local -a executables=()
   artifact_row "$name"
   IFS=' ' read -r -a executables <<< "$ARTIFACT_EXECUTABLES"
@@ -450,7 +514,11 @@ artifact_install() {
         say "Would install the latest $name release ($asset from github.com/$repository), checked against GitHub's SHA-256 digest"
         return 0
       fi
-      record=$(github_latest_asset "$repository" "$asset") || exit 1
+      record=$(github_latest_asset "$repository" "$asset") || lookup_status=$?
+      if (( lookup_status != 0 )); then
+        artifact_release_unavailable "$name" "$repository" "$lookup_status"
+        return 0
+      fi
       IFS=$'\t' read -r tag url sha <<< "$record"
       version=$(release_version "$tag")
       for executable in "${executables[@]}"; do
@@ -463,6 +531,27 @@ artifact_install() {
       install_archive_binary "$main" "$ARTIFACT_ARCHIVE" "$url" "$sha" "$directory/$main" ${executables[1]+"${executables[@]:1}"}
       artifact_version_ok "$name" "$directory/$main" "$version" || die "$name does not report version $version after installation" ;;
   esac
+}
+
+# artifact_release_unavailable <name> <owner/repo> <status>: the latest
+# release could not be read (github_latest_asset's status). A copy that is
+# installed and verifies is kept with a warning: a GitHub outage or the API's
+# rate limit must not fail a run that only re-checks tools. Without one, it
+# dies, naming GITHUB_TOKEN when the API refused the request.
+artifact_release_unavailable() {
+  local name=$1 repository=$2 status=$3
+  case $status in
+    "$GITHUB_LOOKUP_UNREACHABLE"|"$GITHUB_LOOKUP_REFUSED") ;;
+    *) exit 1 ;;  # github_latest_asset died and said why
+  esac
+  if artifact_verify "$name"; then
+    warn "kept the installed $name; could not reach GitHub releases"
+    return 0
+  fi
+  if [[ $status == "$GITHUB_LOOKUP_REFUSED" ]]; then
+    die "Could not read the latest $repository release: GitHub refused the request (HTTP 403/429), most likely the anonymous API rate limit of 60 requests an hour. Set GITHUB_TOKEN (for example GITHUB_TOKEN=\$(gh auth token)) and rerun."
+  fi
+  die "Could not read the latest $repository release from GitHub; check the network and rerun"
 }
 
 # artifact_verify <name>: the artifact is installed from its source: the

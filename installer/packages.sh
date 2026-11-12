@@ -406,7 +406,9 @@ install_os_packages() {
       if [[ $FULL_UPGRADE -eq 1 ]]; then
         run brew update
         run brew upgrade
-        run brew upgrade --cask
+        # Casks are GUI apps, often updating themselves, and some cask
+        # upgrades run installers that ask for sudo: only on request.
+        if [[ $UPGRADE_CASKS -eq 1 ]]; then run brew upgrade --cask; fi
       fi
       pkg_install "${requested[@]}"
       BREW_FORMULAE="" ;;

@@ -50,7 +50,9 @@ inspection stream uses `meta<TAB>schema<TAB>1`. Saved profiles use schema 3 and
 include `node-policy<TAB>current-lts` and the `current-lts` channel. Schema-1
 and schema-2 (`preserve-compatible`) profiles remain readable and are migrated
 by an approved apply/reconcile. Inspection and dry-run must not write the
-migration.
+migration. Keys added since schema 3 are optional and need no schema bump: the
+reader takes their absence as the old behaviour (`version-managers` install,
+`upgrade-casks` no, no `gpg-generated` key).
 
 The parser must preserve empty TSV columns and dispatch by record type; it must
 not treat prose progress output during apply as inspection records. Every
@@ -76,8 +78,8 @@ update it together with the emitter in `install.sh`.
 | `file` | 3 | name, path | File the plan reads or writes; `zshrc`, `zshenv` and (macOS) `zprofile` give the resolved zsh startup files |
 | `global` | 3 | `git`, keys | Global Git settings the plan configures |
 | `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone: `host-upgrade` (package upgrades), `login-shell` (chsh) |
-| `privileged` | 3 | action, command or description | An action run as root (through sudo, or directly when root): `homebrew-bootstrap`, `bootstrap`, `package-manager`, `repository`, `dnf-swap`, `pacman-sync`, `credential-packages`, `etc-shells`, `login-shell` |
-| `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`) |
+| `privileged` | 3 | action, command or description | An action run as root (through sudo, or directly when root): `homebrew-bootstrap`, `bootstrap`, `package-manager`, `repository`, `dnf-swap`, `pacman-sync`, `credential-packages`, `etc-shells`, `login-shell`, `cask-upgrade` (macOS `--upgrade-casks`: some cask installers ask for sudo) |
+| `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`), `cask-upgrade` (the full upgrade also runs `brew upgrade --cask`; only with `--upgrade-casks`) |
 | `conflict` | 4 | component, path, reason | An existing installation in the way of `pyenv`/`rbenv`: `not-a-git-checkout`, `unexpected-origin`, `local-changes` (apply stops unless `--skip-existing-version-managers`), or `homebrew-install` (informational) |
 | `existing` | 4 | name, path, effect | A shell framework or version manager the profile coexists with: `oh-my-zsh`, `powerlevel10k`, `nvm`, `conda`, `asdf`, `mise` |
 | `shadow` | 4 | executable, other copy, profile copy | Linux: a Homebrew copy of a tool that the profile's `~/.local/bin` copy will shadow |
@@ -88,7 +90,10 @@ update it together with the emitter in `install.sh`.
 
 A runtime preview may report `unresolved` / `resolve-during-apply`.
 
-Manual-action names cover registration, login, email-read scope, key selection,
+Manual-action names cover registration, login, email-read scope,
+`github-key-scope` (gh's token cannot list SSH/GPG keys; the destination is
+the exact `gh auth refresh -h github.com -s read:public_key,read:gpg_key`
+command, with the scopes the selected keys need), key selection,
 SSH identity configuration, `run-in-terminal` (the destination is the exact
 command to run in a terminal; see "Apply flow" below), `set-login-shell`
 (chsh is missing) and `install-windows-font` (WSL). An empty public-path field is valid for actions
@@ -96,7 +101,9 @@ such as login. Only public artifacts are referenced: never emit private key
 contents, tokens or passphrases. On registration pauses, save the explicit
 reference first and retain the public artifact after EXIT cleanup. Reconciliation
 must never generate a replacement. Pending initial generation resumes the
-originally approved apply; API/network failures must not be interpreted as
+originally approved apply; a retried `--gpg generate` reuses the key an
+earlier run generated (the profile's optional `gpg-generated` row, carried
+over apply's profile rewrite) while its secret key is still in the keyring; API/network failures must not be interpreted as
 missing registration. Enabling global GPG commit signing follows successful
 local signing and confirmed GitHub registration.
 
@@ -121,9 +128,20 @@ passphrase prompt or a sudo password (chsh runs as root, so it counts here)
 (`privileged_plan` is not empty and `sudo -n true` fails) ends the run with
 `manual-action run-in-terminal` carrying the exact command line, exit 3, before
 the lock exists. With a terminal, `sudo -v` asks once up front. Dry runs never
-call sudo; they report what would stop. Last, it downloads the latest Nerd
-Fonts release's checksum list and rejects an unknown font name. Tests stub
+call sudo; they report what would stop. Last, it resolves which Nerd Fonts
+release is latest (once: the archive later comes from the same tag), downloads
+that release's checksum list and rejects an unknown font name. Tests stub
 `stdin_is_terminal`, `sudo` and `privileged_plan`.
+
+`main` installs an ERR trap (`on_unexpected_error`; `set -E` carries it into
+functions). A command that fails where `set -e` would stop the run, outside
+`die` and the deliberate exits, prints `ERROR: unexpected failure (status N)
+at <file>:<line>` and exits with that status, except that 2 and 3 become 1:
+they are contract statuses (plan changed, manual action). The trap does
+nothing inside subshells; their status reaches the main shell. A helper that
+must return a status through `$(...)` is called with `||` (as
+`github_latest_asset` is, returning 4 when GitHub is unreachable and 5 when it
+refuses: 403/429, the anonymous rate limit), so the trap never sees it.
 
 A component that needs the user (a missing chsh) calls `queue_manual_action`
 and sets `STEP_AWAITS_MANUAL_ACTION`: `run_step` then leaves it unrecorded and

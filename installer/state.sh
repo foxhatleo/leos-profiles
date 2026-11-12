@@ -50,7 +50,19 @@ acquire_lock() {
   if ! kill -0 "$owner" 2>/dev/null; then
     die "A previous Leo's Profiles operation (PID $owner) exited uncleanly and left a lock. If no such process is running, remove it and retry: rm -rf -- '$LOCK_DIR'"
   fi
-  die "Another Leo's Profiles operation is running (PID $owner)"
+  # The PID is alive, but after an unclean exit (a reboot, say) the number can
+  # belong to an unrelated process by now. An installer runs install.sh.
+  local command
+  if command=$(process_command "$owner") && [[ -n $command && $command != *install.sh* ]]; then
+    die "The lock looks stale: its PID $owner now belongs to another program ($command), so the Leo's Profiles operation that took it exited uncleanly. If no install is running, remove it and retry: rm -rf -- '$LOCK_DIR'"
+  fi
+  die "Another Leo's Profiles operation is running (PID $owner). If it is not (the lock outlived an unclean exit), remove the lock and retry: rm -rf -- '$LOCK_DIR'"
+}
+
+# process_command <pid>: the command line of a running process, when ps can
+# tell (minimal containers may lack ps; the caller then assumes the worst).
+process_command() {
+  ps -p "$1" -o command= 2>/dev/null
 }
 
 write_profile() {
@@ -74,20 +86,32 @@ write_profile() {
     printf 'ssh-passphrase\t%s\n' "$SSH_PASSPHRASE_MODE"
     printf 'gpg\t%s\n' "$GPG_MODE"
     printf 'gpg-key\t%s\n' "$GPG_KEY_ID"
+    printf 'gpg-generated\t%s\n' "$GPG_GENERATED_KEY"
     printf 'gpg-passphrase\t%s\n' "$GPG_PASSPHRASE_MODE"
     printf 'node-channel\t%s\n' "$NODE_CHANNEL"
     printf 'node-policy\t%s\n' "$NODE_POLICY"
     printf 'ai-cli-update-channel\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
     printf 'package-channel\t%s\n' "$PACKAGE_CHANNEL"
     printf 'version-managers\t%s\n' "$([[ $SKIP_EXISTING_VERSION_MANAGERS -eq 1 ]] && printf skip-existing || printf install)"
+    printf 'upgrade-casks\t%s\n' "$([[ $UPGRADE_CASKS -eq 1 ]] && printf yes || printf no)"
   } > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$PROFILE_FILE"
 }
 
+# remember_generated_gpg_key: apply rewrites the profile from its own options
+# before provisioning, so first carry over the GPG key an earlier run
+# generated (see previously_generated_gpg_key).
+remember_generated_gpg_key() {
+  [[ -f $PROFILE_FILE ]] || return 0
+  GPG_GENERATED_KEY=$(awk -F '\t' '$1 == "gpg-generated" { print $2; exit }' "$PROFILE_FILE")
+  validate_tsv_value gpg-generated "$GPG_GENERATED_KEY"
+}
+
 read_profile() {
   [[ -f $PROFILE_FILE ]] || die "No saved install profile. Run the AI setup flow first: $PROFILE_FILE"
   local key value extra schema="" seen=","
+  UPGRADE_CASKS=0  # optional key: a profile without it predates the flag
   while IFS=$'\t' read -r key value extra || [[ -n $key ]]; do
     [[ -z ${extra:-} ]] || die "Malformed install profile row: $key"
     validate_tsv_value "$key" "${value:-}"
@@ -108,6 +132,9 @@ read_profile() {
       ssh-passphrase) SSH_PASSPHRASE_MODE=$value ;;
       gpg) GPG_MODE=$value ;;
       gpg-key) GPG_KEY_ID=$value ;;
+      # Optional (added 2026-11): the key --gpg generate created, so a retried
+      # generate reuses it (remember_generated_gpg_key).
+      gpg-generated) GPG_GENERATED_KEY=$value ;;
       gpg-passphrase) GPG_PASSPHRASE_MODE=$value ;;
       node-channel) NODE_CHANNEL=$value ;;
       node-policy) NODE_POLICY=$value ;;
@@ -119,6 +146,14 @@ read_profile() {
           install) SKIP_EXISTING_VERSION_MANAGERS=0 ;;
           skip-existing) SKIP_EXISTING_VERSION_MANAGERS=1 ;;
           *) die "Invalid saved version-managers value: $value" ;;
+        esac ;;
+      # Optional (added 2026-11; absent means no): the macOS full upgrade
+      # also runs `brew upgrade --cask`.
+      upgrade-casks)
+        case $value in
+          no) UPGRADE_CASKS=0 ;;
+          yes) UPGRADE_CASKS=1 ;;
+          *) die "Invalid saved upgrade-casks value: $value" ;;
         esac ;;
       '') ;;
       *) die "Unknown install profile key: $key" ;;

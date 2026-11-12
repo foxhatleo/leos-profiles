@@ -79,6 +79,9 @@ signature_plugins() {
     "$ZSH_COMPLETIONS_REPOSITORY" "$FZF_TAB_REPOSITORY"
 }
 
+# The release URL text is the moving "latest" one on purpose: the run
+# downloads from the tag it resolves, but recording that tag (or a new URL)
+# would make every existing install look undone.
 signature_fonts() {
   local material="" asset
   material+="|$INSTALL_FONTS|${FONT_NAME:-JetBrainsMono}|$NERD_FONTS_RELEASE_URL"
