@@ -1,9 +1,21 @@
 name: CI
 
-# Fast checks for every push and pull request. Their job names are the branch
-# ruleset's required checks, so keep them stable and do not add a workflow-level
-# paths filter: a filtered required workflow never reports on docs-only pull
-# requests and blocks them. Real host provisioning lives in provision.yml.
+# Fast checks for every push and pull request.
+#
+# The branch ruleset must require exactly one check: "All gating checks" (the
+# `gating` job at the end), which fails unless every gating job succeeded.
+# Matrix entries and job names can then change without leaving a renamed check
+# required but never reported. Add each new gating job to its `needs:`.
+#
+# The gate is hermetic with respect to upstream releases: it never installs or
+# clones whatever upstream published today, so an upstream release cannot
+# block an unrelated pull request. Those live checks run in the non-blocking
+# "(informational)" job below and weekly in provision.yml. Package-map jobs do
+# query each distro's current repositories; that is the support contract.
+#
+# Do not add a workflow-level paths filter: a filtered required workflow never
+# reports on docs-only pull requests and blocks them. Real host provisioning
+# lives in provision.yml.
 on:
   push:
     branches: [master]
@@ -134,10 +146,8 @@ jobs:
         run: bash tests/node-test.sh
       - name: Test runtime cache and completion integration
         run: zsh tests/runtime-cache-test.zsh
-      - name: Install the latest Linux releases and check their digests
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bash tests/release-artifacts-test.sh
+      - name: Test legacy-copy migrations in a fixture HOME
+        run: bash tests/migration-test.sh
       - name: Syntax-check installer modules and shell tests
         run: |
           for script in install.sh installer/*.sh tests/*.sh; do
@@ -162,8 +172,6 @@ jobs:
           done
           rm -f blk-*.sh
           exit "$rc"
-      - name: Clone the plugins' default branches and source their combined Zsh integration
-        run: bash tests/plugins-test.sh
       - name: Smoke-test the deterministic apply in dry-run (apt)
         run: bash tests/apply-dryrun-test.sh
       - name: Prove inspect and dry-run apply are read-only (apt)
@@ -193,10 +201,6 @@ jobs:
           exit 1
       - name: Verify mapped formula availability
         run: bash tests/package-map-availability.sh macos
-      - name: Check Homebrew formulae, Linux release assets and pinned digests
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bash tests/release-artifacts-test.sh
       # A fresh Mac runs the installer with the system Bash 3.2, not the
       # Homebrew Bash that hosted runners put first on PATH.
       - name: Run deterministic installer tests (system Bash 3.2)
@@ -205,6 +209,8 @@ jobs:
         run: /bin/bash tests/credentials-test.sh
       - name: Test Node dependency and activation logic
         run: /bin/bash tests/node-test.sh
+      - name: Test legacy-copy migrations in a fixture HOME (system Bash 3.2)
+        run: /bin/bash tests/migration-test.sh
       - name: Run Zsh profile tests
         run: zsh tests/profile-test.zsh
       - name: Test runtime cache and completion integration (BSD stat/mktemp)
@@ -213,8 +219,6 @@ jobs:
       # so test it with exactly that interpreter rather than setup-python's.
       - name: Test metadata utility with the system Python
         run: /usr/bin/python3 --version && /usr/bin/python3 -I tests/rmdsstore_test.py
-      - name: Clone the plugins' default branches and source their combined Zsh integration
-        run: bash tests/plugins-test.sh
       - name: Smoke-test the deterministic apply in dry-run (macOS, system Bash 3.2)
         run: /bin/bash tests/apply-dryrun-test.sh
       - name: Prove inspect and dry-run apply are read-only (macOS, system Bash 3.2)
@@ -254,11 +258,11 @@ jobs:
             label: Debian 13
             image: debian:13
           - family: fedora
-            label: Fedora 43
-            image: fedora:43
-          - family: fedora
             label: Fedora 44
             image: fedora:44
+          - family: fedora
+            label: Fedora 45
+            image: fedora:45
           - family: arch
             label: Arch latest x86_64
             image: archlinux:latest
@@ -295,20 +299,34 @@ jobs:
             '
           fi
 
-  release-linux-arm64:
-    name: Linux arm64 release artifacts (gating)
-    runs-on: ubuntu-24.04-arm
+  # Informational: installs and runs the latest upstream releases and clones
+  # each plugin's default branch, so it follows upstream and an upstream
+  # release can turn it red without any change here. It never blocks a merge
+  # (not in the `gating` job's needs); provision.yml runs the same checks
+  # weekly and files an issue when they fail. Do not make it a required check.
+  upstream-live:
+    name: Upstream releases and plugins / ${{ matrix.runner }} (informational)
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install completion verification dependency
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zsh
-      - name: Install the latest Linux arm64 releases and check their digests
+      - name: Resolve the latest releases, install them (Linux) and check their digests
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: bash tests/release-artifacts-test.sh
+      - name: Clone the plugins' default branches and source their combined Zsh integration
+        if: ${{ !cancelled() }}
+        run: bash tests/plugins-test.sh
 
   # Informational: hosted-runner timing is noisy and the runners carry few of
   # the tools a workstation initializes, so this reports numbers in the job
@@ -339,3 +357,30 @@ jobs:
             zsh tests/startup-benchmark.zsh --pty 2>&1
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The one required check. `if: always()` makes it report even when a needed
+  # job failed or was skipped, so the ruleset sees a failure rather than a
+  # check that never ran. Every gating job belongs in `needs:`; informational
+  # jobs do not.
+  gating:
+    name: All gating checks
+    if: always()
+    needs:
+      - zsh-syntax
+      - lint
+      - install-checks
+      - package-map-macos
+      - package-map-apt
+      - package-map-container
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every gating job to have succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<< "$NEEDS"
+          if jq -e 'any(.[]; .result != "success")' <<< "$NEEDS" >/dev/null; then
+            echo "::error::A gating job did not succeed (see the list above)."
+            exit 1
+          fi
