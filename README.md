@@ -499,11 +499,6 @@ ones you use to `local/private.zsh` (or, for completions, to
 # Flutter SDK on PATH
 [[ -d $HOME/.flutter/bin ]] && path=("$HOME/.flutter/bin" $path)
 
-# thefuck, initialised lazily on first use (it starts Python)
-if (( $+commands[thefuck] )); then
-  fuck() { unfunction fuck; eval "$(thefuck --alias)"; eval "fuck ${(j: :)${(q)@}}"; }
-fi
-
 # Google Cloud SDK PATH (Homebrew cask on macOS; the Linux packages put gcloud
 # on PATH already)
 if [[ -r ${HOMEBREW_PREFIX:-/opt/homebrew}/share/google-cloud-sdk/path.zsh.inc ]]; then
