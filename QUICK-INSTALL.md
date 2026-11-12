@@ -47,15 +47,18 @@ installer is only your deterministic execution engine.
    package groups. Credentials default to Skip, fonts to Auto, default shell
    to Auto, and the initial package pass performs a full host upgrade.
 4. For Customize, ask two multi-select questions together:
-   - Components: `bins`, `packages`, `pyenv`, `rbenv`, `bun`, `yarn`, `pnpm`,
-     `fnm`, `uv`, `plugins`, `fonts`, `zsh-config`, `default-shell`.
-   - Package groups: `core-utils`, `shell`, `dev-tools`, `languages`,
-     `python`, `media`, `network`, `heroku` (macOS only), `system`.
+   - Components: `bins`, `packages`, `rbenv` (with the newest Ruby), `bun`,
+     `fnm` (Node), `corepack` (pnpm and Yarn), `uv`, `cpython` (Python),
+     `starship`, `plugins`, `fonts`, `zsh-config`, `default-shell`.
+   - Package groups: `core-utils`, `shell`, `dev-tools`, `python`, `media`,
+     `network`, `heroku` (macOS only), `system`. There is no `languages`
+     group: Node, Python and Ruby come from fnm, cpython and rbenv.
 5. A selected group means every member. Preserve dependency closure: rpatool
-   implies `packages` plus `python`; Bun, fnm, Yarn, pnpm and uv imply only
-   `packages`; pyenv/rbenv imply `packages` plus `dev-tools`; plugins, Zsh
-   config, and default shell imply `packages` plus `shell`. Yarn and pnpm also
-   imply fnm; install fnm before either npm tool.
+   implies `packages` plus `python`; Bun, fnm, Corepack, uv, cpython and
+   Starship imply only `packages`; rbenv implies `packages` plus `dev-tools`
+   (Ruby's build dependencies); plugins, Zsh config, and default shell imply
+   `packages` plus `shell`. Corepack also implies fnm, and cpython uv; they
+   install first.
 6. Ask conditional choices in later stages of no more than three questions:
    fonts; full initial host upgrade (on macOS, also whether it upgrades
    Homebrew casks: `--upgrade-casks`, off by default); how old a release must
@@ -88,21 +91,29 @@ installer is only your deterministic execution engine.
      old, checked against GitHub's digest or attestation), Git checkouts at a
      tag or commit at least that old, and the two pinned downloads; say that
      tools follow upstream with that delay, so a full upgrade moves them
-     forward, and relay a `release-age-homebrew`/`release-age-npm` warning;
-   - the Node version: the current LTS fnm will install, or the installed
-     default a run without a full upgrade keeps;
+     forward, and relay a `release-age-homebrew`/`release-age-npm` warning
+     (and `fallback-prompt`, zsh-config without Starship);
+   - the runtimes (`runtime` records): the Node LTS fnm will install, the
+     Python line uv will install and the Ruby rbenv will compile (a new line
+     waits `--min-release-age` days; patches do not), or the installed version
+     a run without a full upgrade keeps; say Ruby compiles from source, which
+     takes several minutes;
    - credential actions, selected references, and manual GitHub registration
      or SSH configuration steps;
    - any profile-schema migration and every `migration` record (pinned
-     `~/.local/bin`/`~/.local/npm` copies that Homebrew replaces on macOS, and
-     checkouts moving from their default branch to a release);
+     `~/.local/bin` copies that Homebrew replaces on macOS, the retired yarn
+     and pnpm components' npm packages and Homebrew formulae that Corepack
+     replaces, the dropped `languages` group, whose packages stay installed,
+     and checkouts moving from their default branch to a release);
    - files and managed blocks, global Git settings, shell changes, and every
      irreversible (`irreversible`) or root (`privileged`) action and side
      effect (`behaviour`);
    - `warning`, `conflict`, `existing` and `shadow` records: an unsupported
-     Mac, an existing `~/.pyenv`/`~/.rbenv` (offer to keep it with
-     `--skip-existing-version-managers`), shell setups the profile will sit
-     next to, and (Linux) Homebrew tools the profile's copies will shadow.
+     Mac, an existing `~/.rbenv` (offer to keep it with
+     `--skip-existing-version-managers`), an existing `~/.pyenv` (no longer
+     managed; its shims stay ahead of uv's python3 in interactive shells),
+     shell setups the profile will sit next to, and (Linux) Homebrew tools the
+     profile's copies will shadow.
 10. Obtain one explicit approval. Then invoke `bash install.sh apply --yes ...`
     with the same normalized choices, plus `--node-version <the runtime
     record's version>` when inspect resolved one (exit 2 then means the plan
@@ -162,20 +173,25 @@ can safely repair a partial failure.
 ## Inspection and resume contract
 
 The inspection stream starts with `meta<TAB>schema<TAB>1`; this identifies the
-inspection format, not the saved profile schema. Saved profiles use schema 3.
+inspection format, not the saved profile schema. Saved profiles use schema 4.
 Read records by their type and preserve empty fields:
 
 - `policy<TAB>node<TAB>current-lts` describes runtime selection.
 - `runtime<TAB>node<TAB>VERSION<TAB>ORIGIN` is `current-lts` (what fnm will
   install) or `installed` (a working default kept without a full upgrade); an
-  unresolved preview is labeled as such.
-- `migration<TAB>profile-schema<TAB>OLD<TAB>3` announces automatic migration on
+  unresolved preview is labeled as such. `runtime<TAB>python` (a line, such
+  as 3.14) and `runtime<TAB>ruby` work the same way, with `latest-stable`, or
+  `release-date-unknown` when the newest line's age could not be read and the
+  previous line is used.
+- `migration<TAB>profile-schema<TAB>OLD<TAB>4` announces automatic migration on
   the next approved execution; inspection does not migrate files. Other
-  `migration` records name pinned copies the run moves.
+  `migration` records name pinned copies and retired components the run moves.
 - `manual-action<TAB>ACTION<TAB>PUBLIC_PATH<TAB>DESTINATION` accompanies exit 3.
   Some actions, such as login, have no public-key path.
 
-fnm's default follows the current Node LTS: apply installs it, and a full
-upgrade moves the default forward; a run without one keeps a working default.
+fnm's default follows the current Node LTS, uv's python3 the newest stable
+CPython line and rbenv's global the newest stable Ruby: apply installs them,
+and a full upgrade moves them forward; a run without one keeps a working
+runtime.
 Read [docs/development.md](./docs/development.md) in the checkout for the full
 engine contract.

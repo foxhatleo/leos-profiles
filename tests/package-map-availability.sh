@@ -19,10 +19,18 @@ OS_FAMILY=$PACKAGE_MAP_FAMILY
 }
 
 # Every package group, including the opt-in ones; heroku has members only on
-# macOS (CI taps heroku/brew before this check).
+# macOS (CI taps heroku/brew before this check). Every component too, for the
+# OS packages a component needs (fnm's libatomic). dev-tools carries Ruby's
+# build dependencies (autoconf, GMP, rustc for YJIT); there is no languages
+# group since schema 4, so a system node, python or ruby is never mapped.
 SELECTED_GROUPS=$CANONICAL_GROUPS
 SELECTED_STEPS=$CANONICAL_STEPS
 collect_selected_packages
+case " ${SELECTED_PACKAGES[*]} " in
+  *" nodejs "*|*" node "*|*" ruby "*|*" python-is-python3 "*|*" python-unversioned-command "*)
+    printf 'A system runtime is mapped again: %s\n' "${SELECTED_PACKAGES[*]}" >&2
+    exit 1 ;;
+esac
 
 failures=0
 for package in "${SELECTED_PACKAGES[@]}"; do
