@@ -137,11 +137,20 @@ zshenv_managed_content() {
   # Debian/Ubuntu's /etc/zsh/zshrc from running compinit before the profile has
   # put zsh-completions and rbenv on fpath; the profile's own `compinit -C`
   # would otherwise trust that reduced dump for a day.
+  #
+  # The local bins are added only when missing. .zshenv runs in every zsh,
+  # child shells and scripts included, and moving them to the front again
+  # there would put them back ahead of the version-manager shims the parent's
+  # profile placed before them. Nothing is added for root with someone else's
+  # HOME (`sudo -s` keeps the user's): those directories are user-writable.
   # shellcheck disable=SC2016
   printf '%s\n' 'skip_global_compinit=1
-typeset -U path
-path=("$HOME/.local/bin" "$HOME/.local/npm/bin" $path)
-export PATH'
+if (( EUID )) || [[ -O $HOME ]]; then
+  typeset -gU path
+  (( ${path[(Ie)$HOME/.local/npm/bin]} )) || path=("$HOME/.local/npm/bin" $path)
+  (( ${path[(Ie)$HOME/.local/bin]} )) || path=("$HOME/.local/bin" $path)
+  export PATH
+fi'
 }
 
 # macOS login shells run /etc/zprofile after ~/.zshenv, and its path_helper
