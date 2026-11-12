@@ -328,7 +328,7 @@ package_manager_name() {
 report_behaviour() {
   if [[ $OS_FAMILY == apt ]] && has_csv_item "$SELECTED_STEPS" packages && has_csv_item "$SELECTED_GROUPS" dev-tools; then
     printf 'behaviour\tcompat-symlinks\t~/.local/bin/fd and ~/.local/bin/bat link to Debian'"'"'s fdfind and batcat when fd and bat are not on PATH\n'
-    printf 'behaviour\tgithub-cli-apt\tgh comes from GitHub CLI'"'"'s apt repository (%s), which later apt upgrades follow; added once, unless an apt source already names it\n' \
+    printf 'behaviour\tgithub-cli-apt\tgh comes from GitHub CLI'"'"'s apt repository (%s), which later apt upgrades follow; added once, unless an enabled apt source already names it\n' \
       "$GH_APT_REPOSITORY"
   fi
   if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" core-utils; then

@@ -1936,6 +1936,73 @@ test_apt_dev_tools_add_the_github_cli_repository() {
   rm -rf "$temp"
 }
 
+# Only an enabled apt source for GitHub CLI's repository stops setup from
+# adding its own: a disabled deb822 stanza or a commented-out line is ignored
+# by apt, so skipping would keep the distribution's old gh. The disabled case
+# is disclosed in inspect.
+test_disabled_github_cli_apt_sources_do_not_count() {
+  local temp out dir sources list
+  temp=$(mktemp -d)
+  OS_FAMILY=apt
+  DRY_RUN=1
+  SUDO=sudo
+  FULL_UPGRADE=0
+  APT_ETC="$temp/etc/apt"
+  dir="$APT_ETC/sources.list.d"
+  sources="$dir/gh.sources"
+  list="$dir/github-cli.list"
+  mkdir -p "$dir"
+  dpkg() { [[ $* == --print-architecture ]] && printf 'arm64\n'; }
+  package_installed() { return 1; }
+  ensure_sudo() { :; }
+  apt_compat_links() { :; }
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=dev-tools
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  verify_step() { return 1; }
+  APT_INDEX_UPDATED=1
+  # A disabled deb822 stanza: our source is added and inspect warns.
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\nComponents: main\nEnabled: no\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  out=$(install_os_packages)
+  assert_contains "$out" " $list "
+  assert_contains "$out" "The disabled apt source for it in $sources is left as it is"
+  assert_contains "$(privileged_plan)" $'repository\tsudo install of GitHub CLI\'s apt keyring'
+  out=$(inspect_tsv)
+  assert_contains "$out" $'warning\tgithub-cli-apt-disabled\t'"$sources"' names GitHub CLI'"'"'s apt repository but is disabled; it is left as it is and '"$list"' is added'
+  # Field names and values are case-insensitive, and continuation lines count.
+  printf 'types: deb\nuris:\n https://cli.github.com/packages/\nENABLED: No\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  # Enabled: yes, or no Enabled field, is a source apt uses: setup skips.
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\nEnabled: yes\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  out=$(install_os_packages)
+  [[ $out != *github-cli.list* ]] || fail "a second GitHub CLI source was added next to an enabled one: $out"
+  [[ $(inspect_tsv) != *github-cli-apt-disabled* ]] || fail "an enabled GitHub CLI source was reported as disabled"
+  # Stanzas are separate: Enabled: no in another stanza does not disable it,
+  # and a disabled GitHub CLI stanza is not enabled by its neighbour.
+  printf 'Types: deb\nURIs: https://example.com/debian\nSuites: stable\nEnabled: no\n\nTypes: deb\nURIs: https://cli.github.com/packages\nSuites: stable\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\nEnabled: no\n\nTypes: deb\nURIs: https://example.com/debian\nSuites: stable\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  # Only the URIs field counts, not a mention elsewhere in the stanza.
+  printf 'Types: deb\nURIs: https://example.com/debian\nSuites: stable\nX-Note: mirrors https://cli.github.com/packages\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" missing
+  rm -f "$sources"
+  # One-line entries: a commented-out line is disabled; an active one with
+  # options in brackets counts.
+  printf '# deb [arch=arm64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main # disabled on upgrade\n' > "$dir/gh.list"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  out=$(install_os_packages)
+  assert_contains "$out" " $list "
+  printf 'deb [arch=arm64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' > "$dir/gh.list"
+  assert_equals "$(gh_apt_repository_state)" other
+  rm -rf "$temp"
+}
+
 # Debian 12 / Ubuntu 22.04 package zoxide 0.4.3: inspect warns in one line,
 # only for an apt candidate before 0.8 and only when no other zoxide is on PATH.
 test_old_apt_zoxide_is_warned_about() {
@@ -3693,6 +3760,7 @@ TESTS=(
   test_apt_upgrade_keeps_local_configuration
   test_fedora_media_swaps_only_ffmpeg
   test_apt_dev_tools_add_the_github_cli_repository
+  test_disabled_github_cli_apt_sources_do_not_count
   test_old_apt_zoxide_is_warned_about
   test_arch_installs_with_a_synced_database
   test_version_manager_extension_compile_is_best_effort

@@ -66,7 +66,7 @@ update it together with the emitter in `install.sh`.
 | --- | --- | --- | --- |
 | `meta` | 3 | `schema`, `1` | Inspection format version |
 | `platform` | 3 | `family`, value | Selected OS package family |
-| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now), `release-age-homebrew` (macOS: the selected Homebrew formulae install at Homebrew's current version, not age-gated), `release-age-npm` (Linux: npm's latest Yarn/pnpm, not age-gated), `zoxide-outdated` (Debian/Ubuntu dev-tools whose apt zoxide predates 0.8) |
+| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now), `release-age-homebrew` (macOS: the selected Homebrew formulae install at Homebrew's current version, not age-gated), `release-age-npm` (Linux: npm's latest Yarn/pnpm, not age-gated), `zoxide-outdated` (Debian/Ubuntu dev-tools whose apt zoxide predates 0.8), `github-cli-apt-disabled` (Debian/Ubuntu dev-tools: a disabled apt source names GitHub CLI's repository, so setup adds its own next to it) |
 | `profile` | 3 | `root`, path | Authoritative local checkout |
 | `policy` | 3 | `node`, `full-upgrade`, `selection` or `release-age`, value | Node selection policy; `yes`/`no` host upgrade; `saved` when `inspect --saved` read the selection from the saved profile; the minimum release age in days |
 | `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
