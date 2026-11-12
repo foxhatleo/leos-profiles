@@ -344,6 +344,8 @@ remove_legacy_local_copy() {
 # for it in ~/.local/npm.
 remove_legacy_npm_copy() {
   local package=$1 command prefix="$HOME/.local/npm"
+  # The name becomes part of an `rm -rf` path: never a traversal or another package.
+  [[ $package == yarn || $package == pnpm ]] || die "No legacy npm copy to remove for: $package"
   [[ -e $prefix/bin/$package || -d $prefix/lib/node_modules/$package ]] || return 0
   run rm -rf -- "$prefix/lib/node_modules/$package"
   for command in "$package" yarnpkg pnpx; do
