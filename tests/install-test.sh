@@ -1111,6 +1111,78 @@ test_follow_release_checkout_protects_local_work() {
   rm -rf "$temp"
 }
 
+# A local tag is not evidence that origin has a commit: a fix committed and
+# tagged on the detached checkout stops the step before the fetch (which
+# prunes tags) deletes the tag and the checkout leaves the commit behind.
+test_follow_release_checkout_keeps_local_tags() {
+  local temp out checkout fix
+  temp=$(mktemp -d)
+  git() { fixture_git "$@"; }
+  github_origins_equivalent() { [[ $1 == "$2" ]]; }
+  fix_now
+  DRY_RUN=0
+  MIN_RELEASE_AGE=7
+  make_release_upstream "$temp"
+  checkout="$temp/plugins/tool"
+  FIXTURE_FOLLOW=tag
+  follow_release_checkout FIXTURE "$checkout" tool >/dev/null
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$C2"
+  fix=$(fixture_commit "$checkout" fix)
+  git -C "$checkout" tag my-fix
+  out=$( (follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a checkout at a locally tagged commit was moved"
+  assert_contains "$out" "tool has commits that are not on $FIXTURE_REPOSITORY"
+  assert_contains "$out" "HEAD at $fix; tag my-fix at $fix"
+  assert_contains "$out" "git -C $checkout tag -d <tag>"
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$fix"
+  assert_equals "$(git -C "$checkout" rev-parse --verify --quiet refs/tags/my-fix)" "$fix"
+  # Back at origin's release, the tag alone still holds the only copy.
+  git -C "$checkout" checkout -q --detach "$C2"
+  git -C "$checkout" tag -a -m 'annotated fix' my-fix-annotated "$fix"
+  out=$( (follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a local tag on a local commit was pruned"
+  assert_contains "$out" "(tag my-fix at $fix; tag my-fix-annotated at $fix)"
+  [[ $out != *"HEAD at"* ]] || fail "HEAD at origin's release was reported as local work: $out"
+  assert_equals "$(git -C "$checkout" rev-parse --verify --quiet 'refs/tags/my-fix-annotated^{commit}')" "$fix"
+  out=$( (DRY_RUN=1; follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a dry run accepted a local tag"
+  assert_contains "$out" "tag my-fix at $fix"
+  # Kept on a branch, with the tags deleted, the step goes ahead and the
+  # branch survives.
+  git -C "$checkout" branch my-work "$fix"
+  git -C "$checkout" tag -d my-fix my-fix-annotated >/dev/null
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "tool is at v1.1.0"
+  assert_equals "$(git -C "$checkout" rev-parse my-work)" "$fix"
+  rm -rf "$temp"
+}
+
+# Origin's own tags are evidence: a release tagged on a commit that is on no
+# branch upstream is published, even when the checkout has no tag for it.
+test_follow_release_checkout_trusts_origin_tags() {
+  local temp out checkout side
+  temp=$(mktemp -d)
+  git() { fixture_git "$@"; }
+  github_origins_equivalent() { [[ $1 == "$2" ]]; }
+  fix_now
+  DRY_RUN=0
+  MIN_RELEASE_AGE=0
+  make_release_upstream "$temp"
+  fixture_git -C "$FIXTURE_WORK" checkout -q -b side "$C4"
+  side=$(dated_commit "$FIXTURE_WORK" side 0 v1.3.0)
+  fixture_git -C "$FIXTURE_WORK" push -q "$FIXTURE_REPOSITORY" refs/tags/v1.3.0
+  checkout="$temp/plugins/tool"
+  FIXTURE_FOLLOW=tag
+  follow_release_checkout FIXTURE "$checkout" tool >/dev/null
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$side"
+  [[ -z $(git -C "$checkout" branch -r --contains "$side") ]] || fail "the fixture's release is on a branch"
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "tool is at v1.3.0"
+  # Without the local tag the commit is still origin's.
+  git -C "$checkout" tag -d v1.3.0 >/dev/null
+  out=$(follow_release_checkout FIXTURE "$checkout" tool) || fail "a commit origin tags was taken for local work"
+  assert_contains "$out" "tool is at v1.3.0"
+  assert_equals "$(git -C "$checkout" rev-parse --verify --quiet 'refs/tags/v1.3.0^{commit}')" "$side"
+  rm -rf "$temp"
+}
+
 # Every Git source has a follow mode, and the modes are the ones chosen:
 # commits for the two plugins whose tags lag years behind, ruby-build's
 # definitions without delay.
@@ -1956,6 +2028,73 @@ test_apt_dev_tools_add_the_github_cli_repository() {
   assert_equals "$(gh_apt_repository_state)" other
   out=$(install_os_packages)
   [[ $out != *github-cli* ]] || fail "a second GitHub CLI source was added next to an existing one: $out"
+  rm -rf "$temp"
+}
+
+# Only an enabled apt source for GitHub CLI's repository stops setup from
+# adding its own: a disabled deb822 stanza or a commented-out line is ignored
+# by apt, so skipping would keep the distribution's old gh. The disabled case
+# is disclosed in inspect.
+test_disabled_github_cli_apt_sources_do_not_count() {
+  local temp out dir sources list
+  temp=$(mktemp -d)
+  OS_FAMILY=apt
+  DRY_RUN=1
+  SUDO=sudo
+  FULL_UPGRADE=0
+  APT_ETC="$temp/etc/apt"
+  dir="$APT_ETC/sources.list.d"
+  sources="$dir/gh.sources"
+  list="$dir/github-cli.list"
+  mkdir -p "$dir"
+  dpkg() { [[ $* == --print-architecture ]] && printf 'arm64\n'; }
+  package_installed() { return 1; }
+  ensure_sudo() { :; }
+  apt_compat_links() { :; }
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=dev-tools
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  verify_step() { return 1; }
+  APT_INDEX_UPDATED=1
+  # A disabled deb822 stanza: our source is added and inspect warns.
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\nComponents: main\nEnabled: no\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  out=$(install_os_packages)
+  assert_contains "$out" " $list "
+  assert_contains "$out" "The disabled apt source for it in $sources is left as it is"
+  assert_contains "$(privileged_plan)" $'repository\tsudo install of GitHub CLI\'s apt keyring'
+  out=$(inspect_tsv)
+  assert_contains "$out" $'warning\tgithub-cli-apt-disabled\t'"$sources"' names GitHub CLI'"'"'s apt repository but is disabled; it is left as it is and '"$list"' is added'
+  # Field names and values are case-insensitive, and continuation lines count.
+  printf 'types: deb\nuris:\n https://cli.github.com/packages/\nENABLED: No\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  # Enabled: yes, or no Enabled field, is a source apt uses: setup skips.
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\nEnabled: yes\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  out=$(install_os_packages)
+  [[ $out != *github-cli.list* ]] || fail "a second GitHub CLI source was added next to an enabled one: $out"
+  [[ $(inspect_tsv) != *github-cli-apt-disabled* ]] || fail "an enabled GitHub CLI source was reported as disabled"
+  # Stanzas are separate: Enabled: no in another stanza does not disable it,
+  # and a disabled GitHub CLI stanza is not enabled by its neighbour.
+  printf 'Types: deb\nURIs: https://example.com/debian\nSuites: stable\nEnabled: no\n\nTypes: deb\nURIs: https://cli.github.com/packages\nSuites: stable\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\nEnabled: no\n\nTypes: deb\nURIs: https://example.com/debian\nSuites: stable\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  # Only the URIs field counts, not a mention elsewhere in the stanza.
+  printf 'Types: deb\nURIs: https://example.com/debian\nSuites: stable\nX-Note: mirrors https://cli.github.com/packages\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" missing
+  rm -f "$sources"
+  # One-line entries: a commented-out line is disabled; an active one with
+  # options in brackets counts.
+  printf '# deb [arch=arm64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main # disabled on upgrade\n' > "$dir/gh.list"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  out=$(install_os_packages)
+  assert_contains "$out" " $list "
+  printf 'deb [arch=arm64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' > "$dir/gh.list"
+  assert_equals "$(gh_apt_repository_state)" other
   rm -rf "$temp"
 }
 
@@ -3571,12 +3710,14 @@ test_cask_upgrade_is_opt_in() {
   DRY_RUN=1
   ensure_brew() { :; }
   out=$(install_os_packages 2>&1)
-  assert_contains "$out" "+ brew upgrade "
+  # A bare `brew upgrade` would also upgrade casks: the full upgrade names
+  # formulae, and no cask upgrade runs.
+  assert_equals "$(printf '%s\n' "$out" | grep '^+ brew upgrade')" "+ brew upgrade --formula "
   [[ $out != *"--cask"* ]] || fail "casks were upgraded without --upgrade-casks: $out"
   [[ $(privileged_plan) != *cask* && $(report_behaviour) != *cask* ]] || fail "a cask upgrade was disclosed while off"
   UPGRADE_CASKS=1
   out=$(install_os_packages 2>&1)
-  assert_contains "$out" "+ brew upgrade --cask"
+  assert_equals "$(printf '%s\n' "$out" | grep '^+ brew upgrade')" $'+ brew upgrade --formula \n+ brew upgrade --cask '
   assert_contains "$(privileged_plan)" $'cask-upgrade\tbrew upgrade --cask'
   assert_contains "$(report_behaviour)" $'behaviour\tcask-upgrade\tfull upgrade also upgrades every Homebrew cask (GUI apps; some ask for sudo)'
   # Without a full upgrade nothing is upgraded, so nothing is disclosed.
@@ -4797,6 +4938,8 @@ TESTS=(
   test_equivalent_github_origins
   test_follow_release_checkout_picks_by_mode_and_age
   test_follow_release_checkout_protects_local_work
+  test_follow_release_checkout_keeps_local_tags
+  test_follow_release_checkout_trusts_origin_tags
   test_git_sources_have_follow_modes
   test_git_checkout_at_release_rejects_branch_and_foreign_checkouts
   test_recommended_and_whole_group_closure
@@ -4847,6 +4990,7 @@ TESTS=(
   test_apt_upgrade_keeps_local_configuration
   test_fedora_media_swaps_only_ffmpeg
   test_apt_dev_tools_add_the_github_cli_repository
+  test_disabled_github_cli_apt_sources_do_not_count
   test_old_apt_zoxide_is_warned_about
   test_arch_installs_with_a_synced_database
   test_version_manager_extension_compile_is_best_effort

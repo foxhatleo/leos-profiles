@@ -444,7 +444,7 @@ update it together with the emitter in `install.sh`.
 | --- | --- | --- | --- |
 | `meta` | 3 | `schema`, `1` | Inspection format version |
 | `platform` | 3 | `family`, value | Selected OS package family |
-| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now), `release-age-homebrew` (macOS: the selected Homebrew formulae install at Homebrew's current version, not age-gated), `release-age-npm` (npm's latest Corepack, and the pnpm and Yarn it installs, not age-gated), `fallback-prompt` (zsh-config without the starship component), `zoxide-outdated` (Debian/Ubuntu dev-tools whose apt zoxide predates 0.8) |
+| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now), `release-age-homebrew` (macOS: the selected Homebrew formulae install at Homebrew's current version, not age-gated), `release-age-npm` (npm's latest Corepack, and the pnpm and Yarn it installs, not age-gated), `fallback-prompt` (zsh-config without the starship component), `zoxide-outdated` (Debian/Ubuntu dev-tools whose apt zoxide predates 0.8), `github-cli-apt-disabled` (Debian/Ubuntu dev-tools: a disabled apt source names GitHub CLI's repository, so setup adds its own next to it) |
 | `profile` | 3 | `root`, path | Authoritative local checkout |
 | `policy` | 3 | `node`, `full-upgrade`, `selection` or `release-age`, value | Node selection policy; `yes`/`no` host upgrade; `saved` when `inspect --saved` read the selection from the saved profile; the minimum release age in days |
 | `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
@@ -899,11 +899,17 @@ an ISO-8601 UTC string that compares with GitHub's `published_at` as text
   `tag-now` (the newest stable tag, no delay: ruby-build, so a Ruby security
   release is installable at once; a new Ruby line still waits, see "Runtime
   and package invariants"). A checkout may move backwards. Before
-  fetching, it refuses uncommitted changes and a checked-out commit that no
-  remote-tracking branch or tag contains (work made locally); a commit upstream
-  later force-pushed away is not local work, and the step says upstream
-  rewrote its history and moves on. The fetch prunes tags, so a tag upstream
-  deleted is not picked.
+  fetching, it refuses uncommitted changes, and (`checkout_local_work`) a
+  checked-out commit or a local tag on a commit that origin does not have:
+  none of the remote-tracking branches as of the last fetch, nor the tags
+  `git ls-remote --tags` reports origin has now, contains it. Local tags are
+  not evidence, since the fetch prunes tags: a fix tagged on the detached
+  checkout would otherwise pass, lose its tag and be left behind. A commit
+  upstream later force-pushed away is not local work (the remote-tracking
+  branches still hold it), and the step says upstream rewrote its history and
+  moves on; a local tag upstream deleted or moved, on a commit no branch
+  holds, stops the step until it is deleted. The fetch prunes tags, so a tag
+  upstream deleted is not picked.
 - **Runtimes**: a new Node LTS major, Python minor or Ruby minor line waits
   the same number of days; their patch releases do not (see "Runtime and
   package invariants").
