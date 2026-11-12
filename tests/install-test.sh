@@ -4304,9 +4304,12 @@ test_setup_applies_the_plan_it_showed() {
   assert_contains "$out" "policy full-upgrade: no"
   assert_contains "$out" "Setup complete"
   shown=$(awk '/^Summary/ { s = 1; next } s && /^  (to do|done|skipped) / { print $NF }' <<< "$out" | paste -sd, -)
-  ran=$(sed -En 's/^==> (Running|Skipping) ([a-z-]+).*/\2/p' <<< "$out" | paste -sd, -)
-  assert_equals "$shown" packages,zsh-config
-  assert_equals "$ran" "$shown"
+  # Answers come from a file, so nothing echoes the newline after the final
+  # prompt and the first step's line can follow it on the same line.
+  ran=$(sed -En 's/^(.*: )?==> (Running|Skipping) ([a-z-]+).*/\3/p' <<< "$out" | paste -sd, -)
+  [[ $shown == packages,zsh-config && $ran == "$shown" ]] ||
+    fail "shown '$shown' / ran '$ran' do not match the selection; setup printed:
+$out"
   [[ ! -e $checkout/local/install-profile.tsv ]] || fail "a dry run saved the profile"
   # Declining the plan changes nothing and says so.
   printf '%s\n' '' '' '' n > "$answers"
