@@ -356,7 +356,8 @@ Tools are not pinned, so there is no routine dependency bump. What needs care:
    verification accepts any version but checks that shape.
 4. The pinned downloads change deliberately: update the URL and SHA-256
    together in `installer/sources.sh` (Homebrew's installer at a reviewed
-   commit; rpatool's repository is archived, so it should never change).
+   commit; rpatool at its archived GitHub repository's final commit, which
+   codeberg.org/shiz/rpatool, where it moved, also carries).
    GitHub CLI's apt keyring (`GH_APT_KEYRING_SHA256` in
    `installer/packages.sh`) follows the SHA-256 listed in cli/cli's
    `docs/install_linux.md`; when GitHub rotates or re-signs its keys the

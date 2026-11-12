@@ -36,8 +36,9 @@ readonly NERD_FONTS_DOWNLOAD_URL="https://github.com/ryanoasis/nerd-fonts/releas
 # checked against a reviewed copy rather than whatever HEAD serves that day.
 readonly HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/feb6351d0d1a766a281d9691d4269cb026ff8f70/install.sh"
 readonly HOMEBREW_INSTALL_SHA256="99287f194a8b3c9e6b0203a11a5fa54518be57209343e6bb954dec4635796d9d"
-# rpatool has no releases, and its GitHub repository is archived: this is its
-# final commit there.
+# rpatool has no releases. Its GitHub repository is archived and development
+# moved to codeberg.org/shiz/rpatool; this is the final GitHub commit, which
+# Codeberg also carries (its one later commit, 2026-01, repackages the tool).
 readonly RPATOOL_URL="https://raw.githubusercontent.com/Shizmob/rpatool/74f26d5dfdd645483e02552aa766ca447ad6b191/rpatool"
 readonly RPATOOL_SHA256="d343124cebd832f712540cc6468253f7e303979467e11c7490807f42c13963f1"
 

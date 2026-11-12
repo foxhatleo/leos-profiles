@@ -208,7 +208,8 @@ upgrades casks (GUI apps; some cask installers ask for sudo) only with
 
 Two downloads stay pinned to a reviewed URL and SHA-256 digest, because there
 is nothing newer to follow: Homebrew's installer script (it runs once, on a
-Mac without Homebrew) and rpatool (its GitHub repository is archived).
+Mac without Homebrew) and rpatool (its archived GitHub repository's final
+commit; development moved to codeberg.org/shiz/rpatool).
 
 On Debian and Ubuntu, dev-tools takes gh from GitHub CLI's own apt repository
 (`https://cli.github.com/packages`), because the distributions' gh is years
