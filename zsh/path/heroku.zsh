@@ -1,7 +1,7 @@
 # Heroku CLI completions — loaded from interactive.zsh, AFTER compinit.
 #
-# install.sh installs heroku in the `network` package group but nothing ever
-# wired up its completions. heroku is a Node CLI, so spawning it per shell is
+# install.sh installs heroku in the opt-in, macOS-only `heroku` package group
+# but nothing ever wired up its completions. heroku is a Node CLI, so spawning it per shell is
 # far too slow: the generator's output is cached like the others.
 #
 # The emitted snippet sources heroku's own zsh_setup, which extends fpath with

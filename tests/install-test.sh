@@ -287,7 +287,14 @@ test_package_maps_cover_every_supported_os() {
     else
       assert_equals "$(package_list_for_group heroku)" ""
     fi
+    # No YouTube tooling in any group.
+    for group in ${CANONICAL_GROUPS//,/ }; do
+      [[ " $(package_list_for_group "$group") " != *" yt-dlp "* ]] || fail "$family/$group still installs yt-dlp"
+    done
   done
+  # A keg-only formula never reaches PATH; gnutls had no user in the profile.
+  OS_FAMILY=macos
+  assert_equals "$(package_list_for_group network)" "wget rclone"
   OS_FAMILY=apt
   assert_contains "$(package_list_for_group dev-tools)" "libssl-dev"
   assert_contains "$(package_list_for_group dev-tools)" "libreadline-dev"
@@ -295,8 +302,11 @@ test_package_maps_cover_every_supported_os() {
   # the portable replacement (pulls in libncursesw6).
   assert_contains "$(package_list_for_group dev-tools)" "libncurses-dev"
   [[ $(package_list_for_group dev-tools) != *libncursesw5-dev* ]] || fail "apt dev-tools still pins the removed libncursesw5-dev"
+  # eza is not packaged on Debian 12 / Ubuntu 22.04, and the apt map covers both.
+  [[ " $(package_list_for_group dev-tools) " != *" eza "* ]] || fail "apt dev-tools names eza, which Debian 12 and Ubuntu 22.04 lack"
   OS_FAMILY=fedora
   assert_contains "$(package_list_for_group dev-tools)" "openssl-devel"
+  assert_contains " $(package_list_for_group dev-tools) " " eza "
   OS_FAMILY=macos
   assert_contains "$(package_list_for_group dev-tools)" "openssl@3"
 }
@@ -1062,15 +1072,17 @@ test_heroku_is_an_opt_in_macos_group() {
   [[ $out != *heroku* ]] || fail "the network group still taps or installs heroku: $out"
   SELECTED_GROUPS=network,heroku
   out=$(install_os_packages)
-  assert_contains "$out" "+ brew tap heroku/brew"
-  assert_contains "$out" "heroku"
+  # heroku is a homebrew/core formula: no third-party tap is added.
+  [[ $out != *"brew tap"* ]] || fail "the heroku group still adds a Homebrew tap: $out"
+  assert_contains "$out" "+ brew install wget rclone heroku"
   SELECTED_STEPS=packages
   REQUESTED_STEPS=packages
   REQUESTED_GROUPS=$SELECTED_GROUPS
   verify_step() { return 1; }
-  assert_contains "$(inspect_tsv)" $'action\trepository\tHomebrew heroku/brew tap'
+  assert_contains "$(inspect_tsv)" $'package\tmacos\theroku'
+  [[ $(inspect_tsv) != *heroku/brew* ]] || fail "inspect still discloses the heroku/brew tap"
   SELECTED_GROUPS=network
-  [[ $(inspect_tsv) != *heroku* ]] || fail "inspect discloses the heroku tap without the heroku group"
+  [[ $(inspect_tsv) != *heroku* ]] || fail "inspect lists heroku without the heroku group"
 }
 
 test_node_lts_is_resolved_once_per_run() {
@@ -1719,7 +1731,7 @@ test_fedora_media_swaps_only_ffmpeg() {
   SELECTED_GROUPS=media
   out=$(install_os_packages)
   assert_contains "$out" "+ sudo dnf install -y https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm"
-  assert_contains "$out" "+ sudo dnf install -y ImageMagick yt-dlp "
+  assert_contains "$out" "+ sudo dnf install -y ImageMagick "
   assert_contains "$out" "+ sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing"
   [[ $(grep -c -- --allowerasing <<< "$out") == 1 ]] || fail "--allowerasing reached another command: $out"
   SELECTED_GROUPS=core-utils

@@ -221,8 +221,13 @@ bootstrap_tools() {
 # formula on purpose: the `python`/`python3` aliases follow Homebrew's newest
 # minor release, so each move made reconcile install another Python next to
 # the old one. Change python@3.15 here deliberately.
-# heroku is a macOS-only group (the CLI comes from Heroku's Homebrew tap); it
-# has no members elsewhere, and main() refuses it there.
+# eza is in every dev-tools map but apt's: Debian 13 and Ubuntu 24.04+ package
+# it, Debian 12 and Ubuntu 22.04 do not, and the apt map is one list for
+# every release (the per-image package-map gate would fail there). The
+# profile falls back to ls where eza is missing.
+# heroku is a macOS-only, opt-in group: the formula is in homebrew/core (no
+# third-party tap), but no Linux distribution packages the CLI. It has no
+# members elsewhere, and main() refuses it there.
 package_list_for_group() {
   local group=$1
   case "$OS_FAMILY:$group" in
@@ -231,8 +236,8 @@ package_list_for_group() {
     macos:dev-tools) printf '%s\n' 'bat direnv eza fd fzf gh git jq libyaml pkgconf openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib zoxide' ;;
     macos:languages) printf '%s\n' 'node python@3.15 ruby' ;;
     macos:python) printf '%s\n' 'python@3.15' ;;
-    macos:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
-    macos:network) printf '%s\n' 'wget rclone gnutls ssh-copy-id' ;;
+    macos:media) printf '%s\n' 'ffmpeg imagemagick' ;;
+    macos:network) printf '%s\n' 'wget rclone' ;;
     macos:heroku) printf '%s\n' 'heroku' ;;
     macos:system) printf '%s\n' 'smartmontools' ;;
     apt:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
@@ -240,15 +245,15 @@ package_list_for_group() {
     apt:dev-tools) printf '%s\n' 'bat build-essential clang direnv fd-find fzf gcc gh git jq libbz2-dev libffi-dev liblzma-dev libncurses-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-dev libxmlsec1-dev libyaml-dev llvm ripgrep tk-dev vim xz-utils zlib1g-dev zoxide' ;;
     apt:languages) printf '%s\n' 'nodejs npm python-is-python3 ruby' ;;
     apt:python) printf '%s\n' 'python3' ;;
-    apt:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
+    apt:media) printf '%s\n' 'ffmpeg imagemagick' ;;
     apt:network) printf '%s\n' 'wget rclone' ;;
     apt:system) printf '%s\n' 'smartmontools' ;;
     fedora:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     fedora:shell) printf '%s\n' 'zsh' ;;
-    fedora:dev-tools) printf '%s\n' 'bat bzip2 bzip2-devel direnv fd-find fzf gcc gdbm-libs gh git jq libffi-devel libnsl2 libuuid-devel libyaml-devel make openssl-devel patch readline-devel ripgrep sqlite sqlite-devel tk-devel vim xz-devel zlib-devel zoxide' ;;
+    fedora:dev-tools) printf '%s\n' 'bat bzip2 bzip2-devel direnv eza fd-find fzf gcc gdbm-libs gh git jq libffi-devel libnsl2 libuuid-devel libyaml-devel make openssl-devel patch readline-devel ripgrep sqlite sqlite-devel tk-devel vim xz-devel zlib-devel zoxide' ;;
     fedora:languages) printf '%s\n' 'nodejs python-unversioned-command ruby' ;;
     fedora:python) printf '%s\n' 'python3' ;;
-    fedora:media) printf '%s\n' 'ImageMagick ffmpeg yt-dlp' ;;
+    fedora:media) printf '%s\n' 'ImageMagick ffmpeg' ;;
     fedora:network) printf '%s\n' 'wget rclone' ;;
     fedora:system) printf '%s\n' 'smartmontools' ;;
     arch:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
@@ -256,7 +261,7 @@ package_list_for_group() {
     arch:dev-tools) printf '%s\n' 'base-devel bat direnv eza fd fzf git github-cli jq libffi libyaml openssl readline ripgrep tk vim xz zlib zoxide' ;;
     arch:languages) printf '%s\n' 'nodejs npm python ruby' ;;
     arch:python) printf '%s\n' 'python' ;;
-    arch:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
+    arch:media) printf '%s\n' 'ffmpeg imagemagick' ;;
     arch:network) printf '%s\n' 'wget rclone' ;;
     arch:system) printf '%s\n' 'smartmontools' ;;
   esac
@@ -401,8 +406,6 @@ install_os_packages() {
   case $OS_FAMILY in
     macos)
       ensure_brew
-      # Heroku's third-party tap is trusted only when its group is selected.
-      if has_csv_item "$SELECTED_GROUPS" heroku; then run brew tap heroku/brew; fi
       if [[ $FULL_UPGRADE -eq 1 ]]; then
         run brew update
         run brew upgrade
