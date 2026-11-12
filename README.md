@@ -61,8 +61,15 @@ changes nothing.
   on a desktop, a Nerd Font for the prompt icons.
 - **Makes zsh your login shell** if it is not already.
 
-Tools come from upstream, but only releases that have been public for at
-least 7 days, so a broken or compromised release has time to be pulled.
+Tools that follow upstream wait for a release to be public for at least 7
+days, so a broken or compromised one has time to be pulled: the GitHub release
+binaries (bun, fnm, Starship, uv, gum), the Nerd Font, the plugin and rbenv
+checkouts, and a new Node, Python or Ruby line. Not everything waits: Homebrew
+formulae and OS packages install at the package manager's current version,
+Corepack, pnpm and Yarn come from npm's latest, ruby-build follows its newest
+tag so new Ruby definitions arrive, and runtime patch releases install right
+away so security fixes are not held back. See
+[Release age](docs/development.md#release-age) for the details.
 Compiling Ruby takes several minutes on its own; a first run can take a while.
 
 When it finishes, open a new terminal and set its font to the Nerd Font
