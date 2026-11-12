@@ -182,11 +182,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Refresh formula metadata and tap Heroku
+      - name: Refresh formula metadata
         run: |
           # Upstream metadata fetches flake; retry before failing the gate.
           for attempt in 1 2 3; do
-            brew update && brew tap heroku/brew && exit 0
+            brew update && exit 0
             echo "brew metadata refresh failed (attempt $attempt); retrying" >&2
             sleep $((attempt * 20))
           done
