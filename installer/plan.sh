@@ -178,12 +178,13 @@ report_shadowed_artifacts() {
 }
 
 # ---------------------------------------------------------------------------
-# What this run moves off the pinned layout used before 2026-10: on macOS,
-# ~/.local/bin and ~/.local/npm copies that Homebrew's formulae replace, and
-# Git checkouts detached at a pinned commit, which move onto their default
-# branch.
+# What this run moves off an older layout: on macOS, the ~/.local/bin and
+# ~/.local/npm copies of the pinned installs before 2026-10, which Homebrew's
+# formulae replace; and Git checkouts on a branch (the default-branch layout
+# of 2026-10), which move to their release, detached. The release named is
+# what the checkout's refs give as of its last fetch; the step fetches first.
 report_tool_migrations() {
-  local name path step directory label
+  local name path step directory label prefix mode release
   if [[ $OS_FAMILY == macos ]]; then
     while IFS= read -r name; do
       artifact_row "$name"
@@ -199,20 +200,52 @@ report_tool_migrations() {
       fi
     done
   fi
-  while IFS='|' read -r step directory label; do
+  while IFS='|' read -r step prefix directory label; do
     has_csv_item "$SELECTED_STEPS" "$step" || continue
     [[ -d $directory/.git ]] || continue
-    git -C "$directory" symbolic-ref --quiet HEAD >/dev/null 2>&1 && continue
-    printf 'migration\tgit-checkout\t%s\t%s moves from a pinned commit to origin'"'"'s default branch\n' "$directory" "$label"
+    git -C "$directory" symbolic-ref --quiet HEAD >/dev/null 2>&1 || continue
+    mode=${prefix}_FOLLOW
+    mode=${!mode}
+    if release_checkout_target "$directory" "$mode"; then
+      if [[ $mode == commit ]]; then release="commit $FOLLOW_TARGET_NAME"; else release="tag $FOLLOW_TARGET_NAME"; fi
+    else
+      release="its release"
+    fi
+    printf 'migration\tgit-checkout\t%s\t%s moves from origin'"'"'s default branch to %s (%s), detached\n' \
+      "$directory" "$label" "$release" "$(follow_mode_description "$mode")"
   done <<EOF
-pyenv|$HOME/.pyenv|pyenv
-rbenv|$HOME/.rbenv|rbenv
-rbenv|$HOME/.rbenv/plugins/ruby-build|ruby-build
-plugins|$TARGET/zsh/plugins/zsh-autosuggestions|zsh-autosuggestions
-plugins|$TARGET/zsh/plugins/zsh-syntax-highlighting|zsh-syntax-highlighting
-plugins|$TARGET/zsh/plugins/zsh-completions|zsh-completions
-plugins|$TARGET/zsh/plugins/fzf-tab|fzf-tab
+pyenv|PYENV|$HOME/.pyenv|pyenv
+rbenv|RBENV|$HOME/.rbenv|rbenv
+rbenv|RUBY_BUILD|$HOME/.rbenv/plugins/ruby-build|ruby-build
+plugins|ZSH_AUTOSUGGESTIONS|$TARGET/zsh/plugins/zsh-autosuggestions|zsh-autosuggestions
+plugins|ZSH_SYNTAX_HIGHLIGHTING|$TARGET/zsh/plugins/zsh-syntax-highlighting|zsh-syntax-highlighting
+plugins|ZSH_COMPLETIONS|$TARGET/zsh/plugins/zsh-completions|zsh-completions
+plugins|FZF_TAB|$TARGET/zsh/plugins/fzf-tab|fzf-tab
 EOF
+}
+
+# What --min-release-age does not cover (a `warning` record): Homebrew
+# installs formulae at its current version on macOS, and on Linux npm's
+# Yarn and pnpm are its latest release. OS packages come from the
+# distribution's own repositories in either case.
+report_release_age_scope() {
+  local step names=""
+  if [[ $OS_FAMILY == macos ]]; then
+    for step in bun fnm yarn pnpm uv plugins; do
+      has_csv_item "$SELECTED_STEPS" "$step" || continue
+      case $step in plugins) step=starship ;; esac
+      names+="${names:+, }$step"
+    done
+    [[ -z $names ]] ||
+      printf 'warning\trelease-age-homebrew\tHomebrew formulae (%s) install at Homebrew'"'"'s current version; --min-release-age applies to GitHub releases and Git checkouts only\n' "$names"
+  else
+    for step in yarn pnpm; do
+      has_csv_item "$SELECTED_STEPS" "$step" || continue
+      names+="${names:+, }$step"
+    done
+    [[ -z $names ]] ||
+      printf 'warning\trelease-age-npm\tnpm installs the latest %s; --min-release-age applies to GitHub releases and Git checkouts only\n' "$names"
+  fi
 }
 
 # ---------------------------------------------------------------------------

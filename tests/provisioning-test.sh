@@ -159,7 +159,7 @@ if ! is_macos; then
   bash "$PROFILE/install.sh" reconcile --yes --full-upgrade | tee "$FIXTURE/full-upgrade.log"
   grep -Fq 'Re-running bun (a full upgrade brings it up to date)' "$FIXTURE/full-upgrade.log" ||
     fail 'a full upgrade did not re-run bun'
-  grep -Fq 'is the latest release and already installed' "$FIXTURE/full-upgrade.log" ||
+  grep -Fq 'is already installed (the newest release at least' "$FIXTURE/full-upgrade.log" ||
     fail 'a full upgrade downloaded a tool that was already current'
 fi
 
@@ -181,10 +181,12 @@ awk '$0 == "# >>> leos-profiles environment >>>" { skip = 1; next }
      $0 == "# <<< leos-profiles environment <<<" { skip = 0; next }
      !skip { print }' "$HOME/.zshenv" > "$FIXTURE/zshenv" && cat "$FIXTURE/zshenv" > "$HOME/.zshenv"
 ! grep -q 'leos-profiles environment' "$HOME/.zshenv" || fail 'could not remove the .zshenv block'
-# A detached checkout (another commit, clean, as the pinned installs left
-# them) is moved back onto the default branch; a dirty one is refused, so
+# A checkout on its default branch (clean, as the 2026-10 installs left
+# them) is moved back to its release, detached; a dirty one is refused, so
 # local edits are never thrown away (checked below).
-git -C "$PLUGIN" checkout --quiet --detach HEAD~1
+PLUGIN_RELEASE=$(git -C "$PLUGIN" rev-parse HEAD)
+git -C "$PLUGIN" symbolic-ref --quiet HEAD >/dev/null && fail 'the plugin checkout is not detached at its release'
+git -C "$PLUGIN" checkout --quiet -B leos-ci-default refs/remotes/origin/HEAD
 # Every file of the family: verification only needs one of them.
 find "$FONT_DIR" -type f -name 'JetBrainsMono*' -delete
 [[ -z $(find "$FONT_DIR" -type f -name 'JetBrainsMono*') ]] || fail 'could not remove the font files'
@@ -194,9 +196,9 @@ for step in plugins zsh-config fonts; do
 done
 verify_tool starship
 grep -qxF '# >>> leos-profiles environment >>>' "$HOME/.zshenv" || fail 'the .zshenv block was not restored'
-git -C "$PLUGIN" symbolic-ref --quiet HEAD >/dev/null || fail 'the plugin checkout is still detached'
-[[ $(git -C "$PLUGIN" rev-parse HEAD) == "$(git -C "$PLUGIN" rev-parse refs/remotes/origin/HEAD)" ]] ||
-  fail 'the plugin checkout is not at the head of its default branch'
+git -C "$PLUGIN" symbolic-ref --quiet HEAD >/dev/null && fail 'the plugin checkout is still on a branch'
+[[ $(git -C "$PLUGIN" rev-parse HEAD) == "$PLUGIN_RELEASE" ]] ||
+  fail 'the plugin checkout is not back at its release'
 [[ -n $(find "$FONT_DIR" -type f -name 'JetBrainsMonoNerdFont-*') ]] || fail 'the font was not reinstalled'
 
 printf '%s\n' '=== Reconcile must refuse, not discard, a locally edited plugin ==='

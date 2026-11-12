@@ -162,7 +162,7 @@ jobs:
           done
           rm -f blk-*.sh
           exit "$rc"
-      - name: Clone the plugins' default branches and source their combined Zsh integration
+      - name: Check out the plugins' releases and source their combined Zsh integration
         run: bash tests/plugins-test.sh
       - name: Smoke-test the deterministic apply in dry-run (apt)
         run: bash tests/apply-dryrun-test.sh
@@ -213,7 +213,7 @@ jobs:
       # so test it with exactly that interpreter rather than setup-python's.
       - name: Test metadata utility with the system Python
         run: /usr/bin/python3 --version && /usr/bin/python3 -I tests/rmdsstore_test.py
-      - name: Clone the plugins' default branches and source their combined Zsh integration
+      - name: Check out the plugins' releases and source their combined Zsh integration
         run: bash tests/plugins-test.sh
       - name: Smoke-test the deterministic apply in dry-run (macOS, system Bash 3.2)
         run: /bin/bash tests/apply-dryrun-test.sh

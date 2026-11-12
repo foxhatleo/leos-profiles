@@ -45,6 +45,9 @@ ASSUME_YES=0
 FULL_UPGRADE=1
 SAVED_FULL_UPGRADE=yes
 UPGRADE_CASKS=0
+# Days a GitHub release or Git release must have been public before it is
+# installed (--min-release-age; saved as release-age).
+MIN_RELEASE_AGE=7
 OS_FAMILY=""
 SSH_KEY_PATH=""
 GIT_NAME=""
@@ -115,6 +118,8 @@ Options:
   --no-full-upgrade               Install/reconcile packages without a host upgrade
   --upgrade-casks                 macOS: the full upgrade also upgrades every
                                   Homebrew cask (GUI apps; some ask for sudo)
+  --min-release-age <days>        0-365 (default 7): install only GitHub releases
+                                  and Git releases at least this old
   --brew-mirror <china|none>      macOS: use (china) or stop using (none) the USTC
                                   Homebrew mirror for this run and later shells
   --skip-existing-version-managers
@@ -137,9 +142,11 @@ from the zsh startup files (.zshrc, .zshenv, and .zprofile on macOS), leaving
 packages, plugins and credentials in place. \`inventory\` lists everything the
 installer creates or manages and whether it is present.
 
-Tools follow their latest release: Homebrew formulae on macOS, GitHub releases
-(checked against GitHub's SHA-256 digests) on Linux, and default branches for
-Git checkouts. A full upgrade moves them forward; otherwise a run only repairs.
+Tools follow upstream, held back by --min-release-age: Homebrew formulae on
+macOS (Homebrew's current version), on Linux the newest GitHub release at least
+that old (checked against GitHub's SHA-256 digest and, when gh is logged in,
+the project's attestation), and Git checkouts detached at a tag or commit at
+least that old. A full upgrade moves them forward; otherwise a run only repairs.
 Node: fnm's default is the current LTS, moved forward by a full upgrade.
 Credentials: local creation is supported; GitHub registration and SSH identity
 configuration are manual. Exit 3 means user action is required; resume using
@@ -218,6 +225,7 @@ parse_args() {
     --full-upgrade) FULL_UPGRADE=1; shift ;;
     --no-full-upgrade) FULL_UPGRADE=0; shift ;;
     --upgrade-casks) UPGRADE_CASKS=1; shift ;;
+    --min-release-age) require_value "$1" "${2:-}"; MIN_RELEASE_AGE=$2; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -280,6 +288,7 @@ validate_options() {
   [[ $INSTALL_FONTS == auto || $INSTALL_FONTS == yes || $INSTALL_FONTS == no ]] || die "Invalid --fonts value"
   [[ $CHANGE_DEFAULT_SHELL == auto || $CHANGE_DEFAULT_SHELL == yes || $CHANGE_DEFAULT_SHELL == no ]] || die "Invalid --default-shell value"
   [[ -z $BREW_MIRROR || $BREW_MIRROR == china || $BREW_MIRROR == none ]] || die "Invalid --brew-mirror value"
+  min_release_age_ok "$MIN_RELEASE_AGE" || die "--min-release-age must be a whole number of days from 0 to 365"
   [[ -z $NODE_VERSION_APPROVED ]] || node_version_ok "$NODE_VERSION_APPROVED" || die "--node-version must look like v24.11.1"
   [[ $SSH_MODE != reuse || -n $SSH_KEY_PATH ]] || die "--ssh reuse requires --ssh-key <private-key-path>"
   [[ $GPG_MODE != reuse || -n $GPG_KEY_ID ]] || die "--gpg reuse requires --gpg-key <fingerprint>"
@@ -458,13 +467,35 @@ run_step() {
   mark_done "$step"
 }
 
+# inspect_release_record <name> <owner/repo> <asset>: the release a Linux
+# release tool resolves to now, and how it will be verified:
+#   release <name> <tag> <published_at> <attestation|digest>
+# or `unresolved - resolve-during-apply` when GitHub cannot be read (apply
+# then keeps an installed copy, or stops). In a subshell, so a release that
+# would make apply stop does not end the inspection.
+inspect_release_record() {
+  local name=$1 record tag published sha verified=digest status=0
+  if ! record=$(github_release_pick "$2" "$3" && printf '%s\t%s\t%s\n' "$RELEASE_TAG" "$RELEASE_PUBLISHED" "$RELEASE_SHA"); then
+    printf 'release\t%s\tunresolved\t-\tresolve-during-apply\n' "$name"
+    return 0
+  fi
+  IFS=$'\t' read -r tag published sha <<< "$record"
+  release_attestation_published "$2" "$sha" || status=$?
+  if (( status == 0 )); then verified=attestation; fi
+  printf 'release\t%s\t%s\t%s\t%s\n' "$name" "$tag" "$published" "$verified"
+}
+
 # One `artifact` record per registry artifact a selected component owns:
 #   artifact formula <name> <formula> latest           (macOS)
-#   artifact release <name> github.com/<repo> <asset>  (Linux)
+#   artifact release <name> github.com/<repo> <asset>  (Linux, with a
+#                                                       `release` record)
 #   artifact direct  <name> <url> <sha256>             (pinned files)
 inspect_artifacts() {
   local step name url digest record repository asset
   local -a steps=()
+  # Once, in this shell: the lookups below run in subshells.
+  github_api_token
+  gh_logged_in || true
   csv_split steps "$SELECTED_STEPS"
   for step in ${steps[@]+"${steps[@]}"}; do
     while IFS= read -r name; do
@@ -482,7 +513,8 @@ inspect_artifacts() {
             continue
           fi
           IFS=$'\t' read -r repository asset <<< "$record"
-          printf 'artifact\trelease\t%s\tgithub.com/%s\t%s\n' "$name" "$repository" "$asset" ;;
+          printf 'artifact\trelease\t%s\tgithub.com/%s\t%s\n' "$name" "$repository" "$asset"
+          inspect_release_record "$name" "$repository" "$asset" ;;
       esac
     done < <(component_handler "$step" artifacts)
   done
@@ -510,6 +542,8 @@ inspect_tsv() {
   printf 'channel\tpackages\t%s\n' "$PACKAGE_CHANNEL"
   printf 'channel\tnode\t%s\n' "$NODE_CHANNEL"
   printf 'policy\tnode\t%s\n' "$NODE_POLICY"
+  printf 'policy\trelease-age\t%s\n' "$MIN_RELEASE_AGE"
+  report_release_age_scope
   report_profile_migration
   report_legacy_loaders
   printf 'channel\tai-cli-updates\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
@@ -576,10 +610,10 @@ inspect_tsv() {
   if [[ $GPG_MODE != skip ]]; then printf 'global\tgit\tuser.signingkey,gpg.format,commit.gpgsign\n'; fi
   if has_csv_item "$SELECTED_STEPS" default-shell && [[ $CHANGE_DEFAULT_SHELL != no ]]; then printf 'irreversible\tlogin-shell\tchsh may require a new login\n'; fi
   inspect_artifacts
-  if has_csv_item "$SELECTED_STEPS" pyenv; then printf 'artifact\tgit\tpyenv\t%s\tdefault-branch\n' "$PYENV_REPOSITORY"; fi
+  if has_csv_item "$SELECTED_STEPS" pyenv; then printf 'artifact\tgit\tpyenv\t%s\t%s\n' "$PYENV_REPOSITORY" "$PYENV_FOLLOW"; fi
   if has_csv_item "$SELECTED_STEPS" rbenv; then
-    printf 'artifact\tgit\trbenv\t%s\tdefault-branch\n' "$RBENV_REPOSITORY"
-    printf 'artifact\tgit\truby-build\t%s\tdefault-branch\n' "$RUBY_BUILD_REPOSITORY"
+    printf 'artifact\tgit\trbenv\t%s\t%s\n' "$RBENV_REPOSITORY" "$RBENV_FOLLOW"
+    printf 'artifact\tgit\truby-build\t%s\t%s\n' "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_FOLLOW"
   fi
   if has_csv_item "$SELECTED_STEPS" yarn; then inspect_npm_tool yarn; fi
   if has_csv_item "$SELECTED_STEPS" pnpm; then inspect_npm_tool pnpm; fi
@@ -587,14 +621,21 @@ inspect_tsv() {
     printf 'external\tnode-lts-index\t%s\n' "$(node_dist_index_url)"
   fi
   if has_csv_item "$SELECTED_STEPS" plugins; then
-    printf 'artifact\tgit\tzsh-autosuggestions\t%s\tdefault-branch\n' "$ZSH_AUTOSUGGESTIONS_REPOSITORY"
-    printf 'artifact\tgit\tzsh-syntax-highlighting\t%s\tdefault-branch\n' "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY"
-    printf 'artifact\tgit\tzsh-completions\t%s\tdefault-branch\n' "$ZSH_COMPLETIONS_REPOSITORY"
-    printf 'artifact\tgit\tfzf-tab\t%s\tdefault-branch\n' "$FZF_TAB_REPOSITORY"
+    printf 'artifact\tgit\tzsh-autosuggestions\t%s\t%s\n' "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_AUTOSUGGESTIONS_FOLLOW"
+    printf 'artifact\tgit\tzsh-syntax-highlighting\t%s\t%s\n' "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_FOLLOW"
+    printf 'artifact\tgit\tzsh-completions\t%s\t%s\n' "$ZSH_COMPLETIONS_REPOSITORY" "$ZSH_COMPLETIONS_FOLLOW"
+    printf 'artifact\tgit\tfzf-tab\t%s\t%s\n' "$FZF_TAB_REPOSITORY" "$FZF_TAB_FOLLOW"
   fi
   if has_csv_item "$SELECTED_STEPS" fonts && font_should_install; then
-    # The archive's digest comes from the latest release's checksum list.
-    printf 'artifact\trelease\tnerd-font\t%s\t%s\n' "$NERD_FONTS_RELEASE_URL/${FONT_NAME:-JetBrainsMono}.tar.xz" SHA-256.txt
+    # The archive's digest comes from its release's SHA-256.txt.
+    printf 'artifact\trelease\tnerd-font\tgithub.com/%s\t%s\n' "$NERD_FONTS_REPOSITORY" "${FONT_NAME:-JetBrainsMono}.tar.xz"
+    local font_release
+    if font_release=$(nerd_fonts_release 2>/dev/null && printf '%s\t%s\n' "$NERD_FONTS_TAG" "$NERD_FONTS_PUBLISHED") &&
+      [[ -n ${font_release%%$'\t'*} ]]; then
+      printf 'release\tnerd-font\t%s\tdigest\n' "$font_release"
+    else
+      printf 'release\tnerd-font\tunresolved\t-\tresolve-during-apply\n'
+    fi
     printf 'file\tfonts\t%s\n' "$(nerd_font_directory)"
   fi
   if has_csv_item "$SELECTED_STEPS" fnm; then
