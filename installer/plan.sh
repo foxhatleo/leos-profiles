@@ -307,7 +307,11 @@ privileged_plan() {
       case $OS_FAMILY in
         apt)
           printf 'package-manager\t%sapt-get update, %sinstall of the selected packages (noninteractive; changed configuration files are kept)\n' \
-            "$root" "$([[ $FULL_UPGRADE -eq 1 ]] && printf 'upgrade and ')" ;;
+            "$root" "$([[ $FULL_UPGRADE -eq 1 ]] && printf 'upgrade and ')"
+          if gh_apt_repository_needed; then
+            printf 'repository\t%sinstall of GitHub CLI'"'"'s apt keyring (%s) and source list (%s)\n' \
+              "$root" "$(gh_apt_keyring)" "$(gh_apt_list)"
+          fi ;;
         fedora)
           printf 'package-manager\t%sdnf %sinstall of the selected packages\n' "$root" "$([[ $FULL_UPGRADE -eq 1 ]] && printf 'upgrade and ')"
           if has_csv_item "$SELECTED_GROUPS" media; then
@@ -344,6 +348,8 @@ package_manager_name() {
 report_behaviour() {
   if [[ $OS_FAMILY == apt ]] && has_csv_item "$SELECTED_STEPS" packages && has_csv_item "$SELECTED_GROUPS" dev-tools; then
     printf 'behaviour\tcompat-symlinks\t~/.local/bin/fd and ~/.local/bin/bat link to Debian'"'"'s fdfind and batcat when fd and bat are not on PATH\n'
+    printf 'behaviour\tgithub-cli-apt\tgh comes from GitHub CLI'"'"'s apt repository (%s), which later apt upgrades follow; added once, unless an apt source already names it\n' \
+      "$GH_APT_REPOSITORY"
   fi
   if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" core-utils; then
     printf 'behaviour\tgnu-tools\tinteractive shells put the GNU coreutils, findutils, sed, tar, grep, awk and which ahead of the BSD tools; disable-gnu (local/flags/no-gnu) keeps BSD\n'

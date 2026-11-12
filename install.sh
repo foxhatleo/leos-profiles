@@ -25,8 +25,10 @@ COMMAND=""
 source "$SCRIPT_DIR/installer/registry.sh"
 # Every package group, in install order. Recommended selects all but the
 # opt-in ones: python (the OS python3 rpatool runs on; the cpython component
-# is the Python for your own work) and heroku (a third-party tap, macOS only).
-# The languages group was retired with schema 4 (validate_options says so).
+# is the Python for your own work) and heroku (a large Node CLI few machines
+# need; homebrew/core packages it, the Linux distributions do not, so it is
+# macOS only). The languages group was retired with schema 4 (validate_options
+# says so).
 readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,python,media,network,heroku,system"
 readonly RECOMMENDED_GROUPS="core-utils,shell,dev-tools,media,network,system"
 # rpatool remains available as the explicit `bins` step, but is not a default
@@ -634,12 +636,14 @@ inspect_tsv() {
   if has_csv_item "$SELECTED_STEPS" packages; then
     printf 'action\tpackages\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf 'full host upgrade and selected package installation' || printf 'install missing selected packages without full host upgrade')"
     if [[ $FULL_UPGRADE -eq 1 ]]; then printf 'irreversible\thost-upgrade\tin-release package-manager upgrades (never an OS release upgrade) are not automatically reversible\n'; fi
-    if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
-      printf 'action\trepository\tHomebrew heroku/brew tap\n'
-    fi
     if [[ $OS_FAMILY == fedora ]] && has_csv_item "$SELECTED_GROUPS" media; then
       printf 'action\trepository\tRPM Fusion free\n'
     fi
+    if [[ $OS_FAMILY == apt ]] && has_csv_item "$SELECTED_GROUPS" dev-tools; then
+      printf 'action\trepository\tGitHub CLI apt repository\n'
+      printf 'artifact\tdirect\tgithub-cli-keyring\t%s\t%s\n' "$GH_APT_KEYRING_URL" "$GH_APT_KEYRING_SHA256"
+    fi
+    if message=$(apt_zoxide_outdated); then printf 'warning\tzoxide-outdated\t%s\n' "$message"; fi
   fi
   if [[ $SSH_MODE != skip ]]; then
     printf 'action\tssh\tprepare explicit local key and verify manual GitHub registration\n'
@@ -761,7 +765,7 @@ main() {
   order_selected_steps
   detect_os
   if [[ $OS_FAMILY != macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
-    die "The heroku package group is macOS-only (Heroku's Homebrew tap); remove it from --package-groups"
+    die "The heroku package group is macOS-only (no Linux distribution packages the Heroku CLI); remove it from --package-groups"
   fi
   if [[ $OS_FAMILY != macos && $BREW_MIRROR == china ]]; then
     die "--brew-mirror china applies to Homebrew on macOS only"

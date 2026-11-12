@@ -61,15 +61,16 @@ readonly NERD_FONTS_REPOSITORY="ryanoasis/nerd-fonts"
 readonly NERD_FONTS_DOWNLOAD_URL="https://github.com/ryanoasis/nerd-fonts/releases/download"
 readonly NERD_FONTS_SIGNATURE_URL="https://github.com/ryanoasis/nerd-fonts/releases/latest/download"
 
-# Two sources stay pinned, because neither has anything newer to follow.
+# Two sources stay pinned to reviewed copies rather than following upstream.
 # Homebrew's installer runs once, as the first thing on a new Mac, so it is
 # checked against a reviewed copy rather than whatever HEAD serves that day.
 # This commit (2026-11-06) supports macOS 15 through 27 (its
 # MACOS_NEWEST_UNSUPPORTED is 28.0) and Apple silicon only.
 readonly HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/7986efac25016e41eed7e471666140c06f9d97cf/install.sh"
 readonly HOMEBREW_INSTALL_SHA256="5f333bbe53bc490e51e7ccb1df8779b3dd6ee73a1a7379efda216edb08ccb148"
-# rpatool has no releases, and its GitHub repository is archived: this is its
-# final commit there.
+# rpatool has no releases. Its GitHub repository is archived and development
+# moved to codeberg.org/shiz/rpatool; this is the final GitHub commit, which
+# Codeberg also carries (its one later commit, 2026-01, repackages the tool).
 readonly RPATOOL_URL="https://raw.githubusercontent.com/Shizmob/rpatool/74f26d5dfdd645483e02552aa766ca447ad6b191/rpatool"
 readonly RPATOOL_SHA256="d343124cebd832f712540cc6468253f7e303979467e11c7490807f42c13963f1"
 

@@ -10,7 +10,7 @@ The implementation stays compatible with macOS Bash 3.2.
 | --- | --- |
 | `installer/registry.sh` | Ordered component registry, dependency closure, handler validation, the tool-artifact table, and which steps a full upgrade re-runs |
 | `installer/state.sh` | Saved profiles, schema migration, state signatures, locking and cleanup |
-| `installer/packages.sh` | Platform bootstrap, package maps and package-manager operations |
+| `installer/packages.sh` | Platform bootstrap, package maps, package-manager operations and the extra repositories they need (RPM Fusion, GitHub CLI's apt repository) |
 | `installer/tools.sh` | Tool installs (Homebrew formulae, age-gated GitHub releases with digest and attestation checks, Corepack from npm), release checkouts and the runtimes: Node LTS activation, uv's CPython, rbenv's Ruby |
 | `installer/config.sh` | Managed shell blocks, symlink-aware rewrites and default-shell changes |
 | `installer/credentials.sh` | Local key preparation, read-only GitHub checks and manual-action pauses |
@@ -75,7 +75,7 @@ update it together with the emitter in `install.sh`.
 | --- | --- | --- | --- |
 | `meta` | 3 | `schema`, `1` | Inspection format version |
 | `platform` | 3 | `family`, value | Selected OS package family |
-| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now), `release-age-homebrew` (macOS: the selected Homebrew formulae install at Homebrew's current version, not age-gated), `release-age-npm` (npm's latest Corepack, and the pnpm and Yarn it installs, not age-gated), `fallback-prompt` (zsh-config without the starship component) |
+| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now), `release-age-homebrew` (macOS: the selected Homebrew formulae install at Homebrew's current version, not age-gated), `release-age-npm` (npm's latest Corepack, and the pnpm and Yarn it installs, not age-gated), `fallback-prompt` (zsh-config without the starship component), `zoxide-outdated` (Debian/Ubuntu dev-tools whose apt zoxide predates 0.8) |
 | `profile` | 3 | `root`, path | Authoritative local checkout |
 | `policy` | 3 | `node`, `full-upgrade`, `selection` or `release-age`, value | Node selection policy; `yes`/`no` host upgrade; `saved` when `inspect --saved` read the selection from the saved profile; the minimum release age in days |
 | `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
@@ -90,7 +90,7 @@ update it together with the emitter in `install.sh`.
 | `global` | 3 | `git`, keys | Global Git settings the plan configures |
 | `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone: `host-upgrade` (package upgrades), `login-shell` (chsh) |
 | `privileged` | 3 | action, command or description | An action run as root (through sudo, or directly when root): `homebrew-bootstrap`, `bootstrap`, `package-manager`, `repository`, `dnf-swap`, `pacman-sync`, `credential-packages`, `etc-shells`, `login-shell`, `cask-upgrade` (macOS `--upgrade-casks`: some cask installers ask for sudo) |
-| `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`), `cask-upgrade` (the full upgrade also runs `brew upgrade --cask`; only with `--upgrade-casks`) |
+| `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `github-cli-apt` (Debian/Ubuntu dev-tools take gh from GitHub CLI's apt repository), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`), `cask-upgrade` (the full upgrade also runs `brew upgrade --cask`; only with `--upgrade-casks`) |
 | `conflict` | 4 | component, path, reason | An existing installation in the way of `rbenv`: `not-a-git-checkout`, `unexpected-origin`, `local-changes` (apply stops unless `--skip-existing-version-managers`), or `homebrew-install` (informational) |
 | `existing` | 4 | name, path, effect | A shell framework or version manager the profile coexists with: `oh-my-zsh`, `powerlevel10k`, `pyenv` (no longer installed or updated; its shims come before uv's python3), `nvm`, `conda`, `asdf`, `mise` |
 | `shadow` | 4 | executable, other copy, profile copy | Linux: a Homebrew copy of a tool that the profile's `~/.local/bin` copy will shadow |
@@ -462,11 +462,17 @@ Tools are not pinned, so there is no routine dependency bump. What needs care:
    uploaded since mid-2025); the installer refuses an asset without one.
 3. Keep the version line in `artifact_registry` matching what the tool prints;
    verification accepts any version but checks that shape.
-4. The two pinned downloads change deliberately: update the URL and SHA-256
+4. The pinned downloads change deliberately: update the URL and SHA-256
    together in `installer/sources.sh` (Homebrew's installer at a reviewed
    commit, re-pinned when a new macOS ships: its `MACOS_NEWEST_UNSUPPORTED`
-   must be above the newest macOS; rpatool's repository is archived, so it
-   should never change).
+   must be above the newest macOS; rpatool at its archived GitHub
+   repository's final commit, which codeberg.org/shiz/rpatool, where it
+   moved, also carries).
+   GitHub CLI's apt keyring (`GH_APT_KEYRING_SHA256` in
+   `installer/packages.sh`) follows the SHA-256 listed in cli/cli's
+   `docs/install_linux.md`; when GitHub rotates or re-signs its keys the
+   live check fails, and the new digest must come from that page and the
+   fingerprints from `gpg --show-keys` on the new file.
 5. A Git source whose tags stop (or start) tracking its branch: change its
    `<PREFIX>_FOLLOW` in `installer/sources.sh`.
 6. Behaviour changes upstream (a new major pnpm, a Node LTS, Python or Ruby

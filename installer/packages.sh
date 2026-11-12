@@ -100,6 +100,99 @@ apt_get() {
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
 }
 
+# GitHub CLI's own apt repository, for dev-tools on Debian/Ubuntu: the
+# distributions' gh is years old (2.4 on Ubuntu 22.04, 2.23 on Debian 12).
+# This follows cli/cli's docs/install_linux.md: the binary keyring in
+# /etc/apt/keyrings (mode 644) and a one-line source naming it. The keyring is
+# checked against the SHA-256 GitHub publishes there; it holds the signing
+# keys 2C6106201985B60E6C7AC87323F3D4EA75716059 and
+# 7F38BBB59D064DBCB3D84D725612B36462313325. tests/release-artifacts-test.sh
+# checks the digest against the live file. Like Fedora's RPM Fusion, the
+# repository is added only when the packages step runs the package manager,
+# and never twice: a correct existing setup, or any other apt source that
+# already names the repository (which a second Signed-By would make apt
+# reject), is left alone. APT_ETC moves /etc/apt for tests.
+GH_APT_REPOSITORY="https://cli.github.com/packages"
+GH_APT_KEYRING_URL="https://cli.github.com/packages/githubcli-archive-keyring.gpg"
+GH_APT_KEYRING_SHA256="6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b"
+APT_ETC=/etc/apt
+gh_apt_keyring() { printf '%s/keyrings/githubcli-archive-keyring.gpg\n' "$APT_ETC"; }
+gh_apt_list() { printf '%s/sources.list.d/github-cli.list\n' "$APT_ETC"; }
+gh_apt_source_line() {
+  printf 'deb [arch=%s signed-by=%s] %s stable main\n' \
+    "$(dpkg --print-architecture)" "$(gh_apt_keyring)" "$GH_APT_REPOSITORY"
+}
+
+# gh_apt_repository_state: `configured` (our source line and the pinned
+# keyring are in place), `other` (another apt source names the repository) or
+# `missing`.
+gh_apt_repository_state() {
+  local list keyring file
+  list=$(gh_apt_list)
+  keyring=$(gh_apt_keyring)
+  if [[ -f $list && -f $keyring ]] && [[ $(cat "$list") == "$(gh_apt_source_line)" ]] &&
+    [[ $(sha256 "$keyring") == "$GH_APT_KEYRING_SHA256" ]]; then
+    printf 'configured\n'
+    return 0
+  fi
+  for file in "$APT_ETC/sources.list" "$APT_ETC"/sources.list.d/*.list "$APT_ETC"/sources.list.d/*.sources; do
+    [[ -f $file && $file != "$list" ]] || continue
+    if grep -Eq '^[^#]*cli\.github\.com/packages' "$file"; then
+      printf 'other\n'
+      return 0
+    fi
+  done
+  printf 'missing\n'
+}
+
+gh_apt_repository_needed() {
+  [[ $OS_FAMILY == apt ]] || return 1
+  has_csv_item "$SELECTED_GROUPS" dev-tools || return 1
+  [[ $(gh_apt_repository_state) == missing ]]
+}
+
+ensure_gh_apt_repository() {
+  gh_apt_repository_needed || return 0
+  local keyring list temp
+  keyring=$(gh_apt_keyring)
+  list=$(gh_apt_list)
+  say "Adding GitHub CLI's apt repository ($GH_APT_REPOSITORY): the distribution's gh is outdated"
+  temp=$(mktemp -d "${TMPDIR:-/tmp}/leos-gh-apt.XXXXXX")
+  track_temp "$temp"
+  download_verified "$GH_APT_KEYRING_URL" "$GH_APT_KEYRING_SHA256" "$temp/keyring.gpg"
+  say "GitHub CLI keyring SHA-256: $GH_APT_KEYRING_SHA256"
+  gh_apt_source_line > "$temp/github-cli.list"
+  run_root install -d -m 755 "${keyring%/*}" "${list%/*}"
+  run_root install -m 644 "$temp/keyring.gpg" "$keyring"
+  run_root install -m 644 "$temp/github-cli.list" "$list"
+  # The next apt-get install must see the new repository's index.
+  APT_INDEX_UPDATED=0
+}
+
+# apt_zoxide_outdated: on Debian/Ubuntu with dev-tools, the one-line warning
+# when apt's zoxide candidate predates 0.8 (Debian 12 and Ubuntu 22.04 carry
+# 0.4.3) and no other zoxide is on PATH; fails silently otherwise, including
+# when apt-cache knows no candidate.
+zoxide_on_path() { type -P zoxide 2>/dev/null; }
+apt_zoxide_outdated() {
+  [[ $OS_FAMILY == apt ]] || return 1
+  has_csv_item "$SELECTED_GROUPS" dev-tools || return 1
+  local existing key value rest candidate="" version major minor
+  existing=$(zoxide_on_path) || existing=""
+  [[ -z $existing || $existing == /usr/bin/zoxide ]] || return 1
+  while read -r key value rest; do
+    if [[ $key == Candidate: ]]; then candidate=$value; break; fi
+  done < <(apt-cache policy zoxide 2>/dev/null)
+  [[ -n $candidate && $candidate != "(none)" ]] || return 1
+  version=${candidate#*:}
+  major=${version%%.*}
+  minor=${version#*.}
+  minor=${minor%%[!0-9]*}
+  [[ $major =~ ^[0-9]+$ && $minor =~ ^[0-9]+$ ]] || return 1
+  (( major == 0 && minor < 8 )) || return 1
+  printf 'apt'"'"'s zoxide %s predates 0.8, so z and zi may behave differently; for a current one, run cargo install zoxide --locked or put zoxide'"'"'s release binary in ~/.local/bin\n' "$candidate"
+}
+
 # pkg_install <packages...>: install packages with the host package manager.
 # The bootstrap, the packages step and the credential prerequisites all use
 # this one definition (CQ-3).
@@ -226,8 +319,13 @@ bootstrap_tools() {
 # the `python`/`python3` aliases follow Homebrew's newest minor release, so
 # each move made reconcile install another Python next to the old one. Change
 # python@3.15 here deliberately.
-# heroku is a macOS-only group (the CLI comes from Heroku's Homebrew tap); it
-# has no members elsewhere, and main() refuses it there.
+# eza is in every dev-tools map but apt's: Debian 13 and Ubuntu 24.04+ package
+# it, Debian 12 and Ubuntu 22.04 do not, and the apt map is one list for
+# every release (the per-image package-map gate would fail there). The
+# profile falls back to ls where eza is missing.
+# heroku is a macOS-only, opt-in group: the formula is in homebrew/core (no
+# third-party tap), but no Linux distribution packages the CLI. It has no
+# members elsewhere, and main() refuses it there.
 #
 # There is no `languages` group any more (schema 4): Node, Python and Ruby
 # come from fnm, uv and rbenv at their newest stable lines on every OS.
@@ -238,29 +336,29 @@ package_list_for_group() {
     macos:shell) printf '%s\n' 'zsh' ;;
     macos:dev-tools) printf '%s\n' 'autoconf bat direnv eza fd fzf gh git gmp jq libyaml pkgconf openssl@3 ripgrep rust vim xz zlib zoxide' ;;
     macos:python) printf '%s\n' 'python@3.15' ;;
-    macos:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
-    macos:network) printf '%s\n' 'wget rclone gnutls ssh-copy-id' ;;
+    macos:media) printf '%s\n' 'ffmpeg imagemagick' ;;
+    macos:network) printf '%s\n' 'wget rclone' ;;
     macos:heroku) printf '%s\n' 'heroku' ;;
     macos:system) printf '%s\n' 'smartmontools' ;;
     apt:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     apt:shell) printf '%s\n' 'zsh' ;;
     apt:dev-tools) printf '%s\n' 'autoconf bat build-essential direnv fd-find fzf gcc gh git jq libffi-dev libgmp-dev libssl-dev libyaml-dev ripgrep rustc vim xz-utils zlib1g-dev zoxide' ;;
     apt:python) printf '%s\n' 'python3' ;;
-    apt:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
+    apt:media) printf '%s\n' 'ffmpeg imagemagick' ;;
     apt:network) printf '%s\n' 'wget rclone' ;;
     apt:system) printf '%s\n' 'smartmontools' ;;
     fedora:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     fedora:shell) printf '%s\n' 'zsh' ;;
-    fedora:dev-tools) printf '%s\n' 'autoconf bat bzip2 direnv fd-find fzf gcc gh git gmp-devel jq libffi-devel libyaml-devel make openssl-devel patch ripgrep rust sqlite vim zlib-devel zoxide' ;;
+    fedora:dev-tools) printf '%s\n' 'autoconf bat bzip2 direnv eza fd-find fzf gcc gh git gmp-devel jq libffi-devel libyaml-devel make openssl-devel patch ripgrep rust sqlite vim zlib-devel zoxide' ;;
     fedora:python) printf '%s\n' 'python3' ;;
-    fedora:media) printf '%s\n' 'ImageMagick ffmpeg yt-dlp' ;;
+    fedora:media) printf '%s\n' 'ImageMagick ffmpeg' ;;
     fedora:network) printf '%s\n' 'wget rclone' ;;
     fedora:system) printf '%s\n' 'smartmontools' ;;
     arch:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     arch:shell) printf '%s\n' 'zsh' ;;
     arch:dev-tools) printf '%s\n' 'base-devel bat direnv eza fd fzf git github-cli gmp jq libffi libyaml openssl ripgrep rust vim xz zlib zoxide' ;;
     arch:python) printf '%s\n' 'python' ;;
-    arch:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
+    arch:media) printf '%s\n' 'ffmpeg imagemagick' ;;
     arch:network) printf '%s\n' 'wget rclone' ;;
     arch:system) printf '%s\n' 'smartmontools' ;;
   esac
@@ -405,8 +503,6 @@ install_os_packages() {
   case $OS_FAMILY in
     macos)
       ensure_brew
-      # Heroku's third-party tap is trusted only when its group is selected.
-      if has_csv_item "$SELECTED_GROUPS" heroku; then run brew tap heroku/brew; fi
       if [[ $FULL_UPGRADE -eq 1 ]]; then
         run brew update
         run brew upgrade
@@ -417,6 +513,7 @@ install_os_packages() {
       pkg_install "${requested[@]}"
       BREW_FORMULAE="" ;;
     apt)
+      ensure_gh_apt_repository
       apt_update_once
       [[ $FULL_UPGRADE -eq 0 ]] || apt_get upgrade -y
       pkg_install "${requested[@]}"

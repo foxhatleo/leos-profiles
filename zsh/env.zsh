@@ -162,6 +162,12 @@ if [[ ${LEOS_DISABLE_ALIASES:-0} != 1 ]]; then
     # sequences groff emits, which bat would otherwise render literally.
     # MANROFFOPT keeps groff from re-adding those sequences. A pager the user
     # already chose wins.
+    # bat's README now shows plain MANPAGER="bat -plman", but the overstrike
+    # stripping that relies on is only in bat's unreleased changes (#3517;
+    # 0.26.1 and every distribution's bat still need col). Picking per version
+    # would cost a `bat --version` fork per shell; switch once a bat with
+    # #3517 is what every supported platform packages, keeping
+    # __leos_wrappers[MANPAGER] (what LEOS_DISABLE_ALIASES removes) in step.
     if [[ -z ${MANPAGER:-} ]]; then
       export MANPAGER="sh -c 'col -bx | bat -l man -p'"
       __leos_wrappers[MANPAGER]=$MANPAGER

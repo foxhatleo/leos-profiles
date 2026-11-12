@@ -34,6 +34,10 @@ download_verified "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256" "$TEST_HOME
 artifact_install rpatool "$TEST_HOME/bin"
 "$TEST_HOME/bin/rpatool" --help >/dev/null
 printf 'verified pinned rpatool and Homebrew installer\n'
+# GitHub CLI's apt keyring (Debian/Ubuntu dev-tools) still matches the digest
+# GitHub publishes in cli/cli's docs/install_linux.md.
+download_verified "$GH_APT_KEYRING_URL" "$GH_APT_KEYRING_SHA256" "$TEST_HOME/githubcli-archive-keyring.gpg"
+printf 'verified pinned GitHub CLI apt keyring\n'
 
 # Every release asset the registry names, for both Linux CPUs, exists in its
 # project's picked release with a GitHub digest (from any host, so a renamed
