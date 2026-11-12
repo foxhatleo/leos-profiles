@@ -78,7 +78,11 @@ die() { printf '%s\n' "ERROR: $*" >&2; exit 1; }
 on_unexpected_error() {
   local status=$1 file=$2 line=$3
   [[ ${BASH_SUBSHELL:-0} -eq 0 ]] || return 0
-  printf '%s\n' "ERROR: unexpected failure (status $status) at $file:$line" >&2
+  # Status 1 is also what `die` exits with inside a $(...), after it already
+  # printed its own message, so a location line there would only be noise.
+  if [[ $status -ne 1 ]]; then
+    printf '%s\n' "ERROR: unexpected failure (status $status) at $file:$line" >&2
+  fi
   if [[ $status -eq 2 || $status -eq 3 ]]; then status=1; fi
   exit "$status"
 }
