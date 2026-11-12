@@ -1824,6 +1824,43 @@ test_apt_dev_tools_add_the_github_cli_repository() {
   rm -rf "$temp"
 }
 
+# Debian 12 / Ubuntu 22.04 package zoxide 0.4.3: inspect warns in one line,
+# only for an apt candidate before 0.8 and only when no other zoxide is on PATH.
+test_old_apt_zoxide_is_warned_about() {
+  local out
+  OS_FAMILY=apt
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=dev-tools
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  apt-cache() { printf 'zoxide:\n  Installed: (none)\n  Candidate: %s\n  Version table:\n' "$FAKE_CANDIDATE"; }
+  zoxide_on_path() { [[ -n $FAKE_ZOXIDE ]] && printf '%s\n' "$FAKE_ZOXIDE"; }
+  FAKE_ZOXIDE=""
+  FAKE_CANDIDATE=0.4.3-5
+  out=$(apt_zoxide_outdated) || fail "zoxide 0.4.3 was not reported"
+  assert_contains "$out" "zoxide 0.4.3-5 predates 0.8"
+  # The distribution's own copy, once installed, is still the old one.
+  FAKE_ZOXIDE=/usr/bin/zoxide
+  apt_zoxide_outdated >/dev/null || fail "an installed zoxide 0.4.3 was not reported"
+  verify_step() { return 1; }
+  dpkg() { printf 'amd64\n'; }
+  assert_contains "$(inspect_tsv)" $'warning\tzoxide-outdated\tapt\'s zoxide 0.4.3-5 predates 0.8'
+  for FAKE_CANDIDATE in 0.9.3-1 1:0.8.0-1 '(none)' ''; do
+    ! apt_zoxide_outdated >/dev/null || fail "zoxide '$FAKE_CANDIDATE' was reported as outdated"
+  done
+  FAKE_CANDIDATE=0.4.3-5
+  # The user's own zoxide on PATH wins over the package.
+  FAKE_ZOXIDE=$HOME/.local/bin/zoxide
+  ! apt_zoxide_outdated >/dev/null || fail "a zoxide outside the package was reported"
+  # Other families and selections never look.
+  FAKE_ZOXIDE=""
+  SELECTED_GROUPS=shell
+  ! apt_zoxide_outdated >/dev/null || fail "zoxide was reported without dev-tools"
+  OS_FAMILY=fedora
+  SELECTED_GROUPS=dev-tools
+  ! apt_zoxide_outdated >/dev/null || fail "zoxide was reported on Fedora"
+}
+
 # BP-8: missing packages on Arch sync and upgrade in one transaction, with or
 # without the full-upgrade policy; there is never a bare -S.
 test_arch_installs_with_a_synced_database() {
@@ -3187,6 +3224,7 @@ TESTS=(
   test_apt_upgrade_keeps_local_configuration
   test_fedora_media_swaps_only_ffmpeg
   test_apt_dev_tools_add_the_github_cli_repository
+  test_old_apt_zoxide_is_warned_about
   test_arch_installs_with_a_synced_database
   test_version_manager_extension_compile_is_best_effort
   test_nerd_font_rejects_unknown_names_before_downloading

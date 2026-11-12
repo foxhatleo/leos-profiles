@@ -554,6 +554,7 @@ inspect_tsv() {
       printf 'action\trepository\tGitHub CLI apt repository\n'
       printf 'artifact\tdirect\tgithub-cli-keyring\t%s\t%s\n' "$GH_APT_KEYRING_URL" "$GH_APT_KEYRING_SHA256"
     fi
+    if message=$(apt_zoxide_outdated); then printf 'warning\tzoxide-outdated\t%s\n' "$message"; fi
   fi
   if [[ $SSH_MODE != skip ]]; then
     printf 'action\tssh\tprepare explicit local key and verify manual GitHub registration\n'

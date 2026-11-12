@@ -169,6 +169,30 @@ ensure_gh_apt_repository() {
   APT_INDEX_UPDATED=0
 }
 
+# apt_zoxide_outdated: on Debian/Ubuntu with dev-tools, the one-line warning
+# when apt's zoxide candidate predates 0.8 (Debian 12 and Ubuntu 22.04 carry
+# 0.4.3) and no other zoxide is on PATH; fails silently otherwise, including
+# when apt-cache knows no candidate.
+zoxide_on_path() { type -P zoxide 2>/dev/null; }
+apt_zoxide_outdated() {
+  [[ $OS_FAMILY == apt ]] || return 1
+  has_csv_item "$SELECTED_GROUPS" dev-tools || return 1
+  local existing key value rest candidate="" version major minor
+  existing=$(zoxide_on_path) || existing=""
+  [[ -z $existing || $existing == /usr/bin/zoxide ]] || return 1
+  while read -r key value rest; do
+    if [[ $key == Candidate: ]]; then candidate=$value; break; fi
+  done < <(apt-cache policy zoxide 2>/dev/null)
+  [[ -n $candidate && $candidate != "(none)" ]] || return 1
+  version=${candidate#*:}
+  major=${version%%.*}
+  minor=${version#*.}
+  minor=${minor%%[!0-9]*}
+  [[ $major =~ ^[0-9]+$ && $minor =~ ^[0-9]+$ ]] || return 1
+  (( major == 0 && minor < 8 )) || return 1
+  printf 'apt'"'"'s zoxide %s predates 0.8, so z and zi may behave differently; for a current one, run cargo install zoxide --locked or put zoxide'"'"'s release binary in ~/.local/bin\n' "$candidate"
+}
+
 # pkg_install <packages...>: install packages with the host package manager.
 # The bootstrap, the packages step and the credential prerequisites all use
 # this one definition (CQ-3).

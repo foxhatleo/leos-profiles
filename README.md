@@ -483,7 +483,10 @@ Debian/Ubuntu list leaves it out because Debian 12 and Ubuntu 22.04 do not
 package it, so `apt install eza` it yourself on Debian 13 or Ubuntu 24.04+). zoxide
 adds `z <words>` (jump to the best-ranked directory matching them; a plain path
 works as with `cd`) and `zi` (pick one interactively); `cd` itself stays the
-shell builtin.
+shell builtin. Debian 12 and Ubuntu 22.04 package zoxide 0.4.3, whose `z` and
+`zi` behave differently from 0.8 and later; inspect warns
+(`zoxide-outdated`) there, and `cargo install zoxide --locked` or zoxide's
+release binary in `~/.local/bin` gives a current one.
 
 ### Optional integrations
 
