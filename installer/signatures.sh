@@ -42,15 +42,11 @@ signature_packages() {
 # existing checkouts re-run once and move to their release). Never the
 # minimum release age or the tag: a new upstream release must not make a step
 # look undone.
-signature_pyenv() {
-  local material="" asset
-  material+="|$PYENV_REPOSITORY|release"
-  printf '%s' "$material"
-}
-
 signature_rbenv() {
   local material="" asset
-  material+="|$RBENV_REPOSITORY|$RUBY_BUILD_REPOSITORY|release"
+  # ruby-latest-stable since schema 4 (2026-11): the step now also compiles
+  # the newest stable Ruby, so rbenv steps recorded before re-run once.
+  material+="|$RBENV_REPOSITORY|$RUBY_BUILD_REPOSITORY|release|ruby-latest-stable"
   printf '%s' "$material"
 }
 
@@ -58,27 +54,28 @@ signature_bun() { artifact_signature bun; }
 
 signature_uv() { artifact_signature uv; }
 
-# npm_tool_signature <yarn|pnpm>: its formula on macOS, the npm prefix elsewhere.
-npm_tool_signature() {
-  if [[ $OS_FAMILY == macos ]]; then
-    printf '|formula|%s' "$1"
-  else
-    printf '|npm|%s@latest|%s' "$1" "$HOME/.local/npm"
-  fi
+# Corepack: the npm package and prefix, and the package managers it installs
+# outside projects (their versions are not part of it).
+signature_corepack() {
+  printf '|npm|corepack@latest|%s|%s' "$(corepack_prefix)" "$COREPACK_DEFAULTS"
 }
 
-signature_yarn() { npm_tool_signature yarn; }
+# uv's CPython, as python3 in ~/.local/bin; the line it picks is not part of it.
+signature_cpython() {
+  printf '|uv-python|latest-stable|%s' "$HOME/.local/bin"
+}
 
-signature_pnpm() { npm_tool_signature pnpm; }
+signature_starship() { artifact_signature starship; }
 
 signature_fnm() {
   artifact_signature fnm
   printf '|%s' "$NODE_POLICY"
 }
 
+# Starship was part of plugins until schema 4 (now its own component), so
+# plugins steps recorded before re-run once.
 signature_plugins() {
   printf '|%s' "$TARGET"
-  artifact_signature starship
   printf '|%s|%s|%s|%s|release' "$ZSH_AUTOSUGGESTIONS_REPOSITORY" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" \
     "$ZSH_COMPLETIONS_REPOSITORY" "$FZF_TAB_REPOSITORY"
 }
@@ -95,7 +92,7 @@ signature_fonts() {
 signature_zsh_config() {
   local material="" asset
   resolve_zsh_dotdirs
-  material+="|loader-v4|$TARGET|$OS_FAMILY|$ZSH_RC_DIR|$ZSH_ENV_DIR"
+  material+="|loader-v5|$TARGET|$OS_FAMILY|$ZSH_RC_DIR|$ZSH_ENV_DIR"
   printf '%s' "$material"
 }
 

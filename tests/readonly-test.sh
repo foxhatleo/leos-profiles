@@ -43,11 +43,12 @@ printf '%s\n' 'echo user rc' 'if [[ -o interactive ]]; then' \
 printf '%s\n' 'export USER_ENV=1' '# leos-profiles zshenv' 'typeset -U path' \
   'path=("$HOME/.local/bin" $path)' 'export PATH' > "$FIXTURE_HOME/.zshenv"
 printf '%s\n' 'legacy' > "$FIXTURE_HOME/.lp-no-gnu"
-# Existing setups inspect discloses (oh-my-zsh, nvm).
-mkdir -p "$FIXTURE_HOME/.oh-my-zsh" "$FIXTURE_HOME/.nvm"
+# Existing setups inspect discloses (oh-my-zsh, nvm, and a pyenv the profile
+# no longer manages).
+mkdir -p "$FIXTURE_HOME/.oh-my-zsh" "$FIXTURE_HOME/.nvm" "$FIXTURE_HOME/.pyenv"
 mkdir -p "$FIXTURE_HOME/.local/state/leos-profiles"
 printf 'packages\t%064d\t2020-01-01T00:00:00Z\t\n' 0 > "$FIXTURE_HOME/.local/state/leos-profiles/install-state.tsv"
-printf '%s\t%s\n' schema 1 groups zsh-config,fnm package-groups shell full-upgrade no \
+printf '%s\t%s\n' schema 1 groups zsh-config,fnm,pnpm package-groups shell,languages full-upgrade no \
   fonts no font '' default-shell no git-name '' git-email '' ssh skip ssh-key '' \
   ssh-passphrase empty gpg skip gpg-key '' gpg-passphrase empty node-channel current-lts \
   ai-cli-update-channel native package-channel system > "$PROFILE/local/install-profile.tsv"
@@ -75,7 +76,7 @@ case "$name" in
     esac ;;
   pacman)
     case "$1" in -Q*) exit 1 ;; esac ;;
-  curl|wget|fnm|node) exit 7 ;;
+  curl|wget|fnm|node|uv|rbenv|corepack) exit 7 ;;
   # Logged out: inspect asks gh for a token to read GitHub's API with.
   gh) [ "$1" = auth ] && [ "$2" = token ] && exit 1 ;;
   # The preflight's credential probe changes nothing; answer as a host where
@@ -86,7 +87,7 @@ printf 'MUTATION %s %s\n' "$name" "$*" >> "$LEOS_READONLY_CALLS"
 exit 97
 FAKE
 chmod 755 "$FAKEBIN/fake"
-fakes=(sudo chsh curl wget gh ssh-keyscan fnm node npm)
+fakes=(sudo chsh curl wget gh ssh-keyscan fnm node npm uv rbenv corepack)
 if [[ $(uname -s) == Darwin ]]; then
   fakes+=(brew)
 else
@@ -178,7 +179,11 @@ run_read_only() {
 
 run_read_only 'inspect (recommended)' 0 inspect
 check_tsv 'inspect (recommended)' "$OUTPUT"
-grep -qxF $'migration\tprofile-schema\t1\t3' <<< "$OUTPUT" || fail 'inspect did not report the pending profile migration'
+grep -qxF $'migration\tprofile-schema\t1\t4' <<< "$OUTPUT" || fail 'inspect did not report the pending profile migration'
+grep -q $'^migration\tpackage-group\tlanguages\t' <<< "$OUTPUT" || fail 'inspect did not report the dropped languages group'
+grep -q $'^existing\tpyenv\t'"$FIXTURE_HOME/.pyenv"$'\t' <<< "$OUTPUT" || fail 'inspect did not disclose the existing pyenv'
+grep -q $'^runtime\tpython\t' <<< "$OUTPUT" || fail 'inspect did not report the Python runtime'
+grep -q $'^runtime\truby\t' <<< "$OUTPUT" || fail 'inspect did not report the Ruby runtime'
 grep -q $'^postcondition\tzsh-config\tneeded$' <<< "$OUTPUT" || fail 'inspect did not report zsh-config as needed'
 grep -qxF $'migration\tlegacy-loader\t'"$FIXTURE_HOME/.zshrc"$'\tloader' <<< "$OUTPUT" ||
   fail 'inspect did not report the legacy .zshrc loader'
@@ -193,7 +198,7 @@ if [[ $(uname -s) == Darwin ]]; then
 fi
 
 run_read_only 'inspect (credentials and every component)' 0 inspect \
-  --groups bins,pyenv,rbenv,bun,yarn,pnpm,plugins,fonts,zsh-config,default-shell \
+  --groups bins,rbenv,bun,corepack,cpython,starship,plugins,fonts,zsh-config,default-shell \
   --fonts yes --font JetBrainsMono --ssh generate --gpg generate \
   --git-name 'Fixture User' --git-email fixture@example.invalid
 check_tsv 'inspect (credentials and every component)' "$OUTPUT"
@@ -215,7 +220,10 @@ run_read_only 'inspect --saved' 0 inspect --saved
 check_tsv 'inspect --saved' "$OUTPUT"
 grep -qxF $'policy\tselection\tsaved' <<< "$OUTPUT" || fail 'inspect --saved did not say it used the saved selection'
 grep -qxF $'group\tcomponent\tfnm\tselected' <<< "$OUTPUT" || fail 'inspect --saved did not use the saved components'
-! grep -q $'^group\tcomponent\tpyenv\t' <<< "$OUTPUT" || fail 'inspect --saved used the default selection'
+# The schema-1 profile's pnpm reads as corepack, and languages is gone.
+grep -qxF $'group\tcomponent\tcorepack\tselected' <<< "$OUTPUT" || fail 'inspect --saved did not map pnpm to corepack'
+! grep -q $'^group\tpackage\tlanguages\t' <<< "$OUTPUT" || fail 'inspect --saved kept the languages group'
+! grep -q $'^group\tcomponent\trbenv\t' <<< "$OUTPUT" || fail 'inspect --saved used the default selection'
 
 # inventory, in both formats.
 run_read_only 'inventory --tsv' 0 inventory --tsv
@@ -225,18 +233,18 @@ grep -qxF $'item\tlocal\tinstall-profile.tsv\t'"$PROFILE/local/install-profile.t
 run_read_only 'inventory' 0 inventory
 grep -q '^present  local  ' <<< "$OUTPUT" || fail 'human inventory did not list present items'
 
-# An existing non-Git ~/.pyenv: disclosed, and apply stops before any change
+# An existing non-Git ~/.rbenv: disclosed, and apply stops before any change
 # unless asked to keep it (ONB-5).
-mkdir -p "$FIXTURE_HOME/.pyenv"
-run_read_only 'inspect (existing ~/.pyenv)' 0 inspect --groups pyenv
-check_tsv 'inspect (existing ~/.pyenv)' "$OUTPUT"
-grep -qxF $'conflict\tpyenv\t'"$FIXTURE_HOME/.pyenv"$'\tnot-a-git-checkout' <<< "$OUTPUT" ||
-  fail 'inspect did not report the existing ~/.pyenv'
-run_read_only 'apply --dry-run (existing ~/.pyenv)' 1 apply --yes --dry-run --groups pyenv
-grep -q -- '--skip-existing-version-managers' "$FIXTURE/stderr" || fail 'the pyenv conflict did not name the option'
-run_read_only 'apply --dry-run --skip-existing-version-managers' 0 apply --yes --dry-run --groups pyenv --skip-existing-version-managers
-grep -q 'Skipping pyenv: keeping the existing installation' <<< "$OUTPUT" || fail 'the existing pyenv was not kept'
-rmdir "$FIXTURE_HOME/.pyenv"
+mkdir -p "$FIXTURE_HOME/.rbenv"
+run_read_only 'inspect (existing ~/.rbenv)' 0 inspect --groups rbenv
+check_tsv 'inspect (existing ~/.rbenv)' "$OUTPUT"
+grep -qxF $'conflict\trbenv\t'"$FIXTURE_HOME/.rbenv"$'\tnot-a-git-checkout' <<< "$OUTPUT" ||
+  fail 'inspect did not report the existing ~/.rbenv'
+run_read_only 'apply --dry-run (existing ~/.rbenv)' 1 apply --yes --dry-run --groups rbenv
+grep -q -- '--skip-existing-version-managers' "$FIXTURE/stderr" || fail 'the rbenv conflict did not name the option'
+run_read_only 'apply --dry-run --skip-existing-version-managers' 0 apply --yes --dry-run --groups rbenv --skip-existing-version-managers
+grep -q 'Skipping rbenv: keeping the existing installation' <<< "$OUTPUT" || fail 'the existing rbenv was not kept'
+rmdir "$FIXTURE_HOME/.rbenv"
 
 # Without a terminal, a choice that must prompt stops before any change with
 # the exact command to run yourself (ONB-1).

@@ -308,7 +308,7 @@ if whence -p starship >/dev/null; then
   unset _leos_starship_status
 else
   if [[ ! -f $_leos_root/local/flags/no-starship-warning ]]; then
-    __leos_puts_err "Starship is not installed; using the built-in fallback prompt. Run the installer plugins step to restore it, or touch local/flags/no-starship-warning under the profile root to silence this."
+    __leos_puts_err "Starship is not installed; using the built-in fallback prompt. Run the installer starship step to restore it, or touch local/flags/no-starship-warning under the profile root to silence this."
   fi
   PROMPT=$_leos_fallback_prompt
 fi

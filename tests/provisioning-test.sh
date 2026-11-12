@@ -48,7 +48,6 @@ export XDG_CACHE_HOME="$HOME/.cache"
 export XDG_DATA_HOME="$HOME/.local/share"
 export XDG_STATE_HOME="$HOME/.local/state"
 export FNM_DIR="$XDG_DATA_HOME/fnm"
-export PYENV_ROOT="$HOME/.pyenv"
 export RBENV_ROOT="$HOME/.rbenv"
 unset LEOS_PROFILES_INSTALL_LIB_ONLY LEOS_PROFILES_HOME ZDOTDIR
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -62,21 +61,35 @@ apply() {
   bash "$PROFILE/install.sh" apply --yes --ssh skip --gpg skip --default-shell no "$@"
 }
 # Where the installer puts a tool: Homebrew's formula on macOS, the latest
-# release in ~/.local/bin (npm tools: ~/.local/npm/bin) on Linux.
+# release in ~/.local/bin on Linux. Corepack's pnpm and Yarn shims are in
+# ~/.local/npm/bin everywhere.
 is_macos() { [[ $(uname -s) == Darwin ]]; }
 tool_path() {
   if is_macos; then printf '%s/bin/%s\n' "$(brew --prefix)" "$1"; else printf '%s\n' "$HOME/.local/bin/$1"; fi
 }
-npm_tool_path() {
-  if is_macos; then tool_path "$1"; else printf '%s\n' "$HOME/.local/npm/bin/$1"; fi
-}
+npm_tool_path() { printf '%s\n' "$HOME/.local/npm/bin/$1"; }
 remove_tool() {
   if is_macos; then brew uninstall --formula --ignore-dependencies "$1"; else rm -- "$HOME/.local/bin/$1"; fi
 }
 verify_npm_tool() {
   local tool=$1 actual
-  actual=$("$(tool_path fnm)" exec --using=default -- "$(npm_tool_path "$tool")" --version)
+  actual=$(cd "$FIXTURE" && "$(tool_path fnm)" exec --using=default -- "$(npm_tool_path "$tool")" --version)
   [[ $actual =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || fail "$tool reports no version: $actual"
+  # Corepack's Yarn is the modern line, not Yarn Classic.
+  [[ $tool != yarn || $actual != 1.* ]] || fail "yarn is Yarn Classic: $actual"
+}
+# A non-interactive zsh (no -i: .zshenv only, as scripts and editors run) gets
+# fnm's default Node, Corepack's shims and uv's Python; Ruby when rbenv's
+# global is on PATH there (interactive shells add rbenv's shims).
+noninteractive_runtimes() {
+  local out
+  out=$(cd "$FIXTURE" && env -i HOME="$HOME" PATH=/usr/bin:/bin USER="$(id -un)" \
+    XDG_DATA_HOME="$XDG_DATA_HOME" FNM_DIR="$FNM_DIR" zsh -c 'node -v; pnpm -v; yarn -v; python3 -V' 2>&1) ||
+    fail "a non-interactive zsh lacks a runtime: $out"
+  printf '%s\n' "$out"
+  [[ $out == v[0-9]*$'\n'[0-9]*$'\n'[0-9]*$'\n'"Python 3."* ]] || fail "unexpected runtime versions: $out"
+  out=$(cd "$FIXTURE" && zsh -ic 'ruby -v' 2>&1) || fail "an interactive zsh has no Ruby: $out"
+  [[ $out == 'ruby '* ]] || fail "rbenv's Ruby does not run: $out"
 }
 verify_tool() {
   local tool=$1 first
@@ -116,13 +129,11 @@ apply --groups zsh-config --package-groups none --no-full-upgrade --fonts no
 EXPECTED_PROFILE="$PROFILE" zsh -ic '[[ $LEOS_PROFILES == $EXPECTED_PROFILE ]]' ||
   fail "interactive LEOS_PROFILES does not match $PROFILE"
 
-printf '%s\n' '=== pnpm-only selection must provision its Node dependency ==='
-apply --groups pnpm --package-groups none --no-full-upgrade --fonts no
-[[ -x $(tool_path fnm) ]] || fail 'pnpm-only selection did not install fnm'
-verify_npm_tool pnpm
+printf '%s\n' '=== corepack-only selection must provision its Node dependency ==='
+apply --groups corepack --package-groups none --no-full-upgrade --fonts no
+[[ -x $(tool_path fnm) ]] || fail 'corepack-only selection did not install fnm'
 
-printf '%s\n' '=== Execute both installed npm package managers ==='
-apply --groups yarn,pnpm --package-groups none --no-full-upgrade --fonts no
+printf '%s\n' '=== Execute both package managers Corepack installed ==='
 verify_npm_tool yarn
 verify_npm_tool pnpm
 
@@ -141,6 +152,7 @@ else
 fi
 verify_npm_tool yarn
 verify_npm_tool pnpm
+noninteractive_runtimes
 real_shell_smoke "$FIXTURE/first-shell"
 real_shell_smoke "$FIXTURE/second-shell"
 [[ $(cat "$FIXTURE/first-shell") != "$(cat "$FIXTURE/second-shell")" ]] ||
@@ -191,7 +203,7 @@ git -C "$PLUGIN" checkout --quiet -B leos-ci-default refs/remotes/origin/HEAD
 find "$FONT_DIR" -type f -name 'JetBrainsMono*' -delete
 [[ -z $(find "$FONT_DIR" -type f -name 'JetBrainsMono*') ]] || fail 'could not remove the font files'
 bash "$PROFILE/install.sh" reconcile --yes | tee "$FIXTURE/repair-more.log"
-for step in plugins zsh-config fonts; do
+for step in starship plugins zsh-config fonts; do
   grep -Fq "Running $step" "$FIXTURE/repair-more.log" || fail "reconcile did not repair $step"
 done
 verify_tool starship

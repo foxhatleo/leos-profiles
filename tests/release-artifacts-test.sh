@@ -3,7 +3,8 @@
 # this runner's platform: on Linux the GitHub releases github_release_pick
 # chooses (the newest at least the default minimum release age old, checked
 # against GitHub's digests and, with gh logged in, attestations) and npm's
-# latest Yarn and pnpm; on macOS, that every Homebrew formula exists. Also the
+# latest Corepack with the pnpm and Yarn it installs; on macOS, that every
+# Homebrew formula exists. Also the
 # two pinned files and the picked Nerd Fonts release. Needs network; set
 # GITHUB_TOKEN to avoid the API's anonymous limit.
 # shellcheck disable=SC1091,SC2034,SC2329
@@ -59,9 +60,6 @@ if [[ $OS_FAMILY == macos ]]; then
     [[ -z $ARTIFACT_FORMULA ]] || brew info --formula "$ARTIFACT_FORMULA" >/dev/null ||
       die "Homebrew has no $ARTIFACT_FORMULA formula"
   done < <(artifact_names)
-  for formula in yarn pnpm; do
-    brew info --formula "$formula" >/dev/null || die "Homebrew has no $formula formula"
-  done
   printf 'Homebrew formulae present\n'
 else
   # Install each release, check the version it reports and its other
@@ -75,7 +73,7 @@ else
   done < <(artifact_names)
   "$TEST_HOME/bin/uvx" --version >/dev/null
 
-  # Yarn and pnpm from npm, on the current LTS installed by fnm.
+  # Corepack from npm, and its pnpm and Yarn, on the LTS installed by fnm.
   mkdir -p "$HOME/.local/bin"
   cp "$TEST_HOME/bin/fnm" "$HOME/.local/bin/fnm"
   resolve_node_version
@@ -83,10 +81,8 @@ else
   "$HOME/.local/bin/fnm" install "$RESOLVED_NODE_VERSION"
   "$HOME/.local/bin/fnm" default "$RESOLVED_NODE_VERSION"
   [[ $(fnm_default_node) == "$RESOLVED_NODE_VERSION" ]] || die "fnm's default is not $RESOLVED_NODE_VERSION"
-  install_yarn
-  install_pnpm
-  verify_yarn
-  verify_pnpm
+  install_corepack
+  verify_corepack
   fnm_exec npm completion > "$TEST_HOME/npm-completion.zsh"
   fnm_exec "$HOME/.local/npm/bin/pnpm" completion zsh > "$TEST_HOME/pnpm-completion.zsh"
   SHELL=zsh "$TEST_HOME/bin/bun" completions > "$TEST_HOME/bun-completion.zsh"

@@ -22,15 +22,21 @@
 # A full upgrade (apply's default, reconcile --full-upgrade) moves all of them
 # forward; otherwise a run only repairs what is missing.
 
-readonly PYENV_REPOSITORY="https://github.com/pyenv/pyenv.git"
 readonly RBENV_REPOSITORY="https://github.com/rbenv/rbenv.git"
 readonly RUBY_BUILD_REPOSITORY="https://github.com/rbenv/ruby-build.git"
-# pyenv and rbenv release often enough for tags. ruby-build is mostly Ruby
-# build definitions: a new tag is how a Ruby security release becomes
-# installable, so it is not held back.
-readonly PYENV_FOLLOW=tag
+# rbenv releases often enough for tags. ruby-build is mostly Ruby build
+# definitions: a new tag is how a Ruby security release becomes installable,
+# so it is not held back. A new Ruby minor line still waits the minimum
+# release age (resolve_ruby_version), measured from the commit that added its
+# x.y.0 definition.
 readonly RBENV_FOLLOW=tag
 readonly RUBY_BUILD_FOLLOW=tag-now
+
+# Runtimes. Node: the LTS line fnm installs comes from the release index
+# (node_dist_index_url). Python: uv's CPython builds; a new minor line waits
+# the minimum release age, counted from python.org's x.y.0 release date read
+# from this API (`?name=Python%203.14.0` returns a one-element JSON list).
+readonly PYTHON_RELEASE_API="https://www.python.org/api/v2/downloads/release/"
 
 readonly ZSH_AUTOSUGGESTIONS_REPOSITORY="https://github.com/zsh-users/zsh-autosuggestions.git"
 readonly ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY="https://github.com/zsh-users/zsh-syntax-highlighting.git"

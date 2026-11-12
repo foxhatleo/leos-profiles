@@ -1,8 +1,7 @@
-# Yarn (Classic) global bin. Add the default location from disk instead of
-# running `yarn global bin`, which spawns a Node process on every interactive
-# shell (and Yarn Berry has no global bin at all). A non-default global prefix
-# can be added in local/private.zsh.
-__leos_add_path "$HOME/.yarn/bin"
+# pnpm and Yarn are Corepack's shims in ~/.local/npm/bin (path/bin.zsh puts
+# it on PATH). Yarn Classic's global bin, ~/.yarn/bin, is no longer added:
+# modern Yarn has no global installs. A directory of your own can be added in
+# local/private.zsh.
 
 # bun's own global bin dir, where `bun add -g` puts binaries. __leos_add_path no-ops
 # when it does not exist, so this costs nothing until bun installs something.
@@ -11,9 +10,9 @@ __leos_add_path "$HOME/.bun/bin"
 # Node package-manager completions.
 #
 # npm ships `npm completion` and pnpm ships `pnpm completion zsh`; both print a
-# Zsh completion script on stdout. Yarn has no generator in either line —
-# Classic 1.x never had one and Berry 4.x still does not — so yarn keeps using
-# the `_yarn` completion bundled with zsh-completions.
+# Zsh completion script on stdout. Yarn has no generator (modern Yarn still
+# does not), so yarn keeps using the `_yarn` completion bundled with
+# zsh-completions.
 #
 # Each generator spawns a Node process, far too slow to run on every
 # interactive shell, so their output is cached on disk by start.zsh's shared
@@ -28,8 +27,7 @@ leos-node-completions() {
 
   local tool
   # bun ships a full compsys script on stdout, like npm and pnpm. Yarn has no
-  # generator in either line — Classic 1.x never had one and Berry 4.x still
-  # does not — so yarn keeps the `_yarn` bundled with zsh-completions.
+  # generator, so yarn keeps the `_yarn` bundled with zsh-completions.
   local status_
   for tool in npm pnpm bun; do
     whence -p $tool >/dev/null || continue

@@ -1,4 +1,6 @@
-# pyenv
+# pyenv. The installer no longer installs it (uv's CPython in ~/.local/bin is
+# the profile's Python since 2026-11), but an existing one keeps working: its
+# shims then come before uv's python3, as before.
 export PYENV_ROOT=${PYENV_ROOT:-$HOME/.pyenv}
 __leos_add_path "$PYENV_ROOT/bin"
 # The installer's checkout is found by path; otherwise a pyenv elsewhere on

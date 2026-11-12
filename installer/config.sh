@@ -138,15 +138,29 @@ zshenv_managed_content() {
   # put zsh-completions and rbenv on fpath; the profile's own `compinit -C`
   # would otherwise trust that reduced dump for a day.
   #
-  # The local bins are added only when missing. .zshenv runs in every zsh,
-  # child shells and scripts included, and moving them to the front again
-  # there would put them back ahead of the version-manager shims the parent's
-  # profile placed before them. Nothing is added for root with someone else's
-  # HOME (`sudo -s` keeps the user's): those directories are user-writable.
+  # The local bins and fnm's default Node are added only when missing. .zshenv
+  # runs in every zsh, child shells and scripts included, and moving them to
+  # the front again there would put them back ahead of the version-manager
+  # shims the parent's profile placed before them. Nothing is added for root
+  # with someone else's HOME (`sudo -s` keeps the user's): those directories
+  # are user-writable.
+  #
+  # fnm's default alias gives non-interactive shells (`zsh -c`, scripts,
+  # editors) the Node that interactive shells get from `fnm env`, and with it
+  # Corepack's pnpm and Yarn shims, which run on it. Its directory is fnm's:
+  # FNM_DIR, else $XDG_DATA_HOME/fnm (~/.local/share/fnm) when it exists,
+  # else macOS's ~/Library/Application Support/fnm. Only an existing
+  # directory is added.
   # shellcheck disable=SC2016
   printf '%s\n' 'skip_global_compinit=1
 if (( EUID )) || [[ -O $HOME ]]; then
   typeset -gU path
+  () {
+    local fnm=${FNM_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/fnm}
+    [[ -n ${FNM_DIR:-} || -d $fnm ]] || fnm=$HOME/Library/Application\ Support/fnm
+    [[ ! -d $fnm/aliases/default/bin ]] || (( ${path[(Ie)$fnm/aliases/default/bin]} )) ||
+      path=("$fnm/aliases/default/bin" $path)
+  }
   (( ${path[(Ie)$HOME/.local/npm/bin]} )) || path=("$HOME/.local/npm/bin" $path)
   (( ${path[(Ie)$HOME/.local/bin]} )) || path=("$HOME/.local/bin" $path)
   export PATH
@@ -155,11 +169,18 @@ fi'
 
 # macOS login shells run /etc/zprofile after ~/.zshenv, and its path_helper
 # moves every inherited entry behind the system paths, so ~/.local/bin would
-# lose to Homebrew's node. ~/.zprofile runs after it and restores the order.
+# lose to Homebrew's node. ~/.zprofile runs after it and restores the order,
+# fnm's default Node included (see zshenv_managed_content).
 zprofile_managed_content() {
   # shellcheck disable=SC2016
   printf '%s\n' 'typeset -U path
-path=("$HOME/.local/bin" "$HOME/.local/npm/bin" $path)
+() {
+  local fnm=${FNM_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/fnm}
+  [[ -n ${FNM_DIR:-} || -d $fnm ]] || fnm=$HOME/Library/Application\ Support/fnm
+  local -a front=("$HOME/.local/bin" "$HOME/.local/npm/bin")
+  [[ ! -d $fnm/aliases/default/bin ]] || front+=("$fnm/aliases/default/bin")
+  path=($front $path)
+}
 export PATH'
 }
 

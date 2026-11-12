@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The destructive macOS migrations in installer/tools.sh, in a fixture HOME:
 # remove_legacy_local_copy (old ~/.local/bin copies of tools Homebrew now
-# owns) and remove_legacy_npm_copy (old ~/.local/npm copies of Yarn and pnpm).
+# owns) and remove_legacy_npm_copy (old ~/.local/npm copies of Yarn and pnpm,
+# which Corepack's shims replace).
 # Each must remove exactly the legacy copy, leave every other file alone,
 # never follow a link out of HOME, and refuse a name that is not one of its
 # tools. Offline; runs under the system Bash 3.2 on macOS CI.
@@ -36,6 +37,9 @@ setup_fixture() {
   printf 'sibling\n' > "$FIXTURE/my/keep"
   OS_FAMILY=macos
   DRY_RUN=0
+  # Never the checkout's own local/ state (the corepack step edits it).
+  LOCAL_DIR="$FIXTURE/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
 }
 
 cleanup() { [[ -z ${FIXTURE:-} ]] || rm -rf -- "$FIXTURE"; }
@@ -239,6 +243,32 @@ test_npm_copy_dry_run_only_reports() {
   assert_present "$prefix/bin/yarnpkg"
 }
 
+# Corepack's shims share the names (and ~/.local/npm/bin) of the retired yarn
+# and pnpm components' commands: the corepack step removes a legacy copy only
+# when legacy_npm_copy_present finds one, so it never deletes its own shims.
+test_npm_copy_detection_leaves_corepack_shims() {
+  local prefix="$HOME/.local/npm" tool before
+  mkdir -p "$prefix/lib/node_modules/corepack/dist"
+  for tool in pnpm pnpx yarn yarnpkg; do
+    printf '{}\n' > "$prefix/lib/node_modules/corepack/dist/$tool.js"
+    ln -s "../lib/node_modules/corepack/dist/$tool.js" "$prefix/bin/$tool"
+  done
+  before=$(listing "$prefix")
+  for tool in yarn pnpm; do
+    ! legacy_npm_copy_present "$tool" || fail "Corepack's $tool shim was taken for a legacy copy"
+  done
+  remove_retired_npm_tools >/dev/null
+  assert_equals "$(listing "$prefix")" "$before"
+  # A legacy package next to them still counts, and only it goes.
+  mkdir -p "$prefix/lib/node_modules/yarn/bin"
+  legacy_npm_copy_present yarn || fail "the legacy yarn package was not detected"
+  ! legacy_npm_copy_present pnpm || fail "pnpm was detected from yarn's package"
+  # A plain file of that name (not a link into Corepack) is a legacy copy too.
+  rm "$prefix/bin/pnpm"
+  printf '#!/bin/sh\n' > "$prefix/bin/pnpm"
+  legacy_npm_copy_present pnpm || fail "a non-Corepack pnpm was not detected"
+}
+
 # The name becomes part of an `rm -rf` path: a traversal, another package or
 # an empty name must be refused before anything is removed.
 test_npm_copy_refuses_other_names() {
@@ -277,6 +307,7 @@ TESTS=(
   test_npm_copy_is_a_no_op_without_the_package
   test_npm_copy_dry_run_only_reports
   test_npm_copy_refuses_other_names
+  test_npm_copy_detection_leaves_corepack_shims
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do
