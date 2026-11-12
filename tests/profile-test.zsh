@@ -1041,6 +1041,41 @@ run_block 'leos-doctor summarises inspect --saved' \
   [[ $out == *"Everything the saved setup installs is in place."* ]]
 '
 
+# leos-help stays in step with the commands: every name it lists is defined
+# once the whole profile has loaded (with the package managers that gate the
+# checkups present), and every public function in commands.zsh and path/*.zsh
+# is listed. leos-node-completions is an internal hook interactive.zsh calls.
+mkdir -p "$tmp/help-home/bin"
+for tool in apt-get dnf pacman; do
+  print -rl -- '#!/bin/sh' 'exit 0' > "$tmp/help-home/bin/$tool"
+  chmod +x "$tmp/help-home/bin/$tool"
+done
+run_block 'leos-help lists exactly the profile commands' \
+  HOME="$tmp/help-home" ZDOTDIR="$tmp/help-home" LEOS_PROFILES_HOME="$root" TERM=xterm-256color \
+  PATH="$tmp/help-home/bin:$fakepath" -- '
+  setopt err_return no_unset pipe_fail
+  source "$LEOS_PROFILES_HOME/zsh/start.zsh"
+  local line name file
+  local -a listed public missing unlisted
+  for line in "${(@f)$(leos-help)}"; do
+    [[ $line == "  "[a-z]* ]] && listed+=(${${=line}[1]})
+  done
+  (( $#listed > 20 )) || { print -u2 -r -- "leos-help listed too little: $listed"; exit 1; }
+  for name in $listed; do (( $+functions[$name] )) || missing+=($name); done
+  (( ! $#missing )) || { print -u2 -r -- "leos-help lists undefined commands: $missing"; exit 1; }
+  for file in $LEOS_PROFILES_HOME/zsh/commands.zsh $LEOS_PROFILES_HOME/zsh/path/*.zsh; do
+    for line in "${(@f)$(<$file)}"; do
+      [[ $line =~ "^[[:space:]]*([a-z][a-z0-9-]*)\(\)" ]] && public+=($match[1])
+    done
+  done
+  public=(${public:#leos-node-completions})
+  (( $#public > 20 )) || { print -u2 -r -- "found too few public functions: $public"; exit 1; }
+  for name in $public; do (( ${listed[(Ie)$name]} )) || unlisted+=($name); done
+  (( ! $#unlisted )) || { print -u2 -r -- "leos-help leaves out: $unlisted"; exit 1; }
+  st=0; leos-help extra 2>/dev/null || st=$?
+  (( st == 2 ))
+'
+
 # Interactive shells on a real pseudo-terminal, loading the fixture profile
 # through a ZDOTDIR .zshrc exactly as the managed loader does. The helper types
 # a command that prints a marker and exits, then returns the whole transcript.
