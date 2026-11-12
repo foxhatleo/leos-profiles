@@ -25,7 +25,8 @@ COMMAND=""
 source "$SCRIPT_DIR/installer/registry.sh"
 # Every package group, in install order. Recommended selects all but the
 # opt-in ones: python (rpatool's interpreter; languages already has one) and
-# heroku (a third-party tap, macOS only).
+# heroku (a large Node CLI few machines need; homebrew/core packages it, the
+# Linux distributions do not, so it is macOS only).
 readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,languages,python,media,network,heroku,system"
 readonly RECOMMENDED_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
 # rpatool remains available as the explicit `bins` step, but is not a default
@@ -580,9 +581,6 @@ inspect_tsv() {
   if has_csv_item "$SELECTED_STEPS" packages; then
     printf 'action\tpackages\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf 'full host upgrade and selected package installation' || printf 'install missing selected packages without full host upgrade')"
     if [[ $FULL_UPGRADE -eq 1 ]]; then printf 'irreversible\thost-upgrade\tin-release package-manager upgrades (never an OS release upgrade) are not automatically reversible\n'; fi
-    if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
-      printf 'action\trepository\tHomebrew heroku/brew tap\n'
-    fi
     if [[ $OS_FAMILY == fedora ]] && has_csv_item "$SELECTED_GROUPS" media; then
       printf 'action\trepository\tRPM Fusion free\n'
     fi
@@ -708,7 +706,7 @@ main() {
   order_selected_steps
   detect_os
   if [[ $OS_FAMILY != macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
-    die "The heroku package group is macOS-only (Heroku's Homebrew tap); remove it from --package-groups"
+    die "The heroku package group is macOS-only (no Linux distribution packages the Heroku CLI); remove it from --package-groups"
   fi
   if [[ $OS_FAMILY != macos && $BREW_MIRROR == china ]]; then
     die "--brew-mirror china applies to Homebrew on macOS only"
