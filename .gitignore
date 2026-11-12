@@ -1,12 +1,8 @@
 # ---- Project-specific ----
 *.bak
-.omc/
 .claude/worktrees/
-.ai/
 docs/*
 !docs/development.md
-!docs/audit-2026-10.md
-ssh-shortcuts.zsh
 zsh/_private.zsh
 zsh/plugins/
 # Compiled profile sources (installer, leos-refresh-init-cache) and their
