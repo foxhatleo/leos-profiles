@@ -210,6 +210,7 @@ bash tests/apply-dryrun-test.sh
 bash tests/readonly-test.sh
 bash tests/node-test.sh
 bash tests/credentials-test.sh
+bash tests/migration-test.sh
 zsh tests/profile-test.zsh
 zsh tests/runtime-cache-test.zsh
 /usr/bin/python3 -I tests/rmdsstore_test.py  # macOS; elsewhere python3
@@ -220,7 +221,11 @@ redirect HOME, XDG state and Git configuration, and the CLI-level tests
 (`apply-dryrun-test.sh`, `readonly-test.sh`) run a temporary copy of the public
 checkout so your `local/` state is never read or written. `install-test.sh`
 runs every test in its own subshell, reports each failing test by name and
-removes the temporary files the code under test tracked. `readonly-test.sh`
+removes the temporary files the code under test tracked; it unsets proxy, XDG,
+tool-root, Homebrew and Git variables first, so its exact command-line
+assertions do not depend on the caller's environment.
+`migration-test.sh` runs the destructive macOS legacy-copy migrations in a
+fixture HOME and checks that they remove nothing else. `readonly-test.sh`
 snapshots the fixture HOME and checkout around `inspect`, `apply --dry-run` and
 `reconcile --dry-run` through the real CLI, with package managers and network
 clients replaced by PATH fakes, and checks every inspect record against the
@@ -272,13 +277,19 @@ Two workflows split fast feedback from real provisioning:
 
 - `.github/workflows/ci.yml` runs on every push to `master`, every pull request
   and on demand: Zsh syntax and profile tests, lint (ShellCheck, actionlint,
-  zizmor, ruff; shfmt informational), installer/credential/Node/cache/util
-  suites, release artifacts, package-map availability on macOS, apt and
-  containers, the dry-run smoke test and the read-only test. The macOS jobs run
-  the Bash suites under `/bin/bash` (3.2) and `rmdsstore_test.py` under
-  `/usr/bin/python3 -I`, the interpreters the installer and `rmdsstore`
-  actually use there. Jobs whose names end in "(gating)" are the branch
-  ruleset's required checks; keep those names stable. The workflow has no
+  zizmor, ruff; shfmt informational), installer/credential/Node/cache/util/
+  migration suites, package-map availability on macOS, apt and containers, the
+  dry-run smoke test and the read-only test. The macOS jobs run the Bash suites
+  under `/bin/bash` (3.2) and `rmdsstore_test.py` under `/usr/bin/python3 -I`,
+  the interpreters the installer and `rmdsstore` actually use there. The final
+  "All gating checks" job needs every "(gating)" job and fails unless all of
+  them succeeded; the branch ruleset requires only that check, so renaming a
+  job or a matrix entry never orphans a required check. Add each new gating
+  job to its `needs:`. The gate never installs or clones what upstream
+  published today: `release-artifacts-test.sh` and `plugins-test.sh` run in a
+  non-blocking "(informational)" job and weekly in provision.yml, so an
+  upstream release cannot block an unrelated pull request (the gate keeps
+  their fixture-based counterparts in `install-test.sh`). The workflow has no
   paths filter on purpose: a required check that never runs blocks a docs-only
   pull request. A startup-benchmark job reports timings in its job summary and
   never fails the run.
@@ -290,7 +301,12 @@ Two workflows split fast feedback from real provisioning:
   Only `macos-15` runs the recommended scenario with the full `brew upgrade`;
   the other macOS runners set `LEOS_CI_FULL_UPGRADE=0`, which makes
   `tests/provisioning-test.sh` pass `--no-full-upgrade` for that scenario.
-  Linux containers keep the full upgrade. These jobs are not required checks.
+  Linux containers keep the full upgrade. On the same triggers it runs the
+  live upstream checks (latest releases and plugin default branches) and
+  reports, without failing, where a CI tool pin (ShellCheck, actionlint,
+  shfmt, zizmor, ruff) is behind its latest release; Dependabot covers only
+  the actions. A failed scheduled run opens or updates one tracking issue.
+  These jobs are not required checks.
   Jobs that look up GitHub releases get the workflow's read-only
   `GITHUB_TOKEN`, so many jobs behind one address stay under the API's
   anonymous rate limit.
@@ -385,7 +401,8 @@ Tools are not pinned, so there is no routine dependency bump. What needs care:
 
 1. A renamed release asset, a dropped CPU build or a project that moves breaks
    installs. `tests/release-artifacts-test.sh` resolves every asset for both
-   Linux CPUs on every CI run; fix `installer/sources.sh` when it fails.
+   Linux CPUs in CI's informational job and the weekly provisioning run; fix
+   `installer/sources.sh` when it fails.
 2. GitHub must publish a SHA-256 digest for the asset (it does for every asset
    uploaded since mid-2025); the installer refuses an asset without one.
 3. Keep the version line in `artifact_registry` matching what the tool prints;

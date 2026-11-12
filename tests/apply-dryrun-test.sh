@@ -39,9 +39,12 @@ fail() { printf '%s\n' "$out" >&2; printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 grep -q 'Profile apply complete' <<< "$out" || fail "dry-run apply did not run to completion"
 
 # Recommended defaults must construct a package install for the detected family.
+# run_root adds `--preserve-env=<proxy variables>` after sudo when the caller
+# has a proxy set (a corporate or CI proxy), so accept that flag too.
 case $(uname -s) in
   Darwin) grep -Eq '^\+ brew install ' <<< "$out" || fail "no 'brew install' line in the dry-run" ;;
-  *) grep -Eq '^\+ (sudo )?(apt-get|dnf|pacman) ' <<< "$out" || fail "no package-manager line in the dry-run" ;;
+  *) grep -Eq '^\+ (sudo (--preserve-env=[^ ]+ )?)?(apt-get|dnf|pacman) ' <<< "$out" ||
+    fail "no package-manager line in the dry-run" ;;
 esac
 
 # The zsh loader step and default-shell step must be reached.

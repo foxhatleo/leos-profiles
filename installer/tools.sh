@@ -363,9 +363,9 @@ npm_tool_install() {
       say "Would install the latest $package from npm with fnm's default Node"
       return 0
     fi
-    # --ignore-scripts: neither package needs an install script, and none of
-    # their dependencies' scripts should run.
-    fnm_exec npm install --global --ignore-scripts --prefix "$HOME/.local/npm" "$package@latest"
+    # Not --ignore-scripts: pnpm's package sets itself up in an install script
+    # and does not run without it.
+    fnm_exec npm install --global --prefix "$HOME/.local/npm" "$package@latest"
   fi
   [[ $DRY_RUN -eq 1 ]] || npm_tool_verify "$package" || die "$package does not run after installation"
 }
@@ -448,6 +448,8 @@ remove_legacy_local_copy() {
 # for it in ~/.local/npm.
 remove_legacy_npm_copy() {
   local package=$1 command prefix="$HOME/.local/npm"
+  # The name becomes part of an `rm -rf` path: never a traversal or another package.
+  [[ $package == yarn || $package == pnpm ]] || die "No legacy npm copy to remove for: $package"
   [[ -e $prefix/bin/$package || -d $prefix/lib/node_modules/$package ]] || return 0
   run rm -rf -- "$prefix/lib/node_modules/$package"
   for command in "$package" yarnpkg pnpx; do

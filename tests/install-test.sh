@@ -5,9 +5,18 @@ set -Eeuo pipefail
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 export LEOS_PROFILES_INSTALL_LIB_ONLY=1
-# The zsh-config tests resolve startup files from ZDOTDIR; never let the
-# developer's own value point them outside the fixture HOME.
+# Hermetic environment: the assertions below compare exact command lines and
+# paths, so nothing from the developer's or runner's environment may steer
+# them. The zsh-config tests resolve startup files from ZDOTDIR; proxy
+# variables make run_root add `sudo --preserve-env=...` (one test sets one on
+# purpose); XDG, tool-root, Homebrew and Git variables relocate or reconfigure
+# what the installer inspects. Tests that need any of these set them locally.
 unset ZDOTDIR
+unset http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY all_proxy
+unset XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CURRENT_DESKTOP DISPLAY WAYLAND_DISPLAY
+unset FNM_DIR FNM_NODE_DIST_MIRROR PYENV_ROOT RBENV_ROOT ASDF_DATA_DIR NVM_DIR ZSH ZSH_CUSTOM LEOS_PROFILES_HOME
+unset HOMEBREW_PREFIX HOMEBREW_BREW_GIT_REMOTE HOMEBREW_BOTTLE_DOMAIN HOMEBREW_API_DOMAIN
+unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GITHUB_TOKEN GH_TOKEN NERD_FONTS_TEST_RELEASE_URL
 # shellcheck source=../install.sh
 source "$ROOT/install.sh"
 
@@ -3239,7 +3248,8 @@ test_unexpected_failures_never_exit_2_or_3() {
   printf '%s\n' 'stray_failure() { return 2; }' 'preflight() { stray_failure; }' >> "$temp/profile/installer/plan.sh"
   out=$(run_cli "$temp/profile" "$temp/home" apply --yes --dry-run --groups none --package-groups none 2>&1) || status=$?
   assert_equals "$status" 1
-  assert_contains "$out" "ERROR: unexpected failure (status 2) at $temp/profile/installer/plan.sh:"
+  # The engine reports its own physical path (macOS: /private/var/...).
+  assert_contains "$out" "ERROR: unexpected failure (status 2) at $(cd "$temp" && pwd -P)/profile/installer/plan.sh:"
   # A deliberate exit keeps its meaning.
   printf '%s\n' 'preflight() { exit 3; }' >> "$temp/profile/installer/plan.sh"
   status=0
