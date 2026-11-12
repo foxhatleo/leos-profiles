@@ -2785,7 +2785,8 @@ test_unexpected_failures_never_exit_2_or_3() {
   printf '%s\n' 'stray_failure() { return 2; }' 'preflight() { stray_failure; }' >> "$temp/profile/installer/plan.sh"
   out=$(run_cli "$temp/profile" "$temp/home" apply --yes --dry-run --groups none --package-groups none 2>&1) || status=$?
   assert_equals "$status" 1
-  assert_contains "$out" "ERROR: unexpected failure (status 2) at $temp/profile/installer/plan.sh:"
+  # The engine reports its own physical path (macOS: /private/var/...).
+  assert_contains "$out" "ERROR: unexpected failure (status 2) at $(cd "$temp" && pwd -P)/profile/installer/plan.sh:"
   # A deliberate exit keeps its meaning.
   printf '%s\n' 'preflight() { exit 3; }' >> "$temp/profile/installer/plan.sh"
   status=0
