@@ -98,15 +98,17 @@ github_key_list() {
   errors=$(mktemp)
   track_temp "$output"
   track_temp "$errors"
-  if gh api --hostname github.com --paginate "$endpoint" --jq "$jq" > "$output" 2> "$errors"; then
-    GITHUB_KEY_LIST=$(cat "$output")
-    return 0
-  fi
-  if grep -Eq 'HTTP 40[34]|needs the "(read|admin):' "$errors"; then
+  while :; do
+    if gh api --hostname github.com --paginate "$endpoint" --jq "$jq" > "$output" 2> "$errors"; then
+      GITHUB_KEY_LIST=$(cat "$output")
+      return 0
+    fi
+    grep -Eq 'HTTP 40[34]|needs the "(read|admin):' "$errors" || break
     refresh="gh auth refresh -h github.com -s $(github_key_scopes)"
+    MANUAL_ACTION_OFFER=$refresh
     credential_manual_action github-key-scope '' "$refresh" \
       "GitHub CLI may not read your $kind keys: its token lacks the scope (a default gh auth login does not grant it). Grant read access yourself with: $refresh, then rerun."
-  fi
+  done
   cat "$errors" >&2
   die "Could not list GitHub $kind keys; refusing to guess (check network and gh auth)"
 }
@@ -128,6 +130,40 @@ PENDING_MANUAL_ACTIONS=""
 PENDING_MANUAL_EXPLANATIONS=""
 STEP_AWAITS_MANUAL_ACTION=0
 
+# At a terminal in setup (INTERACTIVE_MANUAL=1) a credential manual action
+# does not end the run: await_manual_action shows what to do and waits, and
+# the caller checks again (`until <check>; do credential_manual_action ...;
+# done`). MANUAL_ACTION_OFFER, when set for one action, is a command setup
+# offers to run for the user (gh auth login or refresh); it is word-split.
+INTERACTIVE_MANUAL=0
+MANUAL_ACTION_OFFER=""
+
+# await_manual_action <explanation>: with INTERACTIVE_MANUAL=1, ask whether
+# the action is done. Succeeds when the user says it is (the caller checks
+# again), or after running MANUAL_ACTION_OFFER for them; fails when they stop,
+# or without a terminal, and the caller then ends the run with exit 3.
+await_manual_action() {
+  local explanation=$1 offer=$MANUAL_ACTION_OFFER
+  local -a options=() command=()
+  MANUAL_ACTION_OFFER=""
+  [[ $INTERACTIVE_MANUAL -eq 1 ]] || return 1
+  ui_section "Action needed"
+  ui_note "$explanation"
+  if [[ -n $offer ]]; then
+    IFS=' ' read -r -a command <<< "$offer"
+    options+=("Run it for me now: $offer")
+  fi
+  options+=("Done: check again" "Stop here and finish later (exit 3)")
+  ui_choose "Continue when it is done" 0 "${options[@]}"
+  case $UI_REPLY in
+    "Run it for me now: "*)
+      "${command[@]}" || warn "$offer did not succeed"
+      return 0 ;;
+    "Done: check again") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # queue_manual_action <action> <public path> <destination> <explanation>
 queue_manual_action() {
   local action=$1 public_path=$2 destination=$3 explanation=$4 field
@@ -141,8 +177,19 @@ queue_manual_action() {
   warn "$explanation"
 }
 
+# finish_manual_actions [final]: print every queued manual action and exit 3.
+# In setup the actions are a checklist instead of records, and at the end of
+# a run (`final`) setup lists them and returns: what is left is for the user
+# to do by hand (a missing chsh, a font on the Windows side of WSL).
 finish_manual_actions() {
   [[ -n $PENDING_MANUAL_ACTIONS ]] || return 0
+  if [[ ${COMMAND:-} == setup ]]; then
+    printf '\n%s\n' "Still to do by hand:" >&2
+    printf '%s' "$PENDING_MANUAL_EXPLANATIONS" | sed 's/^/  [ ] /' >&2
+    [[ ${1:-} != final ]] || return 0
+    warn "Setup stopped for the action above (exit 3). Once it is done, finish with: bash $TARGET/install.sh setup (choose the saved choices)"
+    exit 3
+  fi
   printf '%s' "$PENDING_MANUAL_ACTIONS"
   if [[ $PENDING_MANUAL_ACTIONS == *$'manual-action\trun-in-terminal\t'* ]]; then
     # Preflight stopped before any change and before the profile was saved, so
@@ -176,6 +223,7 @@ credential_manual_action() {
       printf 'GPG public key (fingerprint %s):\n' "$GPG_KEY_ID" >&2
       cat "$public_path" >&2 ;;
   esac
+  if await_manual_action "$explanation"; then return 0; fi
   queue_manual_action "$action" "$public_path" "$destination" "$explanation"
   if [[ ${SSH_MODE:-skip} == generate || ${GPG_MODE:-skip} == generate ]]; then
     warn "Key generation is still pending. After completing the manual action, resume apply with the original approved choices; select reuse for every key already created (SSH: --ssh reuse --ssh-key '$SSH_KEY_PATH' when present). Reconcile will not generate the pending key. Obtain new approval only if the choices change."
@@ -183,10 +231,21 @@ credential_manual_action() {
   finish_manual_actions
 }
 
+# github_login_scopes: what a gh auth login setup offers asks for, so the
+# key and email checks below need no refresh afterwards.
+github_login_scopes() {
+  local scopes
+  scopes=$(github_key_scopes)
+  [[ $GPG_MODE == skip ]] || scopes="${scopes:+$scopes,}user:email"
+  printf '%s\n' "$scopes"
+}
+
 ensure_github_auth() {
-  gh auth status --hostname github.com >/dev/null 2>&1 && return 0
-  credential_manual_action github-login '' https://github.com/login \
-    "Authenticate GitHub CLI yourself with gh auth login --hostname github.com, then rerun."
+  until gh auth status --hostname github.com >/dev/null 2>&1; do
+    MANUAL_ACTION_OFFER="gh auth login --hostname github.com --scopes $(github_login_scopes)"
+    credential_manual_action github-login '' https://github.com/login \
+      "Authenticate GitHub CLI yourself with gh auth login --hostname github.com, then rerun."
+  done
 }
 
 verify_github_api() {
@@ -196,10 +255,11 @@ verify_github_api() {
 
 github_email_is_verified() {
   local email=$1 verified
-  if ! verified=$(gh api --hostname github.com user/emails --jq '.[] | select(.verified == true) | .email' 2>/dev/null); then
+  until verified=$(gh api --hostname github.com user/emails --jq '.[] | select(.verified == true) | .email' 2>/dev/null); do
+    MANUAL_ACTION_OFFER="gh auth refresh --hostname github.com -s user:email"
     credential_manual_action github-email-scope '' https://github.com/settings/emails \
       "Grant GitHub CLI email-read access yourself with gh auth refresh --hostname github.com -s user:email, then rerun."
-  fi
+  done
   grep -qxiF "$email" <<< "$verified"
 }
 
@@ -283,26 +343,26 @@ provision_ssh() {
   SSH_KEY_PATH=$key
   SSH_MODE=reuse
   write_profile
-  if ! github_ssh_key_present "$key.pub"; then
+  until github_ssh_key_present "$key.pub"; do
     credential_manual_action register-ssh-key "$key.pub" https://github.com/settings/ssh/new \
-      "Register this public SSH key yourself on GitHub account $GITHUB_LOGIN: $key.pub. Resume with reconcile when no key generation remains pending."
-  fi
+      "Register this public SSH key yourself on GitHub account $GITHUB_LOGIN (https://github.com/settings/ssh/new): $key.pub. Resume with reconcile when no key generation remains pending."
+  done
   ensure_github_known_hosts
   local ssh_output expected="Hi $GITHUB_LOGIN! You've successfully authenticated"
   # BatchMode: a probe never prompts (for a passphrase, a password or a host
   # key); a key that needs one fails the probe and gets the manual action.
-  ssh_output=$(ssh -i "$key" -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
-  if [[ $ssh_output != *"$expected"* ]]; then
+  until ssh_output=$(ssh -i "$key" -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
+    [[ $ssh_output == *"$expected"* ]]; do
     credential_manual_action verify-ssh-key "$key.pub" https://github.com/settings/keys \
       "The selected SSH key did not authenticate as $GITHUB_LOGIN. Check the selected key and GitHub account, then rerun."
-  fi
-  ssh_output=$(ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
-  if [[ $ssh_output != *"$expected"* ]]; then
+  done
+  until ssh_output=$(ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)
+    [[ $ssh_output == *"$expected"* ]]; do
     warn "Effective ordinary SSH settings for github.com:"
     ssh -G github.com 2>/dev/null | awk '$1 == "identityfile" || $1 == "identitiesonly" || $1 == "hostname" || $1 == "user"' >&2 || true
     credential_manual_action configure-ssh-key "$key.pub" "$HOME/.ssh/config" \
       "Ordinary SSH did not authenticate as $GITHUB_LOGIN. Configure github.com IdentityFile for $key and IdentitiesOnly yes yourself (or your agent), then rerun. No SSH or Git protocol configuration was changed."
-  fi
+  done
 }
 
 gpg_secret_fingerprint() {
@@ -415,8 +475,10 @@ provision_gpg() {
     [[ -s $export_tmp ]] || die "GPG did not export public key material"
     chmod 600 "$export_tmp"
     mv -f "$export_tmp" "$exported_key"
-    credential_manual_action register-gpg-key "$exported_key" https://github.com/settings/gpg/new \
-      "Register this public GPG key yourself on GitHub account $GITHUB_LOGIN: $exported_key. Then rerun reconcile; global commit signing is not enabled until registration is verified."
+    until github_gpg_key_present "$keyid"; do
+      credential_manual_action register-gpg-key "$exported_key" https://github.com/settings/gpg/new \
+        "Register this public GPG key yourself on GitHub account $GITHUB_LOGIN (https://github.com/settings/gpg/new): $exported_key. Then rerun reconcile; global commit signing is not enabled until registration is verified."
+    done
   fi
   git config --global user.signingkey "$keyid"
   git config --global gpg.format openpgp

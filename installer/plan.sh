@@ -408,6 +408,7 @@ preflight() {
   fi
   privileged=$(privileged_plan)
   if [[ -n $privileged && -n $SUDO ]]; then
+    SUDO_PLANNED=1
     if [[ $DRY_RUN -eq 1 ]]; then
       say "Would run as root (sudo): $(cut -f1 <<< "$privileged" | paste -sd, -)"
     else
@@ -427,6 +428,9 @@ preflight() {
       say "Would stop before any change, because this is not a terminal: ${reasons% }"
       return 0
     fi
+    # setup moved stdin to the terminal it asks its questions on, so this
+    # cannot happen there; never hand an interactive user a command to rerun.
+    [[ $COMMAND != setup ]] || die "setup has no terminal for: ${reasons% }"
     queue_manual_action run-in-terminal '' "$INVOCATION" \
       "Nothing was changed. ${reasons}Run this command yourself, in a terminal: $INVOCATION"
     finish_manual_actions

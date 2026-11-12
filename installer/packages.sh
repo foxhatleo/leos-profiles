@@ -84,6 +84,45 @@ ensure_sudo() {
   sudo -v
 }
 
+# sudo's cached login outlives a few minutes only, and the Ruby compile takes
+# longer. Before it, refresh_sudo renews the login (sudo -n -v while it is
+# still cached, else sudo -v at a terminal) and sudo_keepalive_start keeps it
+# fresh in the background until sudo_keepalive_stop, so a root action after
+# the compile (chsh, credential packages) neither prompts mid-run nor fails
+# unattended. Only when the plan runs anything through sudo (SUDO_PLANNED,
+# set by preflight).
+SUDO_PLANNED=0
+SUDO_KEEPALIVE_PID=""
+refresh_sudo() {
+  [[ $SUDO_PLANNED -eq 1 && $DRY_RUN -eq 0 && -n $SUDO ]] || return 0
+  if sudo -n -v 2>/dev/null; then return 0; fi
+  if stdin_is_terminal; then
+    say "Renewing sudo's login before a long step; root is needed again after it"
+    sudo -v || die "sudo authentication failed"
+  fi
+}
+
+sudo_keepalive_start() {
+  refresh_sudo
+  [[ $SUDO_PLANNED -eq 1 && $DRY_RUN -eq 0 && -n $SUDO && -z $SUDO_KEEPALIVE_PID ]] || return 0
+  sudo -n true 2>/dev/null || return 0
+  (
+    trap - ERR
+    while sleep 50; do
+      kill -0 "$$" 2>/dev/null || exit 0
+      sudo -n -v 2>/dev/null || exit 0
+    done
+  ) >/dev/null 2>&1 &
+  SUDO_KEEPALIVE_PID=$!
+}
+
+sudo_keepalive_stop() {
+  [[ -n $SUDO_KEEPALIVE_PID ]] || return 0
+  kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  wait "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  SUDO_KEEPALIVE_PID=""
+}
+
 # apt indexes are refreshed once per run, before the first apt-get operation.
 APT_INDEX_UPDATED=0
 apt_update_once() {
@@ -257,7 +296,10 @@ ensure_brew() {
   track_temp "$installer"
   say "Installing Homebrew from a pinned, SHA-256-verified script"
   download_verified "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256" "$installer"
-  run /bin/bash "$installer"
+  # NONINTERACTIVE: the plan was approved already, so the installer neither
+  # waits for RETURN nor asks for sudo itself; preflight has validated sudo
+  # (and would have stopped without a terminal to ask in).
+  run env NONINTERACTIVE=1 /bin/bash "$installer"
   [[ $DRY_RUN -eq 0 ]] || return 0
   for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
     if [[ -x $candidate ]]; then

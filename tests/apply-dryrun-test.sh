@@ -55,4 +55,16 @@ if grep -Eq 'do-release-upgrade|dnf[[:space:]]+system-upgrade|apt(-get)?[[:space
   fail "dry-run emitted OS release-upgrade tooling"
 fi
 
+# The interactive setup, Recommended through its plain prompts (answers come
+# from a file standing in for /dev/tty): the plan it shows is applied in the
+# same process.
+printf '%s\n' '' '' '' y > "$FIXTURE/answers"
+out=$(HOME="$FIXTURE/home" XDG_STATE_HOME="$FIXTURE/home/.local/state" \
+  XDG_CONFIG_HOME="$FIXTURE/home/.config" XDG_CACHE_HOME="$FIXTURE/home/.cache" \
+  XDG_DATA_HOME="$FIXTURE/home/.local/share" UI_TTY="$FIXTURE/answers" UI_PLAIN=1 \
+  "${BASH:-bash}" "$FIXTURE/profile/install.sh" setup --dry-run < /dev/null 2>&1) || fail "setup --dry-run failed"
+grep -q '^Summary' <<< "$out" || fail "setup showed no plan"
+grep -q 'Setup complete' <<< "$out" || fail "setup --dry-run did not run to completion"
+grep -q 'Running zsh-config' <<< "$out" || fail "setup did not reach zsh-config"
+
 printf 'apply dry-run (%s): PASS\n' "$(uname -s)"

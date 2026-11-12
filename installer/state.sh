@@ -21,6 +21,8 @@ track_temp() { TEMP_PATHS+=("$1"); }
 
 cleanup() {
   local path
+  # A sudo keepalive (packages.sh) dies with the run.
+  if [[ -n ${SUDO_KEEPALIVE_PID:-} ]]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi
   for path in "${TEMP_PATHS[@]-}"; do [[ -z $path ]] || rm -rf -- "$path"; done
   # Only remove the lock if it is still ours — never delete a lock a different
   # run now holds (defensive backstop for the reclaim race).
@@ -114,7 +116,7 @@ remember_generated_gpg_key() {
 }
 
 read_profile() {
-  [[ -f $PROFILE_FILE ]] || die "No saved install profile. Run the AI setup flow first: $PROFILE_FILE"
+  [[ -f $PROFILE_FILE ]] || die "No saved install profile ($PROFILE_FILE). Set up first: bash $TARGET/install.sh setup"
   local key value extra schema="" seen=","
   UPGRADE_CASKS=0  # optional key: a profile without it predates the flag
   MIN_RELEASE_AGE=7  # optional key, likewise

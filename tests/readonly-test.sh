@@ -99,10 +99,13 @@ for name in "${fakes[@]}"; do ln -s fake "$FAKEBIN/$name"; done
 
 # Run the CLI with only the fixture environment. The interpreter running this
 # test also runs the installer (macOS CI runs both under the system Bash 3.2).
-# No terminal on stdin, as when an AI agent runs the installer. No USER either:
-# the installer must find the account itself (ONB-12).
+# No terminal on stdin, as in an unattended run. No USER either: the
+# installer must find the account itself (ONB-12). setup reads its answers
+# from $FIXTURE/answers (UI_TTY) with plain prompts.
+ANSWERS="$FIXTURE/answers"
+: > "$ANSWERS"
 installer() {
-  env -i HOME="$FIXTURE_HOME" LANG=C \
+  env -i HOME="$FIXTURE_HOME" LANG=C UI_TTY="$ANSWERS" UI_PLAIN=1 \
     PATH="$FAKEBIN:/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$SCRATCH_TMP" \
     XDG_STATE_HOME="$FIXTURE_HOME/.local/state" XDG_CONFIG_HOME="$FIXTURE_HOME/.config" \
     XDG_CACHE_HOME="$FIXTURE_HOME/.cache" XDG_DATA_HOME="$FIXTURE_HOME/.local/share" \
@@ -214,6 +217,14 @@ grep -q 'Would remove the legacy unmarked leos-profiles loader' <<< "$OUTPUT" ||
 
 run_read_only 'reconcile --dry-run' 0 reconcile --yes --dry-run
 grep -q 'Profile reconciliation complete' <<< "$OUTPUT" || fail 'dry-run reconcile did not complete'
+
+# setup --dry-run: the saved choices (the default with a saved profile), the
+# saved "no" to a full upgrade, then approve the plan it shows.
+printf '%s\n' '' '' y > "$ANSWERS"
+run_read_only 'setup --dry-run' 0 setup --dry-run
+grep -q '^Summary' <<< "$OUTPUT" || fail 'setup --dry-run showed no plan'
+grep -q 'components: packages (implied), fnm, corepack, zsh-config$' <<< "$OUTPUT" || fail 'setup --dry-run did not use the saved choices'
+grep -q 'Setup complete' <<< "$OUTPUT" || fail 'setup --dry-run did not complete'
 
 # inspect --saved: the saved profile's selection, as reconcile would use it.
 run_read_only 'inspect --saved' 0 inspect --saved

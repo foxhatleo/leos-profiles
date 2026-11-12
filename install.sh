@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Leo's Profiles deterministic installer.
+# Leo's Profiles installer.
 #
-# This is the deterministic execution engine for the AI-led QUICK-INSTALL.md.
-# The checkout containing this file is the profile being installed.
+# `setup` is the interactive front end (installer/setup.sh, installer/ui.sh);
+# inspect, apply, reconcile, remove-blocks and inventory are the engine it
+# drives, and what unattended runs use. bootstrap.sh clones the checkout and
+# starts setup. The checkout containing this file is the profile being
+# installed.
 
 set -Eeuo pipefail
 # The default IFS stays in force everywhere. CSV values are split explicitly
@@ -97,6 +100,9 @@ on_unexpected_error() {
 usage() {
   cat <<EOF
 Usage:
+  bash install.sh                 setup at a terminal; in a Codespace or dev
+                                  container without one, the lean profile
+  bash install.sh setup [--dry-run] [--min-release-age <days>] [--plain]
   bash install.sh inspect [options]
   bash install.sh inspect --saved [--full-upgrade]
   bash install.sh apply --yes [options]
@@ -133,14 +139,18 @@ Options:
                                   (exit 2) if it would now choose another
   --saved                         inspect: use the saved profile's selection
   --dry-run                       Print mutations without performing them
-  --yes                           Confirm that the AI-presented plan was approved
+  --yes                           Apply without asking (unattended); without
+                                  --groups/--package-groups, Recommended
+  --plain                         setup: plain numbered prompts instead of gum
   --help                          Show this help
 
-The AI runbook is the supported user interface. \`inspect\` emits typed TSV for
-agents and diagnostics; \`apply\` and \`reconcile\` never ask setup questions.
-Before changing anything they check what the run needs from you: without a
-terminal, a sudo password, passphrase prompt or chsh password ends the run
-with a run-in-terminal manual action (exit 3) and the command to run yourself.
+\`setup\` asks its questions at the terminal, shows the plan and applies it
+once you approve; it waits while you do the manual GitHub steps. \`inspect\`
+emits typed TSV for scripts and diagnostics; \`apply\` and \`reconcile\` never
+ask setup questions. Before changing anything they check what the run needs
+from you: without a terminal, a sudo password, passphrase prompt or chsh
+password ends the run with a run-in-terminal manual action (exit 3) and the
+command to run yourself.
 \`remove-blocks\` deletes only the managed blocks (and a legacy unmarked loader)
 from the zsh startup files (.zshrc, .zshenv, and .zprofile on macOS), leaving
 packages, plugins and credentials in place. \`inventory\` lists everything the
@@ -174,13 +184,49 @@ reject_retired_flag() {
   esac
 }
 
+# The lean profile for a Codespace or dev container: the shell itself, no
+# package upgrade, fonts, login-shell change or keys.
+readonly LEAN_STEPS="zsh-config,plugins,starship"
+
+# container_dotfiles_environment: GitHub Codespaces or a dev container, which
+# run a dotfiles repository's install.sh with no terminal.
+container_dotfiles_environment() {
+  [[ -n ${CODESPACES:-} || -n ${REMOTE_CONTAINERS:-} || -n ${DEVCONTAINER:-} ]]
+}
+
+# bare_invocation: `install.sh` with no arguments is setup at a terminal; in
+# a Codespace or dev container without one, an unattended apply of the lean
+# profile; anywhere else the usage, with status 2.
+bare_invocation() {
+  if stdin_is_terminal && ui_terminal_available; then
+    COMMAND=setup
+  elif container_dotfiles_environment; then
+    COMMAND=apply
+    ASSUME_YES=1
+    SELECTED_STEPS=$LEAN_STEPS
+    SELECTED_GROUPS=""
+    FULL_UPGRADE=0
+    INSTALL_FONTS=no
+    CHANGE_DEFAULT_SHELL=no
+    SSH_MODE=skip
+    GPG_MODE=skip
+    say "No terminal in a Codespace or dev container: installing the lean profile ($LEAN_STEPS; no package upgrade, fonts, login-shell change or keys)"
+  else
+    usage >&2
+    exit 2
+  fi
+}
+
 parse_args() {
-  [[ $# -gt 0 ]] || { usage >&2; exit 2; }
+  if [[ $# -eq 0 ]]; then
+    bare_invocation
+    return 0
+  fi
   reject_retired_flag "$1"
   case $1 in
-    inspect|apply|reconcile|remove-blocks|inventory) COMMAND=$1; shift ;;
+    setup|inspect|apply|reconcile|remove-blocks|inventory) COMMAND=$1; shift ;;
     --help|-h) usage; exit 0 ;;
-    *) die "Expected inspect, apply, reconcile, remove-blocks, or inventory; the AI runbook is the setup interface" ;;
+    *) die "Expected setup, inspect, apply, reconcile, remove-blocks, or inventory (bash install.sh --help)" ;;
   esac
   if [[ $COMMAND == reconcile ]]; then FULL_UPGRADE=0; fi
   if [[ $COMMAND == inspect && " $* " == *" --saved "* ]]; then
@@ -209,6 +255,16 @@ parse_args() {
         --tsv) INVENTORY_FORMAT=tsv; shift ;;
         --help|-h) usage; exit 0 ;;
         *) die "inventory takes only --tsv" ;;
+      esac
+      continue
+    fi
+    if [[ $COMMAND == setup ]]; then
+      case $1 in
+        --dry-run) DRY_RUN=1; shift ;;
+        --plain) UI_PLAIN=1; shift ;;
+        --min-release-age) require_value "$1" "${2:-}"; MIN_RELEASE_AGE=$2; shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "setup asks for its choices; it takes only --dry-run, --plain and --min-release-age (for unattended runs use apply --yes with options)" ;;
       esac
       continue
     fi
@@ -458,6 +514,12 @@ source "$SCRIPT_DIR/installer/signatures.sh"
 # shellcheck source=installer/plan.sh
 source "$SCRIPT_DIR/installer/plan.sh"
 
+# shellcheck source=installer/ui.sh
+source "$SCRIPT_DIR/installer/ui.sh"
+
+# shellcheck source=installer/setup.sh
+source "$SCRIPT_DIR/installer/setup.sh"
+
 run_step() {
   local step=$1 force_rerun=0
   if component_skipped_for_existing "$step"; then
@@ -482,6 +544,8 @@ run_step() {
   local handler
   handler=$(component_handler "$step" install)
   STEP_AWAITS_MANUAL_ACTION=0
+  # Keep a cached sudo login fresh across long steps (never prompts here).
+  if [[ $SUDO_PLANNED -eq 1 && $DRY_RUN -eq 0 && -n $SUDO ]]; then sudo -n -v 2>/dev/null || true; fi
   "$handler"
   if [[ $STEP_AWAITS_MANUAL_ACTION -eq 1 ]]; then
     say "$step waits for the manual action above; it is not recorded as complete"
@@ -735,6 +799,108 @@ print_terminal_font_hint() {
   fi
 }
 
+# prepare_selection: validate and normalise the selection (closure and
+# order), detect the OS and refuse what this OS cannot do. inspect, apply,
+# reconcile and setup all start from it.
+prepare_selection() {
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  validate_options
+  normalise_dependencies
+  order_selected_steps
+  detect_os
+  if [[ $OS_FAMILY != macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
+    die "The heroku package group is macOS-only (no Linux distribution packages the Heroku CLI); remove it from --package-groups"
+  fi
+  if [[ $OS_FAMILY != macos && $BREW_MIRROR == china ]]; then
+    die "--brew-mirror china applies to Homebrew on macOS only"
+  fi
+  if [[ $OS_FAMILY != macos && $UPGRADE_CASKS -eq 1 ]]; then
+    die "--upgrade-casks applies to Homebrew on macOS only"
+  fi
+}
+
+# apply_selection: apply the prepared selection: preflight, then every change.
+apply_selection() {
+  local support_problem
+  if support_problem=$(platform_support_problem); then
+    warn "Unsupported platform. $support_problem Continuing as asked; expect long source builds or failures."
+  fi
+  # Everything the run needs from the user, checked before the first change.
+  preflight
+  acquire_lock
+  report_profile_migration
+  migrate_local_state
+  if [[ $COMMAND == apply || $COMMAND == setup ]]; then
+    if [[ $FULL_UPGRADE -eq 1 ]]; then SAVED_FULL_UPGRADE=yes; else SAVED_FULL_UPGRADE=no; fi
+    remember_generated_gpg_key
+    write_profile
+  fi
+  apply_brew_mirror
+  bootstrap_tools
+  write_profile
+  local step
+  local -a steps=()
+  csv_split steps "$SELECTED_STEPS"
+  for step in ${steps[@]+"${steps[@]}"}; do
+    run_step "$step"
+  done
+  if has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" zsh-config; then
+    compile_zsh_sources
+  fi
+  # Credentials come last: no component uses them, and their first run always
+  # pauses for a manual GitHub registration (exit 3, or in setup a wait),
+  # which must not hold back the components (ONB-4). A pause also prints the
+  # actions queued above.
+  install_credential_prerequisites
+  provision_ssh
+  provision_gpg
+  write_profile
+  print_terminal_font_hint
+  finish_manual_actions final
+  if [[ $COMMAND == reconcile ]]; then
+    say "Profile reconciliation complete. Restart the terminal; default-shell changes apply at next login."
+  elif [[ $COMMAND == setup ]]; then
+    say "Setup complete. Open a new terminal; a login-shell change applies at the next login. Later: bash $TARGET/install.sh setup again, or upgrade-leos-profiles."
+  else
+    say "Profile apply complete. Restart the terminal; default-shell changes apply at next login."
+  fi
+}
+
+# setup_main: the interactive setup. It needs a terminal: the questions are
+# read from it (UI_TTY), and stdin moves there too, so sudo, ssh-keygen, gpg
+# and gh can prompt and preflight never stops for want of one. The plan shown
+# is inspect's, computed in this process into a file (globals do not survive
+# $(...)), so the Node, runtime and release picks it shows are the ones
+# apply_selection then installs.
+setup_main() {
+  local plan
+  ui_terminal_available ||
+    die "setup needs a terminal to ask its questions. For an unattended Recommended install run: bash $TARGET/install.sh apply --yes"
+  if [[ $UI_TTY == /dev/tty ]] && ! [[ -t 0 ]]; then exec 0</dev/tty; fi
+  detect_os
+  ui_init
+  ui_header "Leo's Profiles" "Sets up zsh with its tools and runtimes on this machine ($OS_FAMILY). Nothing changes until you approve the plan."
+  if [[ $DRY_RUN -eq 1 ]]; then ui_note "Dry run: the plan is real; applying it only prints what it would do."; fi
+  setup_wizard
+  prepare_selection
+  INTERACTIVE_MANUAL=1
+  ui_section "Working out the plan"
+  ui_note "Checking what is installed, the package manager and the GitHub releases to use..."
+  plan=$(mktemp "${TMPDIR:-/tmp}/leos-plan.XXXXXX")
+  track_temp "$plan"
+  warm_release_picks
+  inspect_tsv > "$plan"
+  render_plan "$plan"
+  printf '\n'
+  if ! ui_confirm "Apply this plan?" yes; then
+    say "Nothing was changed. Run bash $TARGET/install.sh setup again to choose differently."
+    return 0
+  fi
+  SETUP_APPLYING=1
+  apply_selection
+}
+
 main() {
   validate_component_registry
   INVOCATION=$(printf '%q ' bash "$SCRIPT_DIR/install.sh" "$@")
@@ -755,69 +921,20 @@ main() {
     inventory
     return 0
   fi
+  if [[ $COMMAND == setup ]]; then
+    setup_main
+    return 0
+  fi
   if [[ $COMMAND == reconcile || $SAVED_SELECTION -eq 1 ]]; then
     read_profile
   fi
-  REQUESTED_STEPS=$SELECTED_STEPS
-  REQUESTED_GROUPS=$SELECTED_GROUPS
-  validate_options
-  normalise_dependencies
-  order_selected_steps
-  detect_os
-  if [[ $OS_FAMILY != macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
-    die "The heroku package group is macOS-only (no Linux distribution packages the Heroku CLI); remove it from --package-groups"
-  fi
-  if [[ $OS_FAMILY != macos && $BREW_MIRROR == china ]]; then
-    die "--brew-mirror china applies to Homebrew on macOS only"
-  fi
-  if [[ $OS_FAMILY != macos && $UPGRADE_CASKS -eq 1 ]]; then
-    die "--upgrade-casks applies to Homebrew on macOS only"
-  fi
+  prepare_selection
   if [[ $COMMAND == inspect ]]; then
     inspect_tsv
     return 0
   fi
-  [[ $ASSUME_YES -eq 1 ]] || die "Apply/reconcile requires --yes after the AI-presented plan is approved"
-  local support_problem
-  if support_problem=$(platform_support_problem); then
-    warn "Unsupported platform. $support_problem Continuing as asked; expect long source builds or failures."
-  fi
-  # Everything the run needs from the user, checked before the first change.
-  preflight
-  acquire_lock
-  report_profile_migration
-  migrate_local_state
-  if [[ $COMMAND == apply ]]; then
-    if [[ $FULL_UPGRADE -eq 1 ]]; then SAVED_FULL_UPGRADE=yes; else SAVED_FULL_UPGRADE=no; fi
-    remember_generated_gpg_key
-    write_profile
-  fi
-  apply_brew_mirror
-  bootstrap_tools
-  write_profile
-  local step
-  local -a steps=()
-  csv_split steps "$SELECTED_STEPS"
-  for step in ${steps[@]+"${steps[@]}"}; do
-    run_step "$step"
-  done
-  if has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" zsh-config; then
-    compile_zsh_sources
-  fi
-  # Credentials come last: no component uses them, and their first run always
-  # pauses for a manual GitHub registration (exit 3), which must not hold back
-  # the components (ONB-4). A pause also prints the actions queued above.
-  install_credential_prerequisites
-  provision_ssh
-  provision_gpg
-  write_profile
-  print_terminal_font_hint
-  finish_manual_actions
-  if [[ $COMMAND == reconcile ]]; then
-    say "Profile reconciliation complete. Restart the terminal; default-shell changes apply at next login."
-  else
-    say "Profile apply complete. Restart the terminal; default-shell changes apply at next login."
-  fi
+  [[ $ASSUME_YES -eq 1 ]] || die "$COMMAND changes this machine without asking: pass --yes (or run bash $TARGET/install.sh setup to be asked)"
+  apply_selection
 }
 
 if [[ ${LEOS_PROFILES_INSTALL_LIB_ONLY:-0} != 1 ]]; then
