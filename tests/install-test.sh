@@ -1290,15 +1290,18 @@ test_set_default_shell_auto_skips_existing_zsh() {
   [[ $out != *chsh* ]] || fail "auto policy ran chsh though the login shell is already zsh"
 }
 
-test_set_default_shell_uses_unprivileged_chsh_on_linux() {
+# Linux changes the login shell as root, like macOS: chsh run as the user
+# would ask for the user's own password, which no unattended run can answer.
+test_set_default_shell_uses_sudo_chsh_on_linux() {
   CHANGE_DEFAULT_SHELL=yes
   DRY_RUN=1
   OS_FAMILY=apt
+  SUDO=sudo
   current_login_shell() { printf '%s\n' /bin/bash; }
   local out
   out=$(set_default_shell 2>&1)
-  assert_contains "$out" "chsh -s"
-  [[ $out != *"sudo chsh"* ]] || fail "the Linux default-shell path used sudo chsh"
+  assert_contains "$out" "sudo chsh -s "
+  assert_contains "$out" " $(id -un)"
 }
 
 test_set_default_shell_uses_sudo_chsh_on_macos() {
@@ -2612,7 +2615,7 @@ test_remove_blocks_and_inventory_need_no_supported_platform() {
   for dir in /usr/bin /bin /usr/sbin /sbin; do
     for tool in "$dir"/*; do
       case ${tool##*/} in apt-get|dnf|pacman) continue ;; esac
-      [[ -e $temp/bin/${tool##*/} ]] || ln -s "$tool" "$temp/bin/${tool##*/}"
+      [[ -e $temp/bin/${tool##*/} || -L $temp/bin/${tool##*/} ]] || ln -s "$tool" "$temp/bin/${tool##*/}"
     done
   done
   PATH="$temp/bin"
@@ -2721,7 +2724,7 @@ TESTS=(
   test_download_verified_rejects_bad_digest
   test_macos_package_verification_detects_missing
   test_set_default_shell_auto_skips_existing_zsh
-  test_set_default_shell_uses_unprivileged_chsh_on_linux
+  test_set_default_shell_uses_sudo_chsh_on_linux
   test_set_default_shell_uses_sudo_chsh_on_macos
   test_known_hosts_matches_metadata_and_dedupes
   test_package_signature_is_ifs_independent
