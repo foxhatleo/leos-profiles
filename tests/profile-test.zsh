@@ -763,6 +763,8 @@ run_block 'bye keeps history by default' \
   source "$LEOS_TEST_ROOT/zsh/commands.zsh"
   sudo() { :; }
   ai-checkup() { :; }
+  # The macOS sweep and the Finder/Dock restart are not under test here.
+  rmdsstore() { :; }; killall() { :; }
   typeset -ga WIPES=()
   clear-history() { WIPES+=("wipe${1:+ $1}"); }
   bye --no-exit
