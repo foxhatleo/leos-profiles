@@ -197,10 +197,10 @@ anonymous requests an hour. When GitHub cannot be reached (or refuses, at that
 limit), a tool that is already installed and works is kept with a warning;
 only a missing or broken one stops the run.
 
-On macOS the full upgrade runs `brew update` and `brew upgrade` (formulae). It
-upgrades casks (GUI apps; some cask installers ask for sudo) only with
-`--upgrade-casks`, which apply saves for later reconciles; `bye`'s
-`brew-checkup` still upgrades casks as before.
+On macOS the full upgrade runs `brew update` and `brew upgrade --formula` (a
+bare `brew upgrade` would include casks). It upgrades casks (GUI apps; some
+cask installers ask for sudo) only with `--upgrade-casks`, which apply saves
+for later reconciles; `bye`'s `brew-checkup` still upgrades casks as before.
 
 Two downloads stay pinned to a reviewed URL and SHA-256 digest, because there
 is nothing newer to follow: Homebrew's installer script (it runs once, on a
