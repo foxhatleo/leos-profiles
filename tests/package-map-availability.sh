@@ -19,7 +19,7 @@ OS_FAMILY=$PACKAGE_MAP_FAMILY
 }
 
 # Every package group, including the opt-in ones; heroku has members only on
-# macOS (CI taps heroku/brew before this check).
+# macOS (a homebrew/core formula, so no tap is needed).
 SELECTED_GROUPS=$CANONICAL_GROUPS
 SELECTED_STEPS=$CANONICAL_STEPS
 collect_selected_packages

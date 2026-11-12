@@ -1052,15 +1052,17 @@ test_heroku_is_an_opt_in_macos_group() {
   [[ $out != *heroku* ]] || fail "the network group still taps or installs heroku: $out"
   SELECTED_GROUPS=network,heroku
   out=$(install_os_packages)
-  assert_contains "$out" "+ brew tap heroku/brew"
-  assert_contains "$out" "heroku"
+  # heroku is a homebrew/core formula: no third-party tap is added.
+  [[ $out != *"brew tap"* ]] || fail "the heroku group still adds a Homebrew tap: $out"
+  assert_contains "$out" " heroku"
   SELECTED_STEPS=packages
   REQUESTED_STEPS=packages
   REQUESTED_GROUPS=$SELECTED_GROUPS
   verify_step() { return 1; }
-  assert_contains "$(inspect_tsv)" $'action\trepository\tHomebrew heroku/brew tap'
+  assert_contains "$(inspect_tsv)" $'package\tmacos\theroku'
+  [[ $(inspect_tsv) != *heroku/brew* ]] || fail "inspect still discloses the heroku/brew tap"
   SELECTED_GROUPS=network
-  [[ $(inspect_tsv) != *heroku* ]] || fail "inspect discloses the heroku tap without the heroku group"
+  [[ $(inspect_tsv) != *heroku* ]] || fail "inspect lists heroku without the heroku group"
 }
 
 test_node_lts_is_resolved_once_per_run() {
