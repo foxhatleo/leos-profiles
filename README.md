@@ -1,10 +1,8 @@
 # Leo's Profiles
 
 Leo's Profiles is a portable, Zsh-centered workstation setup for macOS and
-Linux. The intended setup experience is AI-first: the AI inspects the machine,
-presents controlled selection boxes, resolves dependencies, explains the whole
-plan, gets approval, and delegates execution to the repository's deterministic
-shell engine.
+Linux. One command asks a few questions in the terminal, shows the complete
+plan, and applies it once you approve.
 
 Recommended is intentionally broad. A first installation installs the full
 default workstation selection and performs a full package-manager/host upgrade.
@@ -15,41 +13,91 @@ SSH and GPG default to Skip; fonts and the Zsh default-shell policy are Auto.
 
 ## Start here
 
-Paste this into your AI coding tool. It fetches
-[`QUICK-INSTALL.md`](./QUICK-INSTALL.md) itself, so there is nothing else to
-copy:
+In a terminal on the machine to set up:
 
-```text
-Set up Leo's Profiles on this machine. Run
-curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/QUICK-INSTALL.md
-and read its full output word for word (do not summarize it or fetch it
-through a summarizing web tool), then follow those instructions exactly.
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/foxhatleo/leos-profiles/master/bootstrap.sh)"
 ```
 
-- **Claude Code:** use a session with its single-select/multi-select
-  question-box UI. Bypass-permissions mode is recommended (start with
-  `claude --dangerously-skip-permissions`, or pick it with Shift+Tab): the
-  setup runs many inspection and install commands, and you still approve the
-  complete plan once in a question box before anything changes.
-- **Codex:** enter **Plan mode first**, then submit the prompt. The question
-  UI used by this setup is currently available there. Leave Plan mode after
-  approving the plan so apply can run; full-access approvals (`codex --yolo`)
-  avoid a prompt per command for the same reason as above.
+[`bootstrap.sh`](./bootstrap.sh) installs Git if it is missing (on macOS
+through Apple's Command Line Tools installer, which it waits for), clones this
+repository into `~/.leos-profiles` (or `$LEOS_PROFILES_HOME`), or
+fast-forwards a clean existing checkout of it, and starts
+`bash ~/.leos-profiles/install.sh setup`. It refuses a checkout with local
+changes or of another repository rather than touching it. Stay at the
+keyboard: sudo asks for your password once, and the GitHub steps you choose
+wait for you.
 
-Bypass mode skips the agent's per-command confirmations only. `sudo`, the
-Homebrew installer, `chsh` and passphrase prompts still stop for you, so stay at
-the keyboard. Skip it if you would rather review each command yourself.
-
-If the UI is unavailable, restart in the correct mode. The setup deliberately
-does not fall back to a typed questionnaire, and users should not need to learn
-installer flags.
-
-The default installation directory is `~/.leos-profiles`. A new setup clones
-the current GitHub default branch there and runs that checkout in place. The
-local checkout is authoritative: local edits take effect immediately and the
-installer does not enforce a particular release, commit, origin, owner, or
+The local checkout is authoritative: local edits take effect immediately and
+the installer does not enforce a particular release, commit, origin, owner, or
 signature. The updater is stricter only about pulling: it requires a clean
 branch checkout with a configured upstream, then uses `git pull --ff-only`.
+
+### What setup asks
+
+`setup` uses [gum](https://github.com/charmbracelet/gum) for its prompts
+when it can (the one on PATH, `brew install gum` on macOS, or gum's GitHub
+release at least the minimum release age old, checked like every release
+and kept only in a temporary directory); otherwise, or with `--plain` or
+`TERM=dumb`, it asks with numbered prompts. In order:
+
+1. **Recommended**, **Customize**, or (once you have run it) **the saved
+   choices** in `local/install-profile.tsv`.
+2. Customize only: components, package groups (`heroku` on macOS only), the
+   Nerd Font, the full package upgrade, Homebrew cask upgrades (macOS), the
+   login shell and the minimum release age (7 days unless you change it).
+   The saved choices ask only about the full upgrade again.
+3. SSH key for GitHub and GPG commit signing: **Skip** (the default), use a
+   key setup found (`~/.ssh/*.pub` with its private key; your GPG secret
+   keys), or generate one, with or without a passphrase.
+4. Your Git name and email, only for GPG signing and only when Git has none.
+5. An existing `~/.rbenv` that is not the profile's checkout: keep it and
+   skip the rbenv component, or stop so you can move it.
+
+Then it works out the plan (what is installed already, the packages, the
+Node, Python and Ruby lines and the GitHub releases it will use) and shows
+it: the selection, packages, runtimes, releases and sources, everything run
+as root, what cannot be undone, side effects, files, conflicts, existing
+setups, migrations and warnings, ending with each component as "to do" or
+"done". One confirmation applies exactly that plan, in the same process.
+
+The GitHub steps (logging gh in, adding the public key, granting gh a scope)
+are yours to do; setup shows the key and the page, offers to run
+`gh auth login` or `gh auth refresh` for you, and waits until GitHub has it.
+Choose "Stop here" to finish later (exit 3): run setup again and pick the
+saved choices. Anything left for you at the end (chsh missing, the font on
+the Windows side of WSL) is listed as a checklist.
+
+`bash install.sh setup --dry-run` asks the same questions and shows the real
+plan, then only prints what it would do.
+
+### Unattended, Codespaces and dev containers
+
+`bash install.sh apply --yes` installs without asking: Recommended, or the
+selection its options give (`bash install.sh --help`). Without a terminal it
+cannot ask for a sudo password or a passphrase, so a plan that needs one
+stops before changing anything, with exit 3 and the exact command to run in
+a terminal; passwordless or cached sudo works. The Homebrew installer runs
+with `NONINTERACTIVE=1`.
+
+`install.sh` without arguments runs setup at a terminal. Without one, in
+GitHub Codespaces or a dev container (`CODESPACES`, `REMOTE_CONTAINERS` or
+`DEVCONTAINER` set), it applies a lean profile: `zsh-config`, `plugins` and
+`starship` with the `shell` package group, no package upgrade, fonts,
+login-shell change or keys. So this repository works as Codespaces' dotfiles
+repository as it is. Anywhere else it prints the usage (exit 2).
+
+### Manual commands
+
+The engine behind setup is scriptable; run these from the checkout:
+
+| Command | What it does |
+| --- | --- |
+| `bash install.sh inspect [options]` | The plan as typed TSV (read-only); `--saved` for the saved selection |
+| `bash install.sh apply --yes [options]` | Apply a selection without asking |
+| `bash install.sh reconcile --yes [--full-upgrade]` | Repair and update from the saved profile |
+| `bash install.sh remove-blocks [--dry-run]` | Remove the managed blocks from the zsh startup files |
+| `bash install.sh inventory [--tsv]` | List everything the installer creates or manages |
 
 ### Why not chezmoi or GNU stow
 
@@ -63,10 +111,10 @@ at week-old releases, local SSH/GPG preparation and read-only GitHub verificatio
 Fonts release archive, and `chsh`. chezmoi covers that only through `run_once_` escape hatches, which
 would leave the same amount of shell to maintain plus a second tool to learn.
 
-The engine also exists to serve the AI-first flow: `inspect` emits typed TSV for
-an agent to turn into selection boxes, and `apply` is a non-interactive executor
-with per-step signatures and postcondition verification. That contract is the
-product, not an accident of not knowing chezmoi exists.
+The engine is built around a plan you can read before anything changes:
+`inspect` emits typed TSV that setup renders, and `apply` is a
+non-interactive executor with per-step signatures and postcondition
+verification.
 
 The cost is honest: a bespoke idempotency/state/locking engine to keep correct,
 which is why it carries a test suite and a per-OS CI matrix. If the dotfile
@@ -78,8 +126,7 @@ Component groups are `bins`, `packages`, `rbenv`, `bun`, `fnm`, `corepack`,
 `uv`, `cpython`, `starship`, `plugins`, `fonts`, `zsh-config`, and
 `default-shell`. Package groups are `core-utils`, `shell`, `dev-tools`,
 `python`, `media`, `network`, `heroku`, and `system`. Internal `bootstrap`,
-`ssh`, and `gpg` groups make the remaining mutations visible in the approved
-plan.
+`ssh`, and `gpg` groups make the remaining mutations visible in the plan.
 
 Groups are atomic: selecting one selects every member. A component implies a
 package group only when it needs its members: rpatool (`bins`) implies the
@@ -90,9 +137,9 @@ GitHub CLI and jq; plugins, Zsh configuration, and default-shell setup imply
 `shell`. Bun, fnm, Corepack, uv's CPython and Starship imply no OS runtimes:
 they are self-contained, and Corepack's pnpm and Yarn run on fnm's Node, so
 selecting them never installs a system Node, Python or Ruby. `corepack`
-implies `fnm`, and `cpython` implies `uv`, which run before them. The AI shows
-all selected and implied groups plus exact OS package membership before asking
-for approval.
+implies `fnm`, and `cpython` implies `uv`, which run before them. The plan
+shows all selected and implied groups plus exact OS package membership before
+asking for approval.
 
 `heroku` is macOS-only and opt-in: the Heroku CLI is a homebrew/core formula
 (no tap is added), but no Linux distribution packages it. A Mac that tapped
@@ -103,7 +150,8 @@ languages` stops with that explanation.
 
 Recommended selects every component except `bins`, and every package group
 except `python` and `heroku`. Customize allows whole-group selection. The initial package pass keeps
-the broad full-upgrade default, but the AI offers a no-full-upgrade choice.
+the broad full-upgrade default, but setup's Customize offers a no-full-upgrade
+choice.
 With `--no-full-upgrade`, only missing selected packages are requested from the
 package manager. Dependency resolution can still install or upgrade dependencies;
 this does not freeze the host package set.
@@ -111,9 +159,9 @@ this does not freeze the host package set.
 ## Deterministic engine and local state
 
 `install.sh` derives the profile root only from its own physical directory.
-It provides a typed TSV inspection stream, an explicit approved apply,
-reconciliation from the saved local profile, and managed-block removal. It is not a
-second wizard and never asks setup questions.
+It provides the interactive `setup`, a typed TSV inspection stream, an
+explicit apply, reconciliation from the saved local profile, and managed-block
+removal. Only `setup` asks questions; `apply` and `reconcile` never do.
 
 The entire ignored `local/` directory is machine-owned:
 
@@ -145,7 +193,7 @@ secret-key material there. User-managed `private.zsh` may contain secrets.
 Public GPG exports awaiting manual registration are also kept under `local/`. The directory uses mode 700 and files mode 600 as ordinary local
 hygiene. On first use, legacy XDG installer state, `zsh/_private.zsh`, and the
 old home-directory markers are migrated. Conflicting old/new values stop with
-both paths for the AI to resolve.
+both paths for you to resolve.
 
 Apply/reconcile uses an atomic `local/.install.lock`, secure temporary paths,
 cleanup traps, atomic profile/state/config writes, and first-write managed-block
@@ -169,7 +217,7 @@ old pinned layout (`migration`), and `warning`s such as an unsupported Mac.
 `docs/development.md` lists every record type.
 
 Before its first change, apply (and reconcile) checks what the run needs from
-you. Run without a terminal (as an AI agent does), a plan that needs a sudo
+you. Run without a terminal (unattended, from a script), a plan that needs a sudo
 password or a passphrase prompt stops at once with a
 `manual-action run-in-terminal` record that carries the exact command, exit
 status 3, having changed nothing: run that command in your own terminal. With
@@ -321,11 +369,14 @@ path. Existing files are not replaced. Both `empty` and `prompt` passphrase
 policies are supported; `empty` is the default and is warned about explicitly.
 
 GitHub operations are read-only. The installer never uploads keys, logs into
-GitHub for you, or changes SSH identity configuration or GitHub CLI's Git
-protocol. Missing registration produces a `manual-action` TSV record and exits
-with status **3**, including the public-key file and destination URL. The
+GitHub without asking (setup offers to run `gh auth login`, which you answer
+yourself), or changes SSH identity configuration or GitHub CLI's Git
+protocol. Outside setup, missing registration produces a `manual-action` TSV
+record and exits with status **3**, including the public-key file and destination URL. The
 selected reference is saved first, and a public GPG export remains available
-after cleanup. Register it yourself, then run the guided reconciliation again.
+after cleanup. Register it yourself, then run `reconcile --yes` again. In
+`setup` the run waits for you instead, and offers to run `gh auth login`
+(with the scopes the checks need) or `gh auth refresh` for you.
 Missing login, email-read permission, or ordinary SSH configuration similarly
 produces manual guidance. A network/API failure remains an error, not evidence
 that a key is missing.
@@ -711,9 +762,10 @@ for explicit review.
 
 ## Development
 
-See [docs/development.md](./docs/development.md) for module boundaries, the TSV
-contract, regression tests, dependency updates, real provisioning, and startup
-benchmarking. All machine-owned `local/` data stays ignored. Other local files
+See [docs/development.md](./docs/development.md) for module boundaries, the
+setup and bootstrap flow, the TSV contract, regression tests, dependency updates, real provisioning, and startup
+benchmarking, and [AGENTS.md](./AGENTS.md) for the rules and checks in short
+(coding agents read it). All machine-owned `local/` data stays ignored. Other local files
 under `docs/` remain ignored; only this development guide is public.
 
 The project is GPL-3.0; see [LICENSE](./LICENSE).

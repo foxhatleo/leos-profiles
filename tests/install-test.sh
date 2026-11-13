@@ -4215,6 +4215,671 @@ test_retired_state_rows_are_dropped() {
   rm -rf "$temp"
 }
 
+# --- setup: the wizard (installer/setup.sh) and its prompts (installer/ui.sh)
+# setup_answers <answer...>: the plain prompts read these lines, as they would
+# from /dev/tty.
+setup_answers() {
+  local file
+  file=$(mktemp)
+  track_temp "$file"
+  if (( $# )); then printf '%s\n' "$@" > "$file"; else : > "$file"; fi
+  UI_TTY=$file
+  UI_PLAIN=1
+  ui_init 2>/dev/null
+}
+
+# every answer was read (the next read hits the end of the file).
+assert_answers_used() {
+  local extra
+  if IFS= read -r extra <&7; then fail "an answer was left unread: '$extra'"; fi
+}
+
+# Customize, through every stage: each answer lands in the global the
+# matching apply option sets, and the result passes the engine's validation.
+test_setup_customize_stages_set_the_globals() {
+  local temp
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  HOME="$temp/home"
+  mkdir -p "$HOME/.ssh"
+  printf 'private\n' > "$HOME/.ssh/id_test"
+  printf 'ssh-ed25519 AAAATEST test@host\n' > "$HOME/.ssh/id_test.pub"
+  printf 'ssh-ed25519 AAAAORPHAN no-private-key\n' > "$HOME/.ssh/orphan.pub"
+  export GIT_CONFIG_GLOBAL="$temp/gitconfig"
+  : > "$GIT_CONFIG_GLOBAL"
+  OS_FAMILY=apt
+  PROFILE_FILE="$temp/no-such-profile.tsv"
+  gpg() {
+    printf '%s\n' 'sec:u:255:22:AAAAAAAAAAAAAAAA:1::::::scESC:' \
+      'fpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:' \
+      'uid:u::::1::HASH::Fixture User, Jr. <fixture@example.com>::::' \
+      'ssb:u:255:18:BBBBBBBBBBBBBBBB:1::::::e:' \
+      'fpr:::::::::FFFF456789ABCDEF0123456789ABCDEF01234567:'
+  }
+  # mode: Customize; components: none, then starship..default-shell; package
+  # groups: none, then shell; font: yes, FiraCode; no full upgrade; login
+  # shell: no; release age: change, a bad value, then 3; SSH: the existing
+  # key; GPG: the existing key; Git name, a bad email, then a good one.
+  setup_answers 2 none '9 10 11 12 13' '' none 2 '' 2 FiraCode n 3 2 abc 3 3 1 3 1 Ada bad ada@example.com
+  setup_wizard 2>/dev/null
+  assert_answers_used
+  assert_equals "$SETUP_MODE" customize
+  assert_equals "$SELECTED_STEPS" starship,plugins,fonts,zsh-config,default-shell
+  assert_equals "$SELECTED_GROUPS" shell
+  assert_equals "$INSTALL_FONTS|$FONT_NAME" yes\|FiraCode
+  assert_equals "$FULL_UPGRADE|$UPGRADE_CASKS" 0\|0
+  assert_equals "$CHANGE_DEFAULT_SHELL" no
+  assert_equals "$MIN_RELEASE_AGE" 3
+  assert_equals "$SSH_MODE|$SSH_KEY_PATH" "reuse|$HOME/.ssh/id_test"
+  assert_equals "$GPG_MODE|$GPG_KEY_ID" reuse\|0123456789ABCDEF0123456789ABCDEF01234567
+  assert_equals "$GIT_NAME|$GIT_EMAIL" Ada\|ada@example.com
+  validate_options
+}
+
+# Recommended asks only about keys; Git identity is not asked for when Git
+# has one. heroku and the cask upgrade are offered on macOS only.
+test_setup_recommended_asks_only_for_keys() {
+  local temp recommended_steps=$SELECTED_STEPS
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  HOME="$temp/home"
+  mkdir -p "$HOME"
+  export GIT_CONFIG_GLOBAL="$temp/gitconfig"
+  git config --global user.name 'Fixture User'
+  git config --global user.email fixture@example.com
+  OS_FAMILY=macos
+  PROFILE_FILE="$temp/no-such-profile.tsv"
+  gpg() { :; }
+  # Recommended; SSH: generate at the default path, no passphrase; GPG:
+  # generate with a passphrase prompt (the default).
+  setup_answers '' 2 '' 2 2 ''
+  setup_wizard 2>/dev/null
+  assert_answers_used
+  assert_equals "$SETUP_MODE" recommended
+  assert_equals "$SELECTED_STEPS" "$recommended_steps"
+  assert_equals "$SELECTED_GROUPS" "$RECOMMENDED_GROUPS"
+  assert_equals "$SSH_MODE|$SSH_KEY_PATH|$SSH_PASSPHRASE_MODE" "generate|$HOME/.ssh/id_ed25519|empty"
+  assert_equals "$GPG_MODE|$GPG_PASSPHRASE_MODE" generate\|prompt
+  assert_equals "$GIT_NAME$GIT_EMAIL" ""
+  setup_answers all ''
+  setup_package_groups 2>/dev/null
+  assert_equals "$SELECTED_GROUPS" "$CANONICAL_GROUPS"
+  setup_answers '' y
+  setup_full_upgrade 2>/dev/null
+  setup_casks 2>/dev/null
+  assert_equals "$FULL_UPGRADE|$UPGRADE_CASKS" 1\|1
+  OS_FAMILY=apt
+  UPGRADE_CASKS=0
+  setup_answers all ''
+  setup_package_groups 2>/dev/null
+  assert_equals "$SELECTED_GROUPS" core-utils,shell,dev-tools,python,media,network,system
+  setup_answers ''
+  setup_full_upgrade 2>/dev/null
+  setup_casks 2>/dev/null
+  assert_answers_used
+  assert_equals "$UPGRADE_CASKS" 0
+}
+
+# With a saved profile, its choices are the default; only the full upgrade is
+# asked again, defaulting to the saved preference.
+test_setup_saved_choices_come_from_the_profile() {
+  local temp
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  LOCAL_DIR="$temp/local"
+  PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
+  DRY_RUN=0
+  SELECTED_STEPS=zsh-config,starship
+  SELECTED_GROUPS=shell
+  SAVED_FULL_UPGRADE=no
+  MIN_RELEASE_AGE=12
+  write_profile
+  SELECTED_STEPS=$CANONICAL_STEPS
+  MIN_RELEASE_AGE=7
+  setup_answers '' ''
+  setup_wizard 2>/dev/null
+  assert_answers_used
+  assert_equals "$SETUP_MODE" saved
+  assert_equals "$SELECTED_STEPS|$SELECTED_GROUPS|$MIN_RELEASE_AGE" zsh-config,starship\|shell\|12
+  assert_equals "$FULL_UPGRADE" 0
+}
+
+# An existing ~/.rbenv that preflight would stop on becomes the choice to keep
+# it (--skip-existing-version-managers) or to stop before anything changes.
+test_setup_turns_an_rbenv_conflict_into_a_choice() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  HOME="$temp/home"
+  mkdir -p "$HOME/.rbenv"
+  OS_FAMILY=apt
+  SELECTED_STEPS=rbenv
+  setup_answers 1
+  setup_conflicts 2>/dev/null
+  assert_equals "$SKIP_EXISTING_VERSION_MANAGERS" 1
+  SKIP_EXISTING_VERSION_MANAGERS=0
+  setup_answers 2
+  out=$( (setup_conflicts) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "Nothing was changed"
+  rmdir "$HOME/.rbenv"
+  setup_answers 'unused'
+  setup_conflicts 2>/dev/null
+  assert_equals "$SKIP_EXISTING_VERSION_MANAGERS" 0
+}
+
+# The plain prompts re-ask on a bad answer, and end setup (130, nothing
+# changed) when the terminal input ends.
+test_plain_prompts_validate_and_stop_at_end_of_input() {
+  local out status=0
+  setup_answers 0 9 x 2
+  ui_choose "Pick" 0 one two 2>/dev/null
+  assert_equals "$UI_INDEX|$UI_REPLY" 1\|two
+  setup_answers maybe N
+  if ui_confirm "Sure?" yes 2>/dev/null; then fail "N was taken as yes"; fi
+  setup_answers '' 
+  ui_confirm "Sure?" yes 2>/dev/null || fail "the default yes was not taken"
+  setup_answers '1 7' '3' 'none' '2' ''
+  ui_multi "Pick" "0 2" a b c 2>/dev/null
+  assert_equals "$UI_REPLY" 1
+  setup_answers
+  out=$( (ui_choose "Pick" 0 one two) 2>&1 ) || status=$?
+  assert_equals "$status" 130
+  assert_contains "$out" "nothing was changed"
+}
+
+# render_plan shows every inspect record type the contract documents (all but
+# meta) and ends with the per-component summary.
+test_render_plan_shows_every_record_type() {
+  local plan_rows type columns i row out
+  plan_rows=$(mktemp)
+  track_temp "$plan_rows"
+  while IFS=: read -r type columns; do
+    row=$type
+    i=2
+    while [[ $i -le $columns ]]; do
+      row="$row"$'\t'"M-$type"
+      i=$((i + 1))
+    done
+    printf '%s\n' "$row" >> "$plan_rows"
+  done < <(awk -F '|' '/^\| `[a-z-]+` \| [0-9]+ \|/ {
+      type = $2; count = $3; gsub(/[ `]/, "", type); gsub(/ /, "", count); print type ":" count }' "$ROOT/docs/development.md")
+  [[ $(wc -l < "$plan_rows") -gt 20 ]] || fail "could not read the record table"
+  printf '%s\n' $'postcondition\tzsh-config\tverified' $'postcondition\tfnm\tneeded' \
+    $'release\tbun\tunresolved\t-\tresolve-during-apply' $'group\tcomponent\tpackages\timplied' >> "$plan_rows"
+  out=$(render_plan "$plan_rows")
+  while IFS=: read -r type columns; do
+    [[ $type == meta ]] || assert_contains "$out" "M-$type"
+  done < <(cut -f1 "$plan_rows" | sort -u | sed 's/$/:0/')
+  for heading in Selection 'Packages (1)' Runtimes 'Releases and sources' 'Runs as root' \
+    'Cannot be undone' 'Side effects' Conflicts 'Existing setups' 'Moves off an older layout' Warnings Summary; do
+    assert_contains "$out" "$heading"
+  done
+  assert_contains "$out" "packages (implied)"
+  assert_contains "$out" "bun: release not resolved yet"
+  assert_contains "$out" "done       zsh-config"
+  assert_contains "$out" "to do      fnm"
+  assert_contains "$out" "2 to do, 1 already done; 1 packages; 1 root actions; 1 irreversible; 1 warnings"
+}
+
+# setup through the real entrypoint (dry run): the wizard's selection is
+# inspected and shown, and the same selection is applied in that process.
+test_setup_applies_the_plan_it_showed() {
+  local temp checkout answers out status=0 shown ran
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  checkout="$temp/profile"
+  make_fixture_checkout "$checkout"
+  answers="$temp/answers"
+  # Customize: zsh-config only, no package group, no full upgrade, keep the
+  # release age, no keys; then approve.
+  printf '%s\n' 2 none 12 '' none '' n '' '' '' y > "$answers"
+  out=$(export UI_TTY=$answers UI_PLAIN=1; run_cli "$checkout" "$temp/home" setup --dry-run < /dev/null 2>&1) || status=$?
+  assert_equals "$status" 0
+  assert_contains "$out" "components: packages (implied), zsh-config"
+  assert_contains "$out" "policy full-upgrade: no"
+  assert_contains "$out" "Setup complete"
+  shown=$(awk '/^Summary/ { s = 1; next } s && /^  (to do|done|skipped) / { print $NF }' <<< "$out" | paste -sd, -)
+  # Answers come from a file, so nothing echoes the newline after the final
+  # prompt and the first step's line can follow it on the same line.
+  ran=$(sed -En 's/^(.*: )?==> (Running|Skipping) ([a-z-]+).*/\3/p' <<< "$out" | paste -sd, -)
+  [[ $shown == packages,zsh-config && $ran == "$shown" ]] ||
+    fail "shown '$shown' / ran '$ran' do not match the selection; setup printed:
+$out"
+  [[ ! -e $checkout/local/install-profile.tsv ]] || fail "a dry run saved the profile"
+  # Declining the plan changes nothing and says so.
+  printf '%s\n' '' '' '' n > "$answers"
+  out=$(export UI_TTY=$answers UI_PLAIN=1; run_cli "$checkout" "$temp/home" setup --dry-run < /dev/null 2>&1) || fail "declining failed: $out"
+  assert_contains "$out" "Nothing was changed"
+  [[ $out != *"==> Running"* ]] || fail "a declined plan ran steps"
+  # setup needs a terminal to ask on.
+  status=0
+  out=$(export UI_TTY=$temp/no-terminal; run_cli "$checkout" "$temp/home" setup < /dev/null 2>&1) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "apply --yes"
+}
+
+# At a terminal in setup, a credential manual action waits ("done? check
+# again"), can run gh auth login for the user, and only falls back to exit 3
+# when the user stops; component actions end as a checklist.
+test_setup_waits_for_manual_actions_at_a_terminal() {
+  local temp out status=0
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  GH_LOG="$temp/gh.log"
+  : > "$GH_LOG"
+  COMMAND=setup
+  INTERACTIVE_MANUAL=1
+  SSH_MODE=reuse
+  GPG_MODE=skip
+  AUTH_AFTER=3
+  gh() {
+    printf '%s\n' "$*" >> "$GH_LOG"
+    case "$1 $2" in
+      'auth status') (( $(grep -c '^auth status' "$GH_LOG") >= AUTH_AFTER )) ;;
+      *) return 0 ;;
+    esac
+  }
+  # "Done: check again" twice; the third check passes.
+  setup_answers 2 2
+  ensure_github_auth 2>/dev/null
+  assert_answers_used
+  assert_equals "$(grep -c '^auth status' "$GH_LOG")" 3
+  assert_equals "$PENDING_MANUAL_ACTIONS" ""
+  # "Run it for me now": gh auth login, with the scope the key check needs.
+  : > "$GH_LOG"
+  AUTH_AFTER=2
+  setup_answers 1
+  ensure_github_auth 2>/dev/null
+  assert_contains "$(cat "$GH_LOG")" 'auth login --hostname github.com --scopes read:public_key'
+  # Stopping ends the run with exit 3, as a checklist rather than records.
+  : > "$GH_LOG"
+  AUTH_AFTER=99
+  setup_answers 3
+  out=$( (ensure_github_auth) 2>&1 ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" "Still to do by hand"
+  [[ $out != *$'manual-action\t'* ]] || fail "setup printed manual-action records: $out"
+  # A component's action (a missing chsh) is a checklist at the end of setup.
+  PENDING_MANUAL_ACTIONS=""
+  PENDING_MANUAL_EXPLANATIONS=""
+  queue_manual_action set-login-shell /bin/zsh tester "install chsh" 2>/dev/null
+  out=$(finish_manual_actions final 2>&1) || fail "setup's final checklist exited: $out"
+  assert_contains "$out" "[ ] install chsh"
+  # Outside setup nothing waits: exit 3 with the records, as before.
+  COMMAND=apply
+  INTERACTIVE_MANUAL=0
+  status=0
+  out=$( (ensure_github_auth) 2>/dev/null ) || status=$?
+  assert_equals "$status" 3
+  assert_contains "$out" $'manual-action\tgithub-login\t\thttps://github.com/login'
+}
+
+# preflight never hands a setup user a run-in-terminal command.
+test_preflight_never_stops_setup_with_run_in_terminal() {
+  local out status=0
+  preflight_fixture no 1
+  COMMAND=setup
+  out=$( (preflight) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  [[ $out != *run-in-terminal* ]] || fail "setup was told to run a command in a terminal: $out"
+}
+
+# `install.sh` alone: setup at a terminal; in a Codespace or dev container
+# without one, the lean profile, unattended; otherwise the usage (exit 2).
+test_bare_install_sh_runs_setup_lean_profile_or_usage() {
+  local out status=0 variable mode
+  unset CODESPACES REMOTE_CONTAINERS DEVCONTAINER
+  stdin_is_terminal() { return 0; }
+  ui_terminal_available() { return 0; }
+  COMMAND=""
+  parse_args
+  assert_equals "$COMMAND" setup
+  stdin_is_terminal() { return 1; }
+  out=$( (parse_args) 2>&1 ) || status=$?
+  assert_equals "$status" 2
+  assert_contains "$out" "Usage:"
+  for variable in CODESPACES REMOTE_CONTAINERS DEVCONTAINER; do
+    (
+      export "$variable=true"
+      COMMAND=""
+      parse_args >/dev/null
+      assert_equals "$COMMAND|$ASSUME_YES|$FULL_UPGRADE" apply\|1\|0
+      assert_equals "$INSTALL_FONTS|$CHANGE_DEFAULT_SHELL|$SSH_MODE|$GPG_MODE" no\|no\|skip\|skip
+      valid_csv "$SELECTED_STEPS" "$CANONICAL_STEPS" || fail "the lean profile names an unknown component: $SELECTED_STEPS"
+      normalise_dependencies
+      order_selected_steps
+      assert_equals "$SELECTED_STEPS|$SELECTED_GROUPS" packages,starship,plugins,zsh-config\|shell
+    ) || fail "$variable did not select the lean profile"
+  done
+  # Codespaces runs install.sh itself, so it must be executable.
+  [[ -x $ROOT/install.sh ]] || fail "install.sh is not executable"
+  mode=$(git -C "$ROOT" ls-files -s install.sh 2>/dev/null | cut -c1-6) || mode=""
+  [[ -z $mode || $mode == 100755 ]] || fail "install.sh is mode $mode in Git, not 100755"
+}
+
+# gum: the one on PATH, else Homebrew's (macOS, not in a dry run), else its
+# GitHub release in a temporary directory; none: plain prompts.
+test_ensure_gum_prefers_path_then_brew_then_release() {
+  local temp saved_path=$PATH dir
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  if [[ -x /usr/bin/gum || -x /bin/gum ]]; then return 0; fi
+  GUM_CALLS="$temp/calls"
+  : > "$GUM_CALLS"
+  mkdir -p "$temp/path" "$temp/brewbin"
+  fake_gum() { mkdir -p "$(dirname -- "$1")"; printf '#!/bin/sh\necho "gum version v0.17.0"\n' > "$1"; chmod +x "$1"; }
+  say() { :; }
+  warn() { :; }
+  brew() {
+    printf 'brew %s\n' "$*" >> "$GUM_CALLS"
+    case $1 in
+      install) fake_gum "$BREW_BIN/gum" ;;
+      --prefix) printf '%s\n' "$BREW_BIN/.." ;;
+    esac
+  }
+  github_release_pick() {
+    printf 'pick %s\n' "$*" >> "$GUM_CALLS"
+    [[ -z ${PICK_STATUS:-} ]] || return "$PICK_STATUS"
+    RELEASE_URL=https://github.com/charmbracelet/gum/releases/download/v0.17.0/gum_0.17.0_Linux_x86_64.tar.gz
+    RELEASE_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  }
+  install_archive_binary() {
+    printf 'install %s TMPDIR=%s DRY_RUN=%s\n' "$*" "$TMPDIR" "$DRY_RUN" >> "$GUM_CALLS"
+    fake_gum "$5"
+  }
+  BREW_BIN="$temp/brewbin"
+  # 1. On PATH.
+  fake_gum "$temp/path/gum"
+  PATH="$temp/path:/usr/bin:/bin"
+  OS_FAMILY=macos DRY_RUN=0
+  ensure_gum
+  PATH=$saved_path
+  assert_equals "$GUM" "$temp/path/gum"
+  [[ ! -s $GUM_CALLS ]] || fail "gum on PATH still installed one: $(cat "$GUM_CALLS")"
+  # 2. Homebrew, on macOS.
+  PATH="$temp/brewbin:/usr/bin:/bin"
+  ensure_gum
+  PATH=$saved_path
+  assert_equals "$GUM" "$temp/brewbin/gum"
+  assert_equals "$(cat "$GUM_CALLS")" 'brew install gum'
+  # 3. The release, on Linux (or in a dry run on macOS: brew would change
+  # the host), into a temporary directory, downloaded even in a dry run.
+  rm -f "$temp/brewbin/gum"
+  for mode in apt:0 macos:1; do
+    : > "$GUM_CALLS"
+    OS_FAMILY=${mode%:*} DRY_RUN=${mode#*:}
+    PATH="$temp/brewbin:/usr/bin:/bin"
+    ensure_gum
+    PATH=$saved_path
+    dir=${GUM%/bin/gum}
+    [[ $GUM == */bin/gum && -x $GUM && -d $dir ]] || fail "no release gum: '$GUM'"
+    assert_equals "$(sed -n '1p' "$GUM_CALLS")" 'pick charmbracelet/gum gum_{version}_{os}_{arch}.tar.gz'
+    assert_equals "$(sed -n '2p' "$GUM_CALLS")" \
+      "install gum tar.gz https://github.com/charmbracelet/gum/releases/download/v0.17.0/gum_0.17.0_Linux_x86_64.tar.gz bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb $dir/bin/gum charmbracelet/gum TMPDIR=$dir DRY_RUN=0"
+    [[ $(cat "$GUM_CALLS") != *brew* ]] || fail "$mode ran brew"
+  done
+  # None: ensure_gum fails, and setup uses plain prompts.
+  OS_FAMILY=apt DRY_RUN=0
+  PICK_STATUS=4
+  PATH="/usr/bin:/bin"
+  if ensure_gum; then PATH=$saved_path; fail "ensure_gum succeeded without any gum"; fi
+  PATH=$saved_path
+  assert_equals "$GUM" ""
+}
+
+# gum's release assets, as goreleaser names them, for each supported OS and
+# CPU, and a pick of the template from a fixture of its release.
+test_gum_release_asset_names() {
+  GUM_DIGEST=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  uname() {
+    case ${1:-} in
+      -m) printf '%s\n' "$FAKE_MACHINE" ;;
+      -s) printf '%s\n' "$FAKE_SYSTEM" ;;
+      *) command uname "$@" ;;
+    esac
+  }
+  FAKE_SYSTEM=Linux FAKE_MACHINE=x86_64
+  assert_equals "$(release_asset_name "$GUM_RELEASE_ASSET" v0.17.0)" gum_0.17.0_Linux_x86_64.tar.gz
+  FAKE_MACHINE=aarch64
+  assert_equals "$(release_asset_name "$GUM_RELEASE_ASSET" v0.17.0)" gum_0.17.0_Linux_arm64.tar.gz
+  FAKE_SYSTEM=Darwin FAKE_MACHINE=arm64
+  assert_equals "$(release_asset_name "$GUM_RELEASE_ASSET" v0.17.0)" gum_0.17.0_Darwin_arm64.tar.gz
+  FAKE_MACHINE=x86_64
+  assert_equals "$(release_asset_name "$GUM_RELEASE_ASSET" v0.17.0)" gum_0.17.0_Darwin_x86_64.tar.gz
+  FAKE_SYSTEM=Linux FAKE_MACHINE=aarch64
+  fix_now
+  MIN_RELEASE_AGE=7
+  curl() {
+    local url
+    for url in "$@"; do :; done
+    case $url in
+      */repos/charmbracelet/gum/releases\?per_page=30)
+        printf '[{"tag_name": "v0.18.0", "draft": false, "prerelease": false, "published_at": "2026-11-11T00:00:00Z"},
+          {"tag_name": "v0.17.0", "draft": false, "prerelease": false, "published_at": "2025-09-04T12:00:00Z"}]\n200' ;;
+      */repos/charmbracelet/gum/releases/tags/v0.17.0)
+        printf '{"tag_name": "v0.17.0", "assets": [\n'
+        for asset in checksums.txt gum_0.17.0_Darwin_arm64.tar.gz gum_0.17.0_Linux_arm64.tar.gz gum_0.17.0_Linux_x86_64.tar.gz; do
+          printf '{"name": "%s", "uploader": {"login": "github-actions[bot]"}, "digest": "sha256:%s", "browser_download_url": "https://github.com/charmbracelet/gum/releases/download/v0.17.0/%s"},\n' \
+            "$asset" "$GUM_DIGEST" "$asset"
+        done
+        printf '{"name": "last"}]}\n200' ;;
+      *) printf '{}\n404' ;;
+    esac
+  }
+  github_release_pick "$GUM_REPOSITORY" "$GUM_RELEASE_ASSET" || fail "the gum pick failed with status $?"
+  assert_equals "$RELEASE_TAG|$RELEASE_URL|$RELEASE_SHA" \
+    "v0.17.0|https://github.com/charmbracelet/gum/releases/download/v0.17.0/gum_0.17.0_Linux_arm64.tar.gz|$GUM_DIGEST"
+}
+
+# The Homebrew installer runs with NONINTERACTIVE=1: the plan was approved and
+# preflight validated sudo, so it must not stop for RETURN.
+test_homebrew_installer_runs_noninteractively() {
+  local out
+  # ensure_brew uses an installed Homebrew (a macOS runner has one).
+  if [[ -x /opt/homebrew/bin/brew || -x /usr/local/bin/brew ]]; then return 0; fi
+  OS_FAMILY=macos
+  DRY_RUN=1
+  command() { if [[ ${1:-} == -v && ${2:-} == brew ]]; then return 1; fi; builtin command "$@"; }
+  out=$(ensure_brew 2>&1)
+  assert_contains "$out" "+ env NONINTERACTIVE=1 /bin/bash "
+}
+
+# Before the Ruby compile: renew sudo's login while it is cached (never a
+# prompt), or ask at a terminal; unattended without one, leave it.
+test_sudo_is_refreshed_before_long_steps() {
+  local temp
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  SUDO_LOG="$temp/sudo.log"
+  sudo() { printf '%s\n' "$*" >> "$SUDO_LOG"; [[ $1 != -n ]] || return "$SUDO_N_STATUS"; }
+  SUDO=sudo DRY_RUN=0 SUDO_PLANNED=1
+  SUDO_N_STATUS=0
+  : > "$SUDO_LOG"
+  refresh_sudo
+  assert_equals "$(cat "$SUDO_LOG")" '-n -v'
+  SUDO_N_STATUS=1
+  stdin_is_terminal() { return 0; }
+  : > "$SUDO_LOG"
+  refresh_sudo >/dev/null
+  assert_equals "$(paste -sd, "$SUDO_LOG")" '-n -v,-v'
+  stdin_is_terminal() { return 1; }
+  : > "$SUDO_LOG"
+  refresh_sudo
+  assert_equals "$(cat "$SUDO_LOG")" '-n -v'
+  # Nothing runs as root: no sudo at all.
+  SUDO_PLANNED=0
+  : > "$SUDO_LOG"
+  refresh_sudo
+  sudo_keepalive_start
+  [[ ! -s $SUDO_LOG && -z $SUDO_KEEPALIVE_PID ]] || fail "sudo was used without a root action: $(cat "$SUDO_LOG")"
+  # The keepalive starts only with a cached login and stops with the step.
+  SUDO_PLANNED=1 SUDO_N_STATUS=0
+  sudo_keepalive_start
+  if [[ -z $SUDO_KEEPALIVE_PID ]] || ! kill -0 "$SUDO_KEEPALIVE_PID"; then fail "no sudo keepalive"; fi
+  sudo_keepalive_stop
+  [[ -z $SUDO_KEEPALIVE_PID ]] || fail "the keepalive was not stopped"
+}
+
+# --- bootstrap.sh -----------------------------------------------------------
+# bootstrap_fixture: a fixture HOME and Git configuration in which the
+# profile's GitHub URL is a local "upstream" repository (url.insteadOf), so
+# the real git clones and pulls without the network.
+bootstrap_fixture() {
+  BS_FIXTURE=$(mktemp -d)
+  track_temp "$BS_FIXTURE"
+  export HOME="$BS_FIXTURE/home"
+  mkdir -p "$HOME"
+  export GIT_CONFIG_GLOBAL="$BS_FIXTURE/gitconfig" GIT_CONFIG_NOSYSTEM=1
+  git config --global user.name 'Fixture User'
+  git config --global user.email fixture@example.com
+  git config --global init.defaultBranch master
+  git config --global url."$BS_FIXTURE/upstream".insteadOf https://github.com/foxhatleo/leos-profiles.git
+  git init -q "$BS_FIXTURE/upstream"
+  printf '#!/usr/bin/env bash\n' > "$BS_FIXTURE/upstream/install.sh"
+  printf 'local/\n' > "$BS_FIXTURE/upstream/.gitignore"
+  git -C "$BS_FIXTURE/upstream" add -A
+  git -C "$BS_FIXTURE/upstream" commit -q -m 'first'
+}
+
+test_bootstrap_clones_updates_and_refuses() {
+  local out status dir
+  bootstrap_fixture
+  LEOS_BOOTSTRAP_LIB_ONLY=1 source "$ROOT/bootstrap.sh"
+  bs_start_setup() { printf 'setup %s\n' "$*"; }
+  bs_say() { printf '==> %s\n' "$*"; }
+  BS_OS=apt
+  dir="$HOME/.leos-profiles"
+  # A fresh clone, then setup in it with the arguments given.
+  out=$(main --dry-run 2>&1)
+  assert_contains "$out" "Cloning Leo's Profiles into $dir"
+  assert_contains "$out" "setup $dir --dry-run"
+  [[ -f $dir/install.sh ]] || fail "nothing was cloned"
+  assert_equals "$(git -C "$dir" config --get remote.origin.url)" https://github.com/foxhatleo/leos-profiles.git
+  # An existing clean checkout is fast-forwarded (ignored local/ state is
+  # not a change).
+  printf 'echo new\n' >> "$BS_FIXTURE/upstream/install.sh"
+  git -C "$BS_FIXTURE/upstream" commit -q -am 'second'
+  mkdir -p "$dir/local"
+  printf 'state\n' > "$dir/local/install-profile.tsv"
+  out=$(main 2>&1)
+  assert_contains "$out" "Updating the existing checkout"
+  assert_equals "$(git -C "$dir" rev-parse HEAD)" "$(git -C "$BS_FIXTURE/upstream" rev-parse HEAD)"
+  # Local changes are refused, and left as they are.
+  printf 'edit\n' >> "$dir/install.sh"
+  status=0
+  out=$( (main) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "has local changes"
+  [[ $(tail -n 1 "$dir/install.sh") == edit ]] || fail "the local change was touched"
+  git -C "$dir" checkout -q -- install.sh
+  # A checkout of another repository is refused.
+  git -C "$dir" remote set-url origin https://github.com/someone/else.git
+  status=0
+  out=$( (main) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "is a checkout of https://github.com/someone/else.git"
+  # SSH and HTTPS spellings of the profile's own origin are accepted.
+  bs_origin_ok git@github.com:FoxHatLeo/leos-profiles.git || fail "the SSH origin was refused"
+  bs_origin_ok https://github.com/foxhatleo/leos-profiles/ || fail "the HTTPS origin was refused"
+  ! bs_origin_ok https://github.com/foxhatleo/leos-profiles-fork.git || fail "a fork was accepted"
+  # Something else in the way is left alone.
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  status=0
+  out=$( (main) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "is not a Git checkout"
+  # LEOS_PROFILES_HOME chooses the directory.
+  out=$(LEOS_PROFILES_HOME="$BS_FIXTURE/elsewhere" main 2>&1)
+  assert_contains "$out" "setup $BS_FIXTURE/elsewhere"
+  [[ -f $BS_FIXTURE/elsewhere/install.sh ]] || fail "LEOS_PROFILES_HOME was not used"
+}
+
+# Without Git: the OS's own way to get it (Linux: the package manager, as
+# root; macOS: the Command Line Tools installer, then waiting for it).
+test_bootstrap_installs_git_when_missing() {
+  local out status family
+  bootstrap_fixture
+  LEOS_BOOTSTRAP_LIB_ONLY=1 source "$ROOT/bootstrap.sh"
+  BS_LOG="$BS_FIXTURE/calls"
+  BS_POLL_SECONDS=0
+  BS_POLL_LIMIT=5
+  git() { [[ $GIT_READY -eq 1 ]] || return 127; }
+  id() { printf '%s\n' "$FAKE_UID"; }
+  sudo() { printf 'sudo %s\n' "$*" >> "$BS_LOG"; [[ $* != *' install '*git* && $* != *'-Syu '*git* ]] || GIT_READY=1; }
+  apt-get() { printf 'apt-get %s\n' "$*" >> "$BS_LOG"; [[ $1 != install ]] || GIT_READY=1; }
+  bs_say() { :; }
+  FAKE_UID=1000
+  for family in apt fedora arch; do
+    BS_OS=$family GIT_READY=0
+    : > "$BS_LOG"
+    bs_install_git
+    case $family in
+      apt) assert_equals "$(paste -sd'|' "$BS_LOG")" 'sudo apt-get update|sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y git ca-certificates' ;;
+      fedora) assert_equals "$(cat "$BS_LOG")" 'sudo dnf install -y git ca-certificates' ;;
+      arch) assert_equals "$(cat "$BS_LOG")" 'sudo pacman -Syu --needed --noconfirm git ca-certificates' ;;
+    esac
+  done
+  # As root, no sudo.
+  FAKE_UID=0 BS_OS=apt GIT_READY=0
+  : > "$BS_LOG"
+  env() { shift; "$@"; }
+  bs_install_git
+  assert_equals "$(paste -sd'|' "$BS_LOG")" 'apt-get update|apt-get install -y git ca-certificates'
+  unset -f env
+  # Git already works: nothing is installed.
+  GIT_READY=1
+  : > "$BS_LOG"
+  bs_install_git
+  [[ ! -s $BS_LOG ]] || fail "Git was installed although it works: $(cat "$BS_LOG")"
+  # macOS: start the Command Line Tools installer, then poll until Git runs.
+  BS_OS=macos GIT_READY=1 CLT_POLLS=0
+  xcode-select() {
+    printf 'xcode-select %s\n' "$*" >> "$BS_LOG"
+    [[ $1 == -p ]] || return 0
+    CLT_POLLS=$((CLT_POLLS + 1))
+    (( CLT_POLLS > 3 ))
+  }
+  : > "$BS_LOG"
+  bs_install_git
+  # The first check, three polls that fail, one that passes, the last check.
+  assert_equals "$(grep -c -- '-p' "$BS_LOG")" 5
+  assert_contains "$(cat "$BS_LOG")" 'xcode-select --install'
+  # ...and gives up, saying what to do, if they never arrive.
+  CLT_POLLS=-100
+  status=0
+  out=$( (bs_install_git) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "Command Line Tools are still not installed"
+  BS_OS=unknown GIT_READY=0
+  status=0
+  out=$( (bs_install_git) 2>&1 ) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "Unsupported platform"
+}
+
+# A download cut short anywhere runs nothing: every statement is inside main,
+# called on the last line.
+test_bootstrap_cut_short_runs_nothing() {
+  local temp lines n name
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  mkdir -p "$temp/bin"
+  for name in git sudo xcode-select apt-get dnf pacman curl uname id mkdir bash env sleep; do
+    printf '#!/bin/sh\necho "%s $*" >> "%s/ran"\n' "$name" "$temp" > "$temp/bin/$name"
+    chmod +x "$temp/bin/$name"
+  done
+  lines=$(wc -l < "$ROOT/bootstrap.sh")
+  for (( n = 1; n < lines; n++ )); do
+    head -n "$n" "$ROOT/bootstrap.sh" > "$temp/cut.sh"
+    PATH="$temp/bin" HOME="$temp" "$BASH" "$temp/cut.sh" >/dev/null 2>&1 || true
+  done
+  [[ ! -e $temp/ran ]] || fail "a truncated bootstrap ran commands: $(sort -u "$temp/ran" | head -5)"
+  assert_equals "$(tail -n 1 "$ROOT/bootstrap.sh")" '[[ ${LEOS_BOOTSTRAP_LIB_ONLY:-0} == 1 ]] || main "$@"'
+  "$BASH" -n "$ROOT/bootstrap.sh" || fail "bootstrap.sh does not parse"
+}
+
 TESTS=(
   test_default_does_not_include_unreleased_local_bin
   test_option_validation_rejects_bad_csv_and_implicit_keys
@@ -4362,6 +5027,23 @@ TESTS=(
   test_ruby_line_waits_the_release_age
   test_ruby_compile_failure_is_recorded_not_retried
   test_retired_state_rows_are_dropped
+  test_setup_customize_stages_set_the_globals
+  test_setup_recommended_asks_only_for_keys
+  test_setup_saved_choices_come_from_the_profile
+  test_setup_turns_an_rbenv_conflict_into_a_choice
+  test_plain_prompts_validate_and_stop_at_end_of_input
+  test_render_plan_shows_every_record_type
+  test_setup_applies_the_plan_it_showed
+  test_setup_waits_for_manual_actions_at_a_terminal
+  test_preflight_never_stops_setup_with_run_in_terminal
+  test_bare_install_sh_runs_setup_lean_profile_or_usage
+  test_ensure_gum_prefers_path_then_brew_then_release
+  test_gum_release_asset_names
+  test_homebrew_installer_runs_noninteractively
+  test_sudo_is_refreshed_before_long_steps
+  test_bootstrap_clones_updates_and_refuses
+  test_bootstrap_installs_git_when_missing
+  test_bootstrap_cut_short_runs_nothing
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

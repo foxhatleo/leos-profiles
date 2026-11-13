@@ -1364,11 +1364,14 @@ install_ruby() {
     warn "ruby-build's history does not say when Ruby $RUBY_NEWEST_LINE.0 was added, so its age is unknown; installing the previous line, Ruby $version"
   fi
   say "Selected Ruby $version (the newest stable release on the newest line at least $MIN_RELEASE_AGE days old)"
+  sudo_keepalive_start
   if ! run env RBENV_ROOT="$(rbenv_root)" "$rbenv" install --skip-existing "$version"; then
+    sudo_keepalive_stop
     warn "Ruby $version did not compile (see ruby-build's output above); rbenv is installed without it. Install what the build lacked, then run a full upgrade (bash install.sh reconcile --yes --full-upgrade) to try again."
     RUBY_RESULT="ruby-failed:$version"
     return 0
   fi
+  sudo_keepalive_stop
   run env RBENV_ROOT="$(rbenv_root)" "$rbenv" global "$version"
   RUBY_RESULT="ruby:$version"
 }

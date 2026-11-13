@@ -93,3 +93,12 @@ readonly STARSHIP_LINUX_X64_ASSET="starship-x86_64-unknown-linux-musl.tar.gz"
 readonly UV_REPOSITORY="astral-sh/uv"
 readonly UV_LINUX_AARCH64_ASSET="uv-aarch64-unknown-linux-musl.tar.gz"
 readonly UV_LINUX_X64_ASSET="uv-x86_64-unknown-linux-musl.tar.gz"
+
+# gum, the terminal UI `install.sh setup` uses when it is not already on PATH
+# (and, on macOS, Homebrew cannot install it): the newest release at least the
+# minimum release age old, for this OS and CPU, unpacked into a temporary
+# directory for the run only. Its assets are named like
+# gum_0.17.0_Linux_x86_64.tar.gz and gum_0.17.0_Darwin_arm64.tar.gz
+# (release_asset_name fills in the template).
+readonly GUM_REPOSITORY="charmbracelet/gum"
+readonly GUM_RELEASE_ASSET="gum_{version}_{os}_{arch}.tar.gz"
