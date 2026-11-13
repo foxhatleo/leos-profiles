@@ -11,12 +11,12 @@ The implementation stays compatible with macOS Bash 3.2.
 | `installer/registry.sh` | Ordered component registry, dependency closure, handler validation, the tool-artifact table, and which steps a full upgrade re-runs |
 | `installer/state.sh` | Saved profiles, schema migration, state signatures, locking and cleanup |
 | `installer/packages.sh` | Platform bootstrap, package maps and package-manager operations |
-| `installer/tools.sh` | Tool installs (Homebrew formulae, latest GitHub releases, npm), default-branch checkouts and Node LTS activation |
+| `installer/tools.sh` | Tool installs (Homebrew formulae, age-gated GitHub releases with digest and attestation checks, npm), release checkouts and Node LTS activation |
 | `installer/config.sh` | Managed shell blocks, symlink-aware rewrites and default-shell changes |
 | `installer/credentials.sh` | Local key preparation, read-only GitHub checks and manual-action pauses |
 | `installer/verification.sh` | Component postconditions |
 | `installer/signatures.sh` | Inputs that invalidate each component's recorded state |
-| `installer/sources.sh` | Upstream repositories and Linux release asset names, plus the two pinned downloads (Homebrew's installer, rpatool) |
+| `installer/sources.sh` | Upstream repositories, each Git source's follow mode and the Linux release asset names, plus the two pinned downloads (Homebrew's installer, rpatool) |
 | `installer/plan.sh` | Disclosure records beyond the selection, the preflight before any change, and the inventory |
 
 Add a component to the registry and supply its install, verification and
@@ -25,9 +25,10 @@ dependencies. A tool the installer puts on PATH itself is one row in
 `artifact_registry` (owning component, source prefix, archive kind,
 executables, expected `--version` line, Homebrew formula) plus its
 `<PREFIX>_REPOSITORY` and `<PREFIX>_LINUX_<AARCH64|X64>_ASSET` values in
-`sources.sh`. On macOS it installs as the formula; on Linux as the latest
-GitHub release, checked against the SHA-256 digest GitHub publishes for the
-asset. A `file` row is the exception: a pinned `<PREFIX>_URL`/`_SHA256`. Its
+`sources.sh`. On macOS it installs as the formula; on Linux as the newest
+GitHub release at least the minimum release age old (see "Release age"
+below), checked against the SHA-256 digest GitHub publishes for the asset
+and, when gh is logged in, the project's attestation. A `file` row is the exception: a pinned `<PREFIX>_URL`/`_SHA256`. Its
 handlers then just call `artifact_install`, `artifact_verify` and
 `artifact_signature`, and inspect, the inventory, the shadow and migration
 checks and `tests/release-artifacts-test.sh` pick it up from the table. Add a
@@ -52,7 +53,7 @@ and schema-2 (`preserve-compatible`) profiles remain readable and are migrated
 by an approved apply/reconcile. Inspection and dry-run must not write the
 migration. Keys added since schema 3 are optional and need no schema bump: the
 reader takes their absence as the old behaviour (`version-managers` install,
-`upgrade-casks` no, no `gpg-generated` key).
+`upgrade-casks` no, `release-age` 7, no `gpg-generated` key).
 
 The parser must preserve empty TSV columns and dispatch by record type; it must
 not treat prose progress output during apply as inspection records. Every
@@ -65,15 +66,16 @@ update it together with the emitter in `install.sh`.
 | --- | --- | --- | --- |
 | `meta` | 3 | `schema`, `1` | Inspection format version |
 | `platform` | 3 | `family`, value | Selected OS package family |
-| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now) |
+| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now), `release-age-homebrew` (macOS: the selected Homebrew formulae install at Homebrew's current version, not age-gated), `release-age-npm` (Linux: npm's latest Yarn/pnpm, not age-gated) |
 | `profile` | 3 | `root`, path | Authoritative local checkout |
-| `policy` | 3 | `node`, `full-upgrade` or `selection`, value | Node selection policy; `yes`/`no` host upgrade; `saved` when `inspect --saved` read the selection from the saved profile |
+| `policy` | 3 | `node`, `full-upgrade`, `selection` or `release-age`, value | Node selection policy; `yes`/`no` host upgrade; `saved` when `inspect --saved` read the selection from the saved profile; the minimum release age in days |
 | `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
-| `migration` | 4 | `profile-schema`, old schema, `3`; `legacy-loader` / `legacy-environment`, file path, managed marker; or `local-bin` / `npm-prefix` / `git-checkout`, path, what happens | Pending profile migration; a legacy unmarked loader (`.zshrc`) or zshenv snippet (`.zshenv`) that `zsh-config` and `remove-blocks` remove; or a copy from the pinned layout: a macOS `~/.local/bin` or `~/.local/npm` copy removed once Homebrew's formula is in place, or a checkout detached at a pinned commit that moves onto its default branch |
+| `migration` | 4 | `profile-schema`, old schema, `3`; `legacy-loader` / `legacy-environment`, file path, managed marker; or `local-bin` / `npm-prefix` / `git-checkout`, path, what happens | Pending profile migration; a legacy unmarked loader (`.zshrc`) or zshenv snippet (`.zshenv`) that `zsh-config` and `remove-blocks` remove; or an older layout: a macOS `~/.local/bin` or `~/.local/npm` copy removed once Homebrew's formula is in place, or a checkout on its default branch (the 2026-10 layout) that moves to its release, detached, naming the tag or commit its refs give as of its last fetch |
 | `group` | 4 | category, name, status | Selected, implied or internal group |
 | `package` | 3 | OS family, name | Exact OS package member |
 | `action` | 3 | step, description | Planned effect of a step or bootstrap |
-| `artifact` | 5 | source kind, name, source, revision | Where a tool comes from. `formula`: Homebrew formula, `latest`; `release`: `github.com/<repo>` and the asset name (for a Nerd Font, its archive URL and `SHA-256.txt`, the list its digest is read from); `npm`: registry package, `latest`; `git`: repository, `default-branch`; `direct`: pinned URL and SHA-256 |
+| `artifact` | 5 | source kind, name, source, revision | Where a tool comes from. `formula`: Homebrew formula, `latest`; `release`: `github.com/<repo>` and the asset name (a Nerd Font's `<Font>.tar.xz` is checked against its release's `SHA-256.txt`); `npm`: registry package, `latest`; `git`: repository and follow mode (`tag`, `commit` or `tag-now`, see "Release age"); `direct`: pinned URL and SHA-256 |
+| `release` | 5 | name, tag, published_at, `digest` or `attestation` | The GitHub release a `release` artifact resolves to now (Linux tools, and the Nerd Font): the newest that is not a draft or prerelease, has a plain version tag and was published at least the minimum release age ago. `attestation` when gh is logged in and the project publishes an attestation for the asset, otherwise GitHub's SHA-256 digest (a Nerd Font: always `digest`, from `SHA-256.txt`). `unresolved`, `-`, `resolve-during-apply` when GitHub cannot be read or the release is unusable |
 | `external` | 3 | service, description or URL | External service the plan contacts |
 | `file` | 3 | name, path | File the plan reads or writes; `zshrc`, `zshenv` and (macOS) `zprofile` give the resolved zsh startup files |
 | `global` | 3 | `git`, keys | Global Git settings the plan configures |
@@ -128,9 +130,9 @@ passphrase prompt or a sudo password (chsh runs as root, so it counts here)
 (`privileged_plan` is not empty and `sudo -n true` fails) ends the run with
 `manual-action run-in-terminal` carrying the exact command line, exit 3, before
 the lock exists. With a terminal, `sudo -v` asks once up front. Dry runs never
-call sudo; they report what would stop. Last, it resolves which Nerd Fonts
-release is latest (once: the archive later comes from the same tag), downloads
-that release's checksum list and rejects an unknown font name. Tests stub
+call sudo; they report what would stop. Last, it picks the Nerd Fonts release
+(once: the archive later comes from the same tag), downloads that release's
+checksum list and rejects an unknown font name. Tests stub
 `stdin_is_terminal`, `sudo` and `privileged_plan`.
 
 `main` installs an ERR trap (`on_unexpected_error`; `set -E` carries it into
@@ -139,9 +141,11 @@ functions). A command that fails where `set -e` would stop the run, outside
 at <file>:<line>` and exits with that status, except that 2 and 3 become 1:
 they are contract statuses (plan changed, manual action). The trap does
 nothing inside subshells; their status reaches the main shell. A helper that
-must return a status through `$(...)` is called with `||` (as
-`github_latest_asset` is, returning 4 when GitHub is unreachable and 5 when it
-refuses: 403/429, the anonymous rate limit), so the trap never sees it.
+must return a status is called with `||` (as `github_release_pick` is,
+returning 4 when GitHub is unreachable, 5 when it refuses: 403/429, the
+anonymous rate limit, and 7 when no recent release is old enough), so the trap
+never sees it. Code inside such a call runs without `set -e`: check each
+status explicitly.
 
 A component that needs the user (a missing chsh) calls `queue_manual_action`
 and sets `STEP_AWAITS_MANUAL_ACTION`: `run_step` then leaves it unrecorded and
@@ -258,12 +262,13 @@ GITHUB_TOKEN=$(gh auth token) bash tests/release-artifacts-test.sh
 bash tests/package-map-availability.sh macos  # or apt, fedora, arch
 ```
 
-The release check resolves every Linux release asset for both CPUs (from any
-host), verifies the two pinned digests and the latest Nerd Fonts archive, and
-then, on Linux, installs and runs each latest release (a second install must
-find it current) plus npm's Yarn and pnpm on the current LTS; on macOS it
-checks that each Homebrew formula exists. Plugin checks clone each default
-branch and load the combined real Zsh plugin integration. CI also checks TOML and fenced Bash in the runbook.
+The release check picks every Linux release asset for both CPUs (from any
+host) with the default minimum release age, verifies the two pinned digests
+and the picked Nerd Fonts archive, and then, on Linux, installs and runs each
+picked release (a second install must find it current) plus npm's Yarn and
+pnpm on the current LTS; on macOS it checks that each Homebrew formula
+exists. Plugin checks check out each plugin's release and load the combined
+real Zsh plugin integration. CI also checks TOML and fenced Bash in the runbook.
 None of these alone substitutes for actual package installation.
 
 ## CI layout
@@ -331,7 +336,7 @@ Scenarios exercise minimal Zsh setup, pnpm-only dependency resolution,
 Yarn/pnpm execution, recommended provisioning, repeat reconciliation, a
 full-upgrade reconcile that re-runs the tools and finds them current (Linux),
 repair (of bun, Starship, the `.zshenv` managed block, a plugin checkout left
-detached as the pinned installs did, and the font) and the refusal to discard
+on its default branch as the 2026-10 installs did, and the font) and the refusal to discard
 a locally edited plugin.
 They skip credentials, disable login-shell changes, and explicitly install
 fonts. Unit and credential fixture tests cover the excluded interactive flows;
@@ -341,6 +346,60 @@ The configured matrix is a coverage target. Claim a particular platform passed
 only with that run's evidence, and report failures or unexecuted jobs separately.
 See [the provisioning workflow](../.github/workflows/provision.yml) for exact
 runner labels and triggers.
+
+## Release age
+
+Nothing is pinned to a version, but nothing installs the moment upstream
+publishes it either. `--min-release-age <days>` (0 to 365, default 7; apply
+and inspect, saved as the profile's `release-age` row for reconcile) holds
+GitHub releases and Git checkouts back until they have been public that long,
+so a compromised or broken release has time to be noticed and pulled.
+`release_age_cutoff` computes the cutoff once per run, as epoch seconds and as
+an ISO-8601 UTC string that compares with GitHub's `published_at` as text
+(Bash 3.2 has no date arithmetic; `date` converts with GNU `-d @N` or BSD
+`-r N`).
+
+- **GitHub releases** (`github_release_pick <repo> <asset|template>`): reads
+  `releases?per_page=30`, skips drafts, prereleases and tags that are not a
+  plain version (`bun-v1.3.2` and `0.9.1` are; `v1.0.0-rc1` and `canary` are
+  not), takes the newest published at or before the cutoff, then reads
+  `releases/tags/<tag>` for the asset's URL and digest. `{version}`, `{os}`
+  (`Linux`, `Darwin`) and `{arch}` (`x86_64`, `arm64`) in the asset name are
+  filled in. Results are cached per repository (and asset) in globals for the
+  run, so call it in the current shell, with `||`. API requests send
+  `GITHUB_TOKEN`, or gh's token when gh is logged in, on curl's stdin.
+- **Attestations**: after the digest check, when gh is logged in,
+  `release_attestation_check` asks GitHub for attestations of the asset's
+  digest. None (404) leaves the digest check alone; otherwise
+  `gh attestation verify --repo <repo>` must pass, and any other answer stops
+  the install.
+- **Git checkouts** (`follow_release_checkout <PREFIX> <dir> <label>`) end
+  detached, by `<PREFIX>_FOLLOW` in `sources.sh`: `tag` (the newest tag
+  matching `^v?[0-9]+(\.[0-9]+)*$` whose creator date is at or before the
+  cutoff: pyenv, rbenv, zsh-completions, fzf-tab), `commit`
+  (`rev-list -1 --before=<cutoff> origin/HEAD`: zsh-autosuggestions and
+  zsh-syntax-highlighting, whose last tags are from 2024 and 2023) or
+  `tag-now` (the newest stable tag, no delay: ruby-build, so a Ruby security
+  release is installable at once). A checkout may move backwards. Before
+  fetching, it refuses uncommitted changes, and (`checkout_local_work`) a
+  checked-out commit or a local tag on a commit that origin does not have:
+  none of the remote-tracking branches as of the last fetch, nor the tags
+  `git ls-remote --tags` reports origin has now, contains it. Local tags are
+  not evidence, since the fetch prunes tags: a fix tagged on the detached
+  checkout would otherwise pass, lose its tag and be left behind. A commit
+  upstream later force-pushed away is not local work (the remote-tracking
+  branches still hold it), and the step says upstream rewrote its history and
+  moves on; a local tag upstream deleted or moved, on a commit no branch
+  holds, stops the step until it is deleted. The fetch prunes tags, so a tag
+  upstream deleted is not picked.
+- **Not gated**: Homebrew formulae and OS packages (their package managers'
+  current versions; inspect warns about formulae), npm's Yarn and pnpm, and
+  Node (the current LTS). The bootstrap and raw URLs on `master` are not
+  releases.
+
+Signatures never contain the age or a tag (`release` for Git sources), so a
+new upstream release, or a different `--min-release-age`, re-runs nothing;
+a full upgrade moves the tools forward.
 
 ## Upstream sources
 
@@ -356,8 +415,12 @@ Tools are not pinned, so there is no routine dependency bump. What needs care:
    verification accepts any version but checks that shape.
 4. The two pinned downloads change deliberately: update the URL and SHA-256
    together in `installer/sources.sh` (Homebrew's installer at a reviewed
-   commit; rpatool's repository is archived, so it should never change).
-5. Behaviour changes upstream (a new major pnpm, a Node LTS that a tool does
+   commit, re-pinned when a new macOS ships: its `MACOS_NEWEST_UNSUPPORTED`
+   must be above the newest macOS; rpatool's repository is archived, so it
+   should never change).
+5. A Git source whose tags stop (or start) tracking its branch: change its
+   `<PREFIX>_FOLLOW` in `installer/sources.sh`.
+6. Behaviour changes upstream (a new major pnpm, a Node LTS that a tool does
    not support yet) reach users on their next full upgrade. Run the real
    provisioning matrix when a failure points there, and say in the change
    description which upstream versions it was tested with.

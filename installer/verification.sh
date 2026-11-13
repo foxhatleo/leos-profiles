@@ -2,16 +2,19 @@
 # Sourced by install.sh; shares the installer context.
 # shellcheck disable=SC2034
 
-# git_checkout_follows <directory> <repository>: a clean checkout of the
-# repository on a branch. A detached HEAD is a checkout from the pinned
-# installs before 2026-10, which follow_default_branch moves onto the branch.
-git_checkout_follows() {
+# git_checkout_at_release <directory> <repository>: a clean checkout of the
+# repository, detached (follow_release_checkout leaves it at a release). One
+# on a branch is the default-branch layout of 2026-10, which the step moves to
+# its release. Which release it is, is not checked: a newer upstream release
+# alone does not make the step look undone; a full upgrade moves it forward.
+git_checkout_at_release() {
   local directory=$1 repository=$2 origin
   [[ -d $directory/.git ]] || return 1
   origin=$(git -C "$directory" remote get-url origin 2>/dev/null || true)
   github_origins_equivalent "$origin" "$repository" || return 1
   [[ -z $(git -C "$directory" status --porcelain) ]] || return 1
-  git -C "$directory" symbolic-ref --quiet HEAD >/dev/null 2>&1
+  git -C "$directory" rev-parse --verify --quiet HEAD >/dev/null || return 1
+  ! git -C "$directory" symbolic-ref --quiet HEAD >/dev/null 2>&1
 }
 
 # The family name a Nerd Font installs under. Nerd Fonts renames families
@@ -67,14 +70,14 @@ verify_packages() {
 
 verify_pyenv() {
   local directory
-  [[ -x $HOME/.pyenv/bin/pyenv ]] && git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY"
+  [[ -x $HOME/.pyenv/bin/pyenv ]] && git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY"
 }
 
 verify_rbenv() {
   local directory
   [[ -x $HOME/.rbenv/bin/rbenv ]] &&
-    git_checkout_follows "$HOME/.rbenv" "$RBENV_REPOSITORY" &&
-    git_checkout_follows "$HOME/.rbenv/plugins/ruby-build" "$RUBY_BUILD_REPOSITORY"
+    git_checkout_at_release "$HOME/.rbenv" "$RBENV_REPOSITORY" &&
+    git_checkout_at_release "$HOME/.rbenv/plugins/ruby-build" "$RUBY_BUILD_REPOSITORY"
 }
 
 verify_bun() { artifact_verify bun; }
@@ -94,10 +97,10 @@ verify_fnm() {
 verify_plugins() {
   local directory="$TARGET/zsh/plugins"
   artifact_verify starship &&
-    git_checkout_follows "$directory/zsh-autosuggestions" "$ZSH_AUTOSUGGESTIONS_REPOSITORY" &&
-    git_checkout_follows "$directory/zsh-syntax-highlighting" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" &&
-    git_checkout_follows "$directory/zsh-completions" "$ZSH_COMPLETIONS_REPOSITORY" &&
-    git_checkout_follows "$directory/fzf-tab" "$FZF_TAB_REPOSITORY"
+    git_checkout_at_release "$directory/zsh-autosuggestions" "$ZSH_AUTOSUGGESTIONS_REPOSITORY" &&
+    git_checkout_at_release "$directory/zsh-syntax-highlighting" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" &&
+    git_checkout_at_release "$directory/zsh-completions" "$ZSH_COMPLETIONS_REPOSITORY" &&
+    git_checkout_at_release "$directory/fzf-tab" "$FZF_TAB_REPOSITORY"
 }
 
 verify_fonts() {

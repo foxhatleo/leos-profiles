@@ -20,6 +20,13 @@ unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GITHUB_TOKEN GH_TOKEN NERD_FONTS_TEST_R
 # shellcheck source=../install.sh
 source "$ROOT/install.sh"
 
+# No test reaches GitHub or reads the developer's gh login: the API token is
+# never looked up, gh counts as logged out, and a curl no test stubs fails as
+# if offline (inspect then reports releases as unresolved).
+GITHUB_API_TOKEN_RESOLVED=1
+GH_LOGGED_IN=no
+curl() { printf '\n000'; return 7; }
+
 CURRENT_TEST=""
 fail() { printf '%s\n' "FAIL [${CURRENT_TEST:-?}]: $*" >&2; exit 1; }
 assert_equals() { [[ $1 == "$2" ]] || fail "expected '$2', got '$1'"; }
@@ -188,7 +195,7 @@ test_tar_archive_install_creates_extraction_directory() {
     assert_equals "$1:$2" "https://example.invalid/starship.tar.gz:deadbeef"
     mkdir -p "$(dirname -- "$3")"; cp "$TEST_ARCHIVE" "$3"
   }
-  install_archive_binary starship tar.gz https://example.invalid/starship.tar.gz deadbeef "$HOME/.local/bin/starship"
+  install_archive_binary starship tar.gz https://example.invalid/starship.tar.gz deadbeef "$HOME/.local/bin/starship" starship/starship
   [[ -x $HOME/.local/bin/starship ]] || fail "tar archive binary was not installed"
   rm -rf "$temp"
 }
@@ -208,9 +215,12 @@ test_uv_artifact_installs_uv_and_uvx() {
   HOME="$temp/home"
   DRY_RUN=0
   OS_FAMILY=apt
-  github_latest_asset() {
+  github_release_pick() {
     assert_equals "$1 $2" "astral-sh/uv uv-aarch64-unknown-linux-musl.tar.gz"
-    printf '0.9.1\thttps://github.com/astral-sh/uv/releases/download/0.9.1/%s\t%s\n' "$2" "$(printf x | hash_text)"
+    RELEASE_TAG=0.9.1
+    RELEASE_PUBLISHED=2026-10-01T00:00:00Z
+    RELEASE_URL="https://github.com/astral-sh/uv/releases/download/0.9.1/$2"
+    RELEASE_SHA=$(printf x | hash_text)
   }
   download_verified() { mkdir -p "$(dirname -- "$3")"; cp "$TEST_ARCHIVE" "$3"; }
   uname() { if [[ ${1:-} == -m ]]; then printf 'arm64\n'; else command uname "$@"; fi; }
@@ -924,113 +934,287 @@ fixture_commit() {
   fixture_git -C "$1" rev-parse HEAD
 }
 
-# Git sources follow their default branch: a missing checkout is cloned, a
-# checkout detached at a pinned commit (installs before 2026-10) moves onto
-# the branch, and an existing branch fast-forwards. Local bare repositories
-# stand in for GitHub; the origin check compares their paths.
-test_follow_default_branch_moves_detached_checkouts_onto_the_branch() {
-  local temp upstream work first third head out
+# A fixed "now" for release-age tests: 2026-11-12T12:00:00Z.
+FIXED_NOW=1794484800
+fix_now() {
+  current_epoch() { printf '%s\n' "$FIXED_NOW"; }
+  RELEASE_CUTOFF_EPOCH=""
+  RELEASE_CUTOFF_ISO=""
+}
+
+# dated_commit <checkout> <message> <days before FIXED_NOW> [tag]: commit
+# (and tag, annotated) with backdated author, committer and tagger dates;
+# print the commit.
+dated_commit() {
+  local date="@$(( FIXED_NOW - $3 * 86400 )) +0000"
+  printf '%s\n' "$2" >> "$1/history"
+  fixture_git -C "$1" add history
+  GIT_AUTHOR_DATE=$date GIT_COMMITTER_DATE=$date fixture_git -C "$1" commit -q -m "$2"
+  if [[ -n ${4:-} ]]; then GIT_COMMITTER_DATE=$date fixture_git -C "$1" tag -a -m "$4" "$4"; fi
+  fixture_git -C "$1" rev-parse HEAD
+}
+
+# An upstream for follow_release_checkout, in FIXTURE_REPOSITORY (a local
+# bare repository standing in for GitHub; the origin check compares paths):
+#   C1  30 days old, v1.0.0      C4  3 days old, v1.2.0
+#   C2  20 days old, v1.1.0      C5  1 day old, untagged
+#   C3  10 days old, v1.2.0-rc1 and a lightweight 0.9.0-alpha1-pre
+make_release_upstream() {
+  local temp=$1
+  FIXTURE_REPOSITORY="$temp/upstream.git"
+  FIXTURE_WORK="$temp/work"
+  fixture_git init -q --bare -b trunk "$FIXTURE_REPOSITORY"
+  fixture_git init -q -b trunk "$FIXTURE_WORK"
+  C1=$(dated_commit "$FIXTURE_WORK" first 30 v1.0.0)
+  C2=$(dated_commit "$FIXTURE_WORK" second 20 v1.1.0)
+  C3=$(dated_commit "$FIXTURE_WORK" third 10 v1.2.0-rc1)
+  fixture_git -C "$FIXTURE_WORK" tag 0.9.0-alpha1-pre
+  C4=$(dated_commit "$FIXTURE_WORK" fourth 3 v1.2.0)
+  C5=$(dated_commit "$FIXTURE_WORK" fifth 1)
+  fixture_git -C "$FIXTURE_WORK" push -q --tags "$FIXTURE_REPOSITORY" trunk
+}
+
+# Git sources end detached at the release their follow mode picks, at least
+# MIN_RELEASE_AGE days old: the newest stable tag (`tag`; never an -rc or
+# -pre tag), the newest default-branch commit (`commit`) or the newest stable
+# tag with no delay (`tag-now`). A checkout on the branch (the 2026-10 layout)
+# moves, backwards if need be.
+test_follow_release_checkout_picks_by_mode_and_age() {
+  local temp out checkout
   temp=$(mktemp -d)
-  upstream="$temp/upstream.git"
-  work="$temp/work"
   git() { fixture_git "$@"; }
   github_origins_equivalent() { [[ $1 == "$2" ]]; }
+  fix_now
   DRY_RUN=0
-  fixture_git init -q --bare -b trunk "$upstream"
-  fixture_git init -q -b trunk "$work"
-  first=$(fixture_commit "$work" first)
-  fixture_commit "$work" second >/dev/null
-  fixture_git -C "$work" push -q "$upstream" trunk
-  # A missing checkout is cloned onto the default branch.
-  follow_default_branch "$upstream" "$temp/plugins/tool" tool >/dev/null
-  assert_equals "$(git -C "$temp/plugins/tool" symbolic-ref --short HEAD)" trunk
-  git_checkout_follows "$temp/plugins/tool" "$upstream" || fail "a fresh clone did not follow its default branch"
-  # A pinned (detached) checkout is reported, then moved onto the branch.
-  git -C "$temp/plugins/tool" checkout -q --detach "$first"
-  ! git_checkout_follows "$temp/plugins/tool" "$upstream" || fail "a detached checkout was accepted"
-  third=$(fixture_commit "$work" third)
-  fixture_git -C "$work" push -q "$upstream" trunk
-  out=$(follow_default_branch "$upstream" "$temp/plugins/tool" tool)
-  assert_contains "$out" "checkout --quiet -B trunk origin/trunk"
-  assert_equals "$(git -C "$temp/plugins/tool" symbolic-ref --short HEAD)" trunk
-  assert_equals "$(git -C "$temp/plugins/tool" rev-parse HEAD)" "$third"
-  git_checkout_follows "$temp/plugins/tool" "$upstream" || fail "the moved checkout did not follow its default branch"
-  # On the branch: a new upstream commit fast-forwards it.
-  head=$(fixture_commit "$work" fourth)
-  fixture_git -C "$work" push -q "$upstream" trunk
-  out=$(follow_default_branch "$upstream" "$temp/plugins/tool" tool)
-  assert_contains "$out" "merge --quiet --ff-only origin/trunk"
-  assert_equals "$(git -C "$temp/plugins/tool" rev-parse HEAD)" "$head"
-  # A dry run fetches nothing.
-  fixture_commit "$work" fifth >/dev/null
-  fixture_git -C "$work" push -q "$upstream" trunk
+  MIN_RELEASE_AGE=7
+  make_release_upstream "$temp"
+  checkout="$temp/plugins/tool"
+  FIXTURE_FOLLOW=tag
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "tool is now at v1.1.0 (the newest stable tag at least 7 days old)"
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$C2"
+  ! git -C "$checkout" symbolic-ref --quiet HEAD >/dev/null || fail "the checkout was left on a branch"
+  git_checkout_at_release "$checkout" "$FIXTURE_REPOSITORY" || fail "a checkout detached at its tag did not verify"
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "tool is at v1.1.0"
+  [[ $out != *"checkout --quiet"* ]] || fail "a checkout at its release was checked out again"
+  # A checkout on the default branch, at its head: moved back to the tag.
+  git -C "$checkout" checkout -q -B trunk origin/trunk
+  ! git_checkout_at_release "$checkout" "$FIXTURE_REPOSITORY" || fail "a checkout on a branch verified"
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "checkout --quiet --detach $C2"
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$C2"
+  # commit: the newest default-branch commit old enough, tagged or not.
+  FIXTURE_FOLLOW=commit
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "tool is now at $(git -C "$checkout" rev-parse --short "$C3") (the newest default-branch commit at least 7 days old)"
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$C3"
+  # tag-now: the newest stable tag, however new.
+  FIXTURE_FOLLOW='tag-now'
+  follow_release_checkout FIXTURE "$checkout" tool >/dev/null
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$C4"
+  # A shorter age admits newer releases; one longer than every release finds
+  # nothing and stops.
+  FIXTURE_FOLLOW=tag
+  MIN_RELEASE_AGE=0
+  fix_now
+  follow_release_checkout FIXTURE "$checkout" tool >/dev/null
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$C4"
+  MIN_RELEASE_AGE=40
+  fix_now
+  out=$( (follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a checkout with no release old enough passed"
+  assert_contains "$out" "has nothing to check out as the newest stable tag at least 40 days old"
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$C4"
+  # A fresh clone in dry-run is only described.
+  MIN_RELEASE_AGE=7
+  fix_now
   DRY_RUN=1
-  out=$(follow_default_branch "$upstream" "$temp/plugins/tool" tool)
-  assert_contains "$out" "Would fast-forward tool"
-  assert_equals "$(git -C "$temp/plugins/tool" rev-parse HEAD)" "$head"
+  out=$(follow_release_checkout FIXTURE "$temp/plugins/new" tool)
+  assert_contains "$out" "Would clone tool from $FIXTURE_REPOSITORY and check out the newest stable tag at least 7 days old"
+  [[ ! -e $temp/plugins/new ]] || fail "a dry run cloned"
+  rm -rf "$temp"
+}
+
+# Local work is never thrown away: uncommitted changes, or a checked-out
+# commit origin never had, stop the step with nothing changed. A force-push
+# upstream is not local work: the checkout moves on, and says why.
+test_follow_release_checkout_protects_local_work() {
+  local temp out checkout head rewritten
+  temp=$(mktemp -d)
+  git() { fixture_git "$@"; }
+  github_origins_equivalent() { [[ $1 == "$2" ]]; }
+  fix_now
   DRY_RUN=0
-  # Local work is never overwritten: uncommitted changes, or commits that
-  # are not on the default branch, stop the step.
-  printf 'local\n' >> "$temp/plugins/tool/history"
-  out=$( (follow_default_branch "$upstream" "$temp/plugins/tool" tool) 2>&1 ) && fail "a dirty checkout was updated"
+  MIN_RELEASE_AGE=0
+  make_release_upstream "$temp"
+  checkout="$temp/plugins/tool"
+  FIXTURE_FOLLOW=commit
+  follow_release_checkout FIXTURE "$checkout" tool >/dev/null
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$C5"
+  printf 'local\n' >> "$checkout/history"
+  out=$( (follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a dirty checkout was updated"
   assert_contains "$out" "tool checkout has local changes"
-  git -C "$temp/plugins/tool" checkout -q -- history
-  fixture_commit "$temp/plugins/tool" local >/dev/null
-  out=$( (follow_default_branch "$upstream" "$temp/plugins/tool" tool) 2>&1 ) && fail "a diverged checkout was updated"
-  assert_contains "$out" "tool has commits that are not on origin/trunk"
+  git -C "$checkout" checkout -q -- history
+  head=$(fixture_commit "$checkout" local)
+  out=$( (follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a checkout with a local commit was moved"
+  assert_contains "$out" "tool has commits that are not on $FIXTURE_REPOSITORY"
+  assert_contains "$out" "$head"
   [[ $out != *rewrote* ]] || fail "a local commit was blamed on upstream: $out"
-  # Upstream force-pushed: the checkout holds no local work, so the message
-  # says so and gives the reset to run; nothing is reset automatically.
-  git -C "$temp/plugins/tool" reset -q --hard origin/trunk
-  fixture_git -C "$work" reset -q --hard "$first"
-  third=$(fixture_commit "$work" rewritten)
-  fixture_git -C "$work" push -q --force "$upstream" trunk
-  head=$(git -C "$temp/plugins/tool" rev-parse HEAD)
-  out=$( (follow_default_branch "$upstream" "$temp/plugins/tool" tool) 2>&1 ) && fail "a force-pushed upstream was merged"
-  assert_contains "$out" "tool's upstream rewrote its history"
-  assert_contains "$out" "git -C '$temp/plugins/tool' reset --hard origin/trunk"
-  [[ $out != *"has commits that are not on"* ]] || fail "upstream's rewrite was blamed on local commits: $out"
-  assert_equals "$(git -C "$temp/plugins/tool" rev-parse HEAD)" "$head"
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$head"
+  # The dry run reports it too.
+  out=$( (DRY_RUN=1; follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a dry run accepted a local commit"
+  assert_contains "$out" "tool has commits that are not on"
+  git -C "$checkout" checkout -q --detach "$C5"
+  # Upstream force-pushes C5 away: the checkout held only origin's commits,
+  # so it moves to the new head and says upstream rewrote its history.
+  fixture_git -C "$FIXTURE_WORK" reset -q --hard "$C4"
+  rewritten=$(dated_commit "$FIXTURE_WORK" rewritten 1)
+  fixture_git -C "$FIXTURE_WORK" push -q --force "$FIXTURE_REPOSITORY" trunk
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "tool's upstream rewrote its history (a force-push)"
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$rewritten"
+  # A dry run fetches nothing.
+  dated_commit "$FIXTURE_WORK" sixth 0 >/dev/null
+  fixture_git -C "$FIXTURE_WORK" push -q "$FIXTURE_REPOSITORY" trunk
+  DRY_RUN=1
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "Would fetch tool and check out the newest default-branch commit at least 0 days old"
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$rewritten"
+  DRY_RUN=0
   # Anything else at the destination is refused.
   mkdir -p "$temp/plugins/plain"
-  out=$( (follow_default_branch "$upstream" "$temp/plugins/plain" plain) 2>&1 ) && fail "a non-Git directory was taken over"
+  out=$( (follow_release_checkout FIXTURE "$temp/plugins/plain" plain) 2>&1 ) && fail "a non-Git directory was taken over"
   assert_contains "$out" "plain exists but is not a Git checkout"
   rm -rf "$temp"
 }
 
-# git_checkout_follows: a clean checkout of the expected repository, on a
-# branch. verify_pyenv uses it, so a pinned checkout is repaired by the step.
-test_git_checkout_follows_rejects_detached_and_foreign_checkouts() {
+# A local tag is not evidence that origin has a commit: a fix committed and
+# tagged on the detached checkout stops the step before the fetch (which
+# prunes tags) deletes the tag and the checkout leaves the commit behind.
+test_follow_release_checkout_keeps_local_tags() {
+  local temp out checkout fix
+  temp=$(mktemp -d)
+  git() { fixture_git "$@"; }
+  github_origins_equivalent() { [[ $1 == "$2" ]]; }
+  fix_now
+  DRY_RUN=0
+  MIN_RELEASE_AGE=7
+  make_release_upstream "$temp"
+  checkout="$temp/plugins/tool"
+  FIXTURE_FOLLOW=tag
+  follow_release_checkout FIXTURE "$checkout" tool >/dev/null
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$C2"
+  fix=$(fixture_commit "$checkout" fix)
+  git -C "$checkout" tag my-fix
+  out=$( (follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a checkout at a locally tagged commit was moved"
+  assert_contains "$out" "tool has commits that are not on $FIXTURE_REPOSITORY"
+  assert_contains "$out" "HEAD at $fix; tag my-fix at $fix"
+  assert_contains "$out" "git -C $checkout tag -d <tag>"
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$fix"
+  assert_equals "$(git -C "$checkout" rev-parse --verify --quiet refs/tags/my-fix)" "$fix"
+  # Back at origin's release, the tag alone still holds the only copy.
+  git -C "$checkout" checkout -q --detach "$C2"
+  git -C "$checkout" tag -a -m 'annotated fix' my-fix-annotated "$fix"
+  out=$( (follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a local tag on a local commit was pruned"
+  assert_contains "$out" "(tag my-fix at $fix; tag my-fix-annotated at $fix)"
+  [[ $out != *"HEAD at"* ]] || fail "HEAD at origin's release was reported as local work: $out"
+  assert_equals "$(git -C "$checkout" rev-parse --verify --quiet 'refs/tags/my-fix-annotated^{commit}')" "$fix"
+  out=$( (DRY_RUN=1; follow_release_checkout FIXTURE "$checkout" tool) 2>&1 ) && fail "a dry run accepted a local tag"
+  assert_contains "$out" "tag my-fix at $fix"
+  # Kept on a branch, with the tags deleted, the step goes ahead and the
+  # branch survives.
+  git -C "$checkout" branch my-work "$fix"
+  git -C "$checkout" tag -d my-fix my-fix-annotated >/dev/null
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "tool is at v1.1.0"
+  assert_equals "$(git -C "$checkout" rev-parse my-work)" "$fix"
+  rm -rf "$temp"
+}
+
+# Origin's own tags are evidence: a release tagged on a commit that is on no
+# branch upstream is published, even when the checkout has no tag for it.
+test_follow_release_checkout_trusts_origin_tags() {
+  local temp out checkout side
+  temp=$(mktemp -d)
+  git() { fixture_git "$@"; }
+  github_origins_equivalent() { [[ $1 == "$2" ]]; }
+  fix_now
+  DRY_RUN=0
+  MIN_RELEASE_AGE=0
+  make_release_upstream "$temp"
+  fixture_git -C "$FIXTURE_WORK" checkout -q -b side "$C4"
+  side=$(dated_commit "$FIXTURE_WORK" side 0 v1.3.0)
+  fixture_git -C "$FIXTURE_WORK" push -q "$FIXTURE_REPOSITORY" refs/tags/v1.3.0
+  checkout="$temp/plugins/tool"
+  FIXTURE_FOLLOW=tag
+  follow_release_checkout FIXTURE "$checkout" tool >/dev/null
+  assert_equals "$(git -C "$checkout" rev-parse HEAD)" "$side"
+  [[ -z $(git -C "$checkout" branch -r --contains "$side") ]] || fail "the fixture's release is on a branch"
+  out=$(follow_release_checkout FIXTURE "$checkout" tool)
+  assert_contains "$out" "tool is at v1.3.0"
+  # Without the local tag the commit is still origin's.
+  git -C "$checkout" tag -d v1.3.0 >/dev/null
+  out=$(follow_release_checkout FIXTURE "$checkout" tool) || fail "a commit origin tags was taken for local work"
+  assert_contains "$out" "tool is at v1.3.0"
+  assert_equals "$(git -C "$checkout" rev-parse --verify --quiet 'refs/tags/v1.3.0^{commit}')" "$side"
+  rm -rf "$temp"
+}
+
+# Every Git source has a follow mode, and the modes are the ones chosen:
+# commits for the two plugins whose tags lag years behind, ruby-build's
+# definitions without delay.
+test_git_sources_have_follow_modes() {
+  assert_equals "$PYENV_FOLLOW $RBENV_FOLLOW $RUBY_BUILD_FOLLOW" "tag tag tag-now"
+  assert_equals "$ZSH_AUTOSUGGESTIONS_FOLLOW $ZSH_SYNTAX_HIGHLIGHTING_FOLLOW" "commit commit"
+  assert_equals "$ZSH_COMPLETIONS_FOLLOW $FZF_TAB_FOLLOW" "tag tag"
+  local tag
+  for tag in v1.2.3 0.36.0 v20261023 1; do
+    [[ $tag =~ $STABLE_TAG_PATTERN ]] || fail "stable tag $tag was rejected"
+  done
+  for tag in 0.8.0-alpha1-pre-redrawhook v1.2.0-rc1 1.0-pre v1.2. latest; do
+    [[ ! $tag =~ $STABLE_TAG_PATTERN ]] || fail "unstable tag $tag was accepted"
+  done
+}
+
+# git_checkout_at_release: a clean, detached checkout of the expected
+# repository. verify_pyenv uses it, so a checkout left on a branch (the
+# 2026-10 layout) is moved by the step, and inspect reports the move.
+test_git_checkout_at_release_rejects_branch_and_foreign_checkouts() {
   local temp first
   temp=$(mktemp -d)
   HOME="$temp/home"
   git() { fixture_git "$@"; }
+  fix_now
+  MIN_RELEASE_AGE=7
   mkdir -p "$HOME"
-  ! git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a missing checkout was accepted"
+  ! git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a missing checkout was accepted"
   fixture_git init -q -b master "$HOME/.pyenv"
   mkdir -p "$HOME/.pyenv/bin"
   printf '#!/bin/sh\n' > "$HOME/.pyenv/bin/pyenv"
   chmod +x "$HOME/.pyenv/bin/pyenv"
   fixture_git -C "$HOME/.pyenv" add bin/pyenv
   fixture_git -C "$HOME/.pyenv" commit -q -m first
-  first=$(fixture_commit "$HOME/.pyenv" second)
-  ! git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout without an origin was accepted"
-  git -C "$HOME/.pyenv" remote add origin git@github.com:PyEnv/pyenv.git
-  git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "an equivalent origin on a branch was rejected"
-  verify_pyenv || fail "verify_pyenv rejected a checkout on its branch"
+  first=$(dated_commit "$HOME/.pyenv" second 30 v2.8.0)
+  dated_commit "$HOME/.pyenv" third 2 v2.8.1 >/dev/null
   git -C "$HOME/.pyenv" checkout -q --detach "$first"
-  ! git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a detached HEAD was accepted"
-  ! verify_pyenv || fail "verify_pyenv accepted a pinned (detached) checkout"
+  ! git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout without an origin was accepted"
+  git -C "$HOME/.pyenv" remote add origin git@github.com:PyEnv/pyenv.git
+  git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a detached checkout of an equivalent origin was rejected"
+  verify_pyenv || fail "verify_pyenv rejected a checkout detached at its release"
   OS_FAMILY=apt
   SELECTED_STEPS=pyenv
   TARGET="$temp/profile"
-  assert_equals "$(report_tool_migrations)" $'migration\tgit-checkout\t'"$HOME/.pyenv"$'\tpyenv moves from a pinned commit to origin\'s default branch'
+  assert_equals "$(report_tool_migrations)" ""
   git -C "$HOME/.pyenv" checkout -q master
+  ! git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout on a branch was accepted"
+  ! verify_pyenv || fail "verify_pyenv accepted a checkout on its branch"
+  assert_equals "$(report_tool_migrations)" $'migration\tgit-checkout\t'"$HOME/.pyenv"$'\tpyenv moves from origin\'s default branch to tag v2.8.0 (the newest stable tag at least 7 days old), detached'
+  git -C "$HOME/.pyenv" checkout -q --detach "$first"
   printf 'local\n' >> "$HOME/.pyenv/history"
-  ! git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout with local changes was accepted"
+  ! git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout with local changes was accepted"
   git -C "$HOME/.pyenv" checkout -q -- history
   git -C "$HOME/.pyenv" remote set-url origin https://github.com/example/not-pyenv.git
-  ! git_checkout_follows "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout of another repository was accepted"
+  ! git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout of another repository was accepted"
   rm -rf "$temp"
 }
 
@@ -1799,9 +1983,14 @@ test_artifact_signatures_name_the_source_not_a_version() {
   assert_equals "$(signature_fnm)" '|formula|fnm|current-lts'
   RESOLVED_NODE_VERSION=v24.2.0
   assert_equals "$(signature_fnm)" '|formula|fnm|current-lts'
-  assert_equals "$(signature_plugins)" "|$TARGET|formula|starship|$ZSH_AUTOSUGGESTIONS_REPOSITORY|$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY|$ZSH_COMPLETIONS_REPOSITORY|$FZF_TAB_REPOSITORY|default-branch"
-  assert_equals "$(signature_pyenv)" "|$PYENV_REPOSITORY|default-branch"
-  assert_equals "$(signature_rbenv)" "|$RBENV_REPOSITORY|$RUBY_BUILD_REPOSITORY|default-branch"
+  assert_equals "$(signature_plugins)" "|$TARGET|formula|starship|$ZSH_AUTOSUGGESTIONS_REPOSITORY|$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY|$ZSH_COMPLETIONS_REPOSITORY|$FZF_TAB_REPOSITORY|release"
+  assert_equals "$(signature_pyenv)" "|$PYENV_REPOSITORY|release"
+  assert_equals "$(signature_rbenv)" "|$RBENV_REPOSITORY|$RUBY_BUILD_REPOSITORY|release"
+  # Nor the minimum release age: changing it re-runs nothing.
+  local before
+  before=$(step_signature plugins)
+  MIN_RELEASE_AGE=30
+  assert_equals "$(step_signature plugins)" "$before"
   OS_FAMILY=apt
   assert_equals "$(signature_bun)" $'|release|oven-sh/bun\tbun-linux-aarch64.zip'
   assert_equals "$(signature_fnm)" $'|release|Schniz/fnm\tfnm-arm64.zip|current-lts'
@@ -1900,14 +2089,21 @@ test_inspect_lists_every_selected_registry_artifact() {
   assert_contains "$output" $'artifact\tformula\tbun\tbun\tlatest'
   assert_contains "$output" $'artifact\tformula\tstarship\tstarship\tlatest'
   assert_contains "$output" $'artifact\tformula\tyarn\tyarn\tlatest'
-  assert_contains "$output" $'artifact\tgit\tpyenv\t'"$PYENV_REPOSITORY"$'\tdefault-branch'
-  assert_contains "$output" $'artifact\tgit\tfzf-tab\t'"$FZF_TAB_REPOSITORY"$'\tdefault-branch'
+  assert_contains "$output" $'artifact\tgit\tpyenv\t'"$PYENV_REPOSITORY"$'\ttag'
+  assert_contains "$output" $'artifact\tgit\tfzf-tab\t'"$FZF_TAB_REPOSITORY"$'\ttag'
+  assert_contains "$output" $'artifact\tgit\tzsh-autosuggestions\t'"$ZSH_AUTOSUGGESTIONS_REPOSITORY"$'\tcommit'
+  assert_contains "$output" $'policy\trelease-age\t7'
+  assert_contains "$output" $'warning\trelease-age-homebrew\tHomebrew formulae (bun, yarn, starship)'
+  [[ $output != *$'\nrelease\t'* ]] || fail "macOS listed a GitHub release for a formula"
   [[ $output != *$'\tfnm\t'* ]] || fail "an unselected artifact was listed"
   OS_FAMILY=apt
   uname() { if [[ ${1:-} == -m ]]; then printf 'aarch64\n'; else command uname "$@"; fi; }
   output=$(inspect_tsv)
   assert_contains "$output" $'artifact\tdirect\trpatool\t'"$RPATOOL_URL"$'\t'"$RPATOOL_SHA256"
   assert_contains "$output" $'artifact\trelease\tbun\tgithub.com/oven-sh/bun\tbun-linux-aarch64.zip'
+  # Offline (this suite's curl): the release is resolved during apply.
+  assert_contains "$output" $'release\tbun\tunresolved\t-\tresolve-during-apply'
+  assert_contains "$output" $'warning\trelease-age-npm\tnpm installs the latest yarn'
   assert_contains "$output" $'artifact\trelease\tstarship\tgithub.com/starship/starship\tstarship-aarch64-unknown-linux-musl.tar.gz'
   assert_contains "$output" $'artifact\tnpm\tyarn\tregistry.npmjs.org/yarn\tlatest'
   [[ $output != *$'artifact\tformula\t'* ]] || fail "Linux listed a Homebrew formula"
@@ -1916,7 +2112,8 @@ test_inspect_lists_every_selected_registry_artifact() {
   INSTALL_FONTS=yes
   FONT_NAME=Fixture
   output=$(inspect_tsv)
-  assert_contains "$output" $'artifact\trelease\tnerd-font\t'"$NERD_FONTS_RELEASE_URL/Fixture.tar.xz"$'\tSHA-256.txt'
+  assert_contains "$output" $'artifact\trelease\tnerd-font\tgithub.com/ryanoasis/nerd-fonts\tFixture.tar.xz'
+  assert_contains "$output" $'release\tnerd-font\tunresolved\t-\tresolve-during-apply'
   rm -rf "$temp"
 }
 
@@ -1955,7 +2152,8 @@ release_json_fixture() {
       "browser_download_url": "https://github.com/fixture/tool/releases/download/v1.4.2/tool-linux-arm64.tar.gz"
     },
     {"url":"https://api.github.com/repos/fixture/tool/releases/assets/12","id":12,"name":"tool-sha512.tar.gz","uploader":{"login":"fixture-bot"},"digest":"sha512:abcd","browser_download_url":"https://github.com/fixture/tool/releases/download/v1.4.2/tool-sha512.tar.gz"},
-    {"id":13,"name":"tool-mirror.tar.gz","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","browser_download_url":"https://mirror.example.invalid/tool-mirror.tar.gz"}
+    {"id":13,"name":"tool-mirror.tar.gz","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","browser_download_url":"https://mirror.example.invalid/tool-mirror.tar.gz"},
+    {"id":14,"name":"tool_1.4.2_Linux_arm64.tar.gz","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","browser_download_url":"https://github.com/fixture/tool/releases/download/v1.4.2/tool_1.4.2_Linux_arm64.tar.gz"}
   ],
   "body": "Changes: faster, smaller."
 }
@@ -1977,55 +2175,254 @@ test_github_release_asset_record_parses_release_json() {
     fail "an API error body produced a record"
 }
 
-# github_latest_asset fetches the latest release over HTTPS and accepts only
-# a GitHub download with a SHA-256 digest; GITHUB_TOKEN, when set, is sent on
-# curl's stdin, never in its argv. A failed lookup returns a status (4, or 5
-# for 403/429) instead of dying, so artifact_install can keep a good copy.
-test_github_latest_asset_requires_a_sha256_digest() {
-  local temp out status a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  temp=$(mktemp -d)
-  CURL_LOG="$temp/curl-argv"
+# A releases-list response (releases?per_page=30), newest first as GitHub
+# sends it, against FIXED_NOW (2026-11-12T12:00:00Z): a prerelease and a
+# draft (never picked), v1.5.1 (two days old), a non-prerelease with a -pre
+# tag (rejected by its tag), v1.4.2 (ten days old) and v1.4.1.
+releases_list_fixture() {
+  cat <<'JSON'
+[
+  {
+    "url": "https://api.github.com/repos/fixture/tool/releases/6",
+    "author": { "login": "fixture", "id": 1, "type": "User" },
+    "tag_name": "v1.6.0-beta.1", "target_commitish": "main", "name": "Beta",
+    "draft": false, "immutable": false, "prerelease": true,
+    "created_at": "2026-11-11T09:00:00Z", "updated_at": "2026-11-11T09:00:00Z",
+    "published_at": "2026-11-11T09:00:00Z",
+    "assets": [ { "name": "tool-linux-x64.tar.gz", "state": "uploaded", "created_at": "2026-11-11T09:00:00Z" } ],
+    "body": "Try it, \"draft\": false, \"prerelease\": false"
+  },
+  {
+    "tag_name": "v1.6.0", "name": "Next", "draft": true, "prerelease": false,
+    "created_at": "2026-10-01T00:00:00Z", "published_at": null, "assets": []
+  },
+  {
+    "tag_name": "v1.5.1", "name": "1.5.1", "draft": false, "prerelease": false,
+    "created_at": "2026-11-10T07:00:00Z", "published_at": "2026-11-10T08:00:00Z", "assets": []
+  },
+  {
+    "tag_name": "v1.5.0-pre", "name": "1.5.0 preview", "draft": false, "prerelease": false,
+    "created_at": "2026-11-01T00:00:00Z", "published_at": "2026-11-01T00:00:00Z", "assets": []
+  },
+  {
+    "tag_name": "v1.4.2", "name": "1.4.2", "draft": false, "prerelease": false,
+    "created_at": "2026-11-02T07:00:00Z", "published_at": "2026-11-02T08:00:00Z",
+    "assets": [ { "name": "tool-linux-x64.tar.gz", "uploader": { "login": "bot" }, "created_at": "2026-11-02T07:30:00Z" } ]
+  },
+  {"tag_name":"v1.4.1","draft":false,"prerelease":false,"created_at":"2026-10-20T00:00:00Z","published_at":"2026-10-20T00:00:00Z","assets":[]}
+]
+JSON
+}
+
+# fake_github_api <log>: a curl that serves the fixtures by URL and logs each
+# argv (and its stdin when it reads --config -): the releases list, release
+# v1.4.2 and an attestation answer with status ATTESTATION_STATUS (404 unless
+# set). FAKE_API_STATUS, when set, answers every request with that status.
+fake_github_api() {
+  CURL_LOG=$1
+  : > "$CURL_LOG"
   curl() {
     printf '<%s>' "$@" >> "$CURL_LOG"; printf '\n' >> "$CURL_LOG"
     [[ $1 != --config ]] || cat >> "$CURL_LOG.stdin"
-    release_json_fixture; printf '\n200'
+    local url
+    for url in "$@"; do :; done
+    if [[ -n ${FAKE_API_STATUS:-} ]]; then printf '{}\n%s' "$FAKE_API_STATUS"; return 0; fi
+    case $url in
+      */releases\?per_page=30) releases_list_fixture; printf '\n200' ;;
+      */releases/tags/v1.4.2) release_json_fixture; printf '\n200' ;;
+      */attestations/*) printf '{"attestations": []}\n%s' "${ATTESTATION_STATUS:-404}" ;;
+      *) printf '{"message": "Not Found"}\n404' ;;
+    esac
   }
-  unset GITHUB_TOKEN
-  out=$(github_latest_asset fixture/tool tool-linux-x64.tar.gz) || fail "a published SHA-256 digest was refused"
-  assert_equals "$out" $'v1.4.2\thttps://github.com/fixture/tool/releases/download/v1.4.2/tool-linux-x64.tar.gz\t'"$a"
+}
+
+# Drafts and prereleases are never candidates, nor a release whose tag is not
+# a plain version; the rest come newest first.
+test_release_candidates_skip_drafts_prereleases_and_pre_tags() {
+  assert_equals "$(releases_list_fixture | github_release_candidates)" \
+    $'v1.5.1\t2026-11-10T08:00:00Z\nv1.4.2\t2026-11-02T08:00:00Z\nv1.4.1\t2026-10-20T00:00:00Z'
+  # Compact JSON parses the same, and so do bun's prefixed tags.
+  assert_equals "$(releases_list_fixture | tr -d '\n' | github_release_candidates | sed -n '1p')" $'v1.5.1\t2026-11-10T08:00:00Z'
+  assert_equals "$(printf '[{"tag_name":"bun-v1.3.2","draft":false,"prerelease":false,"published_at":"2026-10-01T00:00:00Z"},{"tag_name":"canary","draft":false,"prerelease":false,"published_at":"2026-11-11T00:00:00Z"}]' | github_release_candidates)" \
+    $'bun-v1.3.2\t2026-10-01T00:00:00Z'
+  assert_equals "$(printf '{"message": "Not Found"}' | github_release_candidates)" ""
+}
+
+# github_release_pick takes the newest release published at least
+# MIN_RELEASE_AGE days ago, then reads that release for the asset's URL and
+# GitHub's SHA-256 digest; once per repository and asset per run. The token
+# goes on curl's stdin, never in its argv.
+test_release_pick_takes_the_newest_release_old_enough() {
+  local temp out status a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  temp=$(mktemp -d)
+  fix_now
+  MIN_RELEASE_AGE=7
+  fake_github_api "$temp/curl-argv"
+  github_release_pick fixture/tool tool-linux-x64.tar.gz || fail "the pick failed with status $?"
+  assert_equals "$RELEASE_TAG|$RELEASE_PUBLISHED|$RELEASE_URL|$RELEASE_SHA" \
+    "v1.4.2|2026-11-02T08:00:00Z|https://github.com/fixture/tool/releases/download/v1.4.2/tool-linux-x64.tar.gz|$a"
+  assert_equals "$RELEASE_CUTOFF_ISO" 2026-11-05T12:00:00Z
   assert_contains "$(cat "$CURL_LOG")" '<--proto><=https><--tlsv1.2>'
-  assert_contains "$(cat "$CURL_LOG")" '<https://api.github.com/repos/fixture/tool/releases/latest>'
-  [[ $(cat "$CURL_LOG") != *Authorization* && ! -e $CURL_LOG.stdin ]] || fail "an Authorization header was sent without GITHUB_TOKEN"
+  assert_contains "$(sed -n '1p' "$CURL_LOG")" '<https://api.github.com/repos/fixture/tool/releases?per_page=30>'
+  assert_contains "$(sed -n '2p' "$CURL_LOG")" '<https://api.github.com/repos/fixture/tool/releases/tags/v1.4.2>'
+  [[ $(cat "$CURL_LOG") != *Authorization* && ! -e $CURL_LOG.stdin ]] || fail "an Authorization header was sent without a token"
+  # Cached: the same pick asks GitHub nothing.
   : > "$CURL_LOG"
-  GITHUB_TOKEN=fixture-token github_latest_asset fixture/tool tool-linux-x64.tar.gz >/dev/null
+  RELEASE_TAG=""
+  github_release_pick fixture/tool tool-linux-x64.tar.gz
+  assert_equals "$RELEASE_TAG|$RELEASE_SHA" "v1.4.2|$a"
+  [[ ! -s $CURL_LOG ]] || fail "a cached pick asked GitHub again: $(cat "$CURL_LOG")"
+  # Age 0 admits v1.5.1 (never the prerelease, the draft or the -pre tag);
+  # an age older than every release finds none.
+  RELEASE_TAG_CACHE=""
+  MIN_RELEASE_AGE=0
+  fix_now
+  github_release_tag_pick fixture/tool
+  assert_equals "$RELEASE_TAG" v1.5.1
+  RELEASE_TAG_CACHE=""
+  MIN_RELEASE_AGE=365
+  fix_now
+  status=0; github_release_tag_pick fixture/tool || status=$?
+  assert_equals "$status" "$GITHUB_LOOKUP_TOO_NEW"
+  # A token: GITHUB_TOKEN, else gh's when it is logged in; on curl's stdin.
+  MIN_RELEASE_AGE=7
+  fix_now
+  RELEASE_TAG_CACHE=""
+  GITHUB_API_TOKEN_RESOLVED=0
+  GITHUB_TOKEN=fixture-token
+  : > "$CURL_LOG"
+  github_release_tag_pick fixture/tool
   assert_contains "$(cat "$CURL_LOG")" '<--config><->'
-  [[ $(cat "$CURL_LOG") != *fixture-token* ]] || fail "GITHUB_TOKEN was passed in curl's argv: $(cat "$CURL_LOG")"
+  [[ $(cat "$CURL_LOG") != *fixture-token* ]] || fail "the token was passed in curl's argv: $(cat "$CURL_LOG")"
   assert_equals "$(cat "$CURL_LOG.stdin")" 'header = "Authorization: Bearer fixture-token"'
-  out=$( (github_latest_asset fixture/tool tool-linux-arm64.tar.gz) 2>&1 ) && fail "an asset with a null digest was accepted"
+  unset GITHUB_TOKEN
+  rm -f "$CURL_LOG.stdin"
+  RELEASE_TAG_CACHE=""
+  GITHUB_API_TOKEN_RESOLVED=0
+  GITHUB_API_TOKEN=""
+  GH_LOGGED_IN=""
+  gh() { [[ $* == 'auth token --hostname github.com' ]] && printf 'gh-token\n'; }
+  github_release_tag_pick fixture/tool
+  assert_equals "$(cat "$CURL_LOG.stdin")" 'header = "Authorization: Bearer gh-token"'
+  # Unreachable, refused (the rate limit's 403, or 429) and a missing
+  # repository: a status and no exit, so an installed copy can be kept.
+  GITHUB_API_TOKEN=""
+  for status in 000:"$GITHUB_LOOKUP_UNREACHABLE" 403:"$GITHUB_LOOKUP_REFUSED" 429:"$GITHUB_LOOKUP_REFUSED" \
+    404:"$GITHUB_LOOKUP_UNREACHABLE" 502:"$GITHUB_LOOKUP_UNREACHABLE"; do
+    RELEASE_TAG_CACHE=""
+    FAKE_API_STATUS=${status%%:*}
+    out=0; github_release_pick fixture/tool tool-linux-x64.tar.gz || out=$?
+    assert_equals "$FAKE_API_STATUS:$out" "$status"
+  done
+  unset FAKE_API_STATUS
+  # A release that does not publish the asset properly stops the run.
+  RELEASE_TAG_CACHE=""
+  out=$( (github_release_pick fixture/tool tool-linux-arm64.tar.gz) 2>&1 ) && fail "an asset with a null digest was accepted"
   assert_contains "$out" "GitHub publishes no SHA-256 digest for tool-linux-arm64.tar.gz in fixture/tool v1.4.2"
-  out=$( (github_latest_asset fixture/tool tool-sha512.tar.gz) 2>&1 ) && fail "a non-SHA-256 digest was accepted"
+  out=$( (github_release_pick fixture/tool tool-sha512.tar.gz) 2>&1 ) && fail "a non-SHA-256 digest was accepted"
   assert_contains "$out" "no SHA-256 digest"
-  out=$( (github_latest_asset fixture/tool tool-mirror.tar.gz) 2>&1 ) && fail "a download outside github.com was accepted"
+  out=$( (github_release_pick fixture/tool tool-mirror.tar.gz) 2>&1 ) && fail "a download outside github.com was accepted"
   assert_contains "$out" "Unexpected download URL"
-  out=$( (github_latest_asset fixture/tool tool-linux-riscv64.tar.gz) 2>&1 ) && fail "a missing asset was accepted"
-  assert_contains "$out" "The latest fixture/tool release has no tool-linux-riscv64.tar.gz"
-  # Unreachable (curl fails; --write-out still prints 000) and refused (the
-  # rate limit's 403, or 429): a status, no output, no exit.
-  curl() { printf '\n000'; return 7; }
-  status=0; out=$(github_latest_asset fixture/tool tool-linux-x64.tar.gz) || status=$?
-  assert_equals "$status:$out" "$GITHUB_LOOKUP_UNREACHABLE:"
-  curl() { printf '{"message": "API rate limit exceeded"}\n403'; }
-  status=0; out=$(github_latest_asset fixture/tool tool-linux-x64.tar.gz) || status=$?
-  assert_equals "$status:$out" "$GITHUB_LOOKUP_REFUSED:"
-  curl() { printf '{}\n429'; }
-  status=0; github_latest_asset fixture/tool tool-linux-x64.tar.gz >/dev/null || status=$?
-  assert_equals "$status" "$GITHUB_LOOKUP_REFUSED"
+  out=$( (github_release_pick fixture/tool tool-linux-riscv64.tar.gz) 2>&1 ) && fail "a missing asset was accepted"
+  assert_contains "$out" "The fixture/tool release v1.4.2 has no tool-linux-riscv64.tar.gz"
   rm -rf "$temp"
 }
 
-# When GitHub cannot be read, a release tool that is installed and verifies is
-# kept with a warning; without one the run stops, naming GITHUB_TOKEN when the
-# API refused (the anonymous rate limit).
+# Asset templates (gum's assets carry the version and platform in the name):
+# {version} is the tag's version, {os} Linux or Darwin, {arch} x86_64 or
+# arm64, whatever uname -m calls it.
+test_release_asset_templates_expand() {
+  local temp
+  temp=$(mktemp -d)
+  uname() {
+    case ${1:-} in
+      -m) printf '%s\n' "$FAKE_MACHINE" ;;
+      -s) printf '%s\n' "$FAKE_SYSTEM" ;;
+      *) command uname "$@" ;;
+    esac
+  }
+  FAKE_SYSTEM=Linux FAKE_MACHINE=aarch64
+  assert_equals "$(release_asset_name 'gum_{version}_{os}_{arch}.tar.gz' v0.17.0)" gum_0.17.0_Linux_arm64.tar.gz
+  FAKE_MACHINE=x86_64
+  assert_equals "$(release_asset_name 'gum_{version}_{os}_{arch}.tar.gz' v0.17.0)" gum_0.17.0_Linux_x86_64.tar.gz
+  FAKE_SYSTEM=Darwin FAKE_MACHINE=arm64
+  assert_equals "$(release_asset_name 'gum_{version}_{os}_{arch}.tar.gz' v0.17.0)" gum_0.17.0_Darwin_arm64.tar.gz
+  assert_equals "$(release_asset_name bun-linux-x64.zip bun-v1.3.2)" bun-linux-x64.zip
+  # A pick with a template finds the expanded asset in the picked release.
+  FAKE_SYSTEM=Linux FAKE_MACHINE=aarch64
+  fix_now
+  MIN_RELEASE_AGE=7
+  fake_github_api "$temp/curl-argv"
+  github_release_pick fixture/tool 'tool_{version}_{os}_{arch}.tar.gz'
+  assert_equals "$RELEASE_URL" https://github.com/fixture/tool/releases/download/v1.4.2/tool_1.4.2_Linux_arm64.tar.gz
+  rm -rf "$temp"
+}
+
+# Attestations, after the digest check and only when gh is logged in: a
+# repository that publishes none for the file (404) relies on the digest; one
+# that does must have `gh attestation verify` pass, or nothing is installed.
+test_release_attestation_is_checked_when_published() {
+  local temp out sha
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME" "$temp/source"
+  printf '#!/bin/sh\nprintf "starship 1.23.0\\n"\n' > "$temp/source/starship"
+  chmod 755 "$temp/source/starship"
+  TEST_ARCHIVE="$temp/starship.tar.gz"
+  tar -czf "$TEST_ARCHIVE" -C "$temp/source" starship
+  sha=$(sha256 "$TEST_ARCHIVE")
+  DRY_RUN=0
+  fake_github_api "$temp/curl-argv"
+  GH_LOG="$temp/gh.log"
+  gh() {
+    [[ $* != 'attestation verify --help' ]] || return "${GH_ATTESTATION_SUPPORTED:-0}"
+    printf '%s\n' "$*" >> "$GH_LOG"
+    [[ $1 != attestation ]] || return "${GH_VERIFY_STATUS:-0}"
+  }
+  download_verified() { mkdir -p "$(dirname -- "$3")"; cp "$TEST_ARCHIVE" "$3"; }
+  # Logged out: the digest alone, and GitHub is not asked.
+  GH_LOGGED_IN=no
+  install_archive_binary starship tar.gz https://example.invalid/s.tar.gz "$sha" "$HOME/.local/bin/starship" starship/starship
+  assert_equals "$RELEASE_VERIFIED_BY" digest
+  [[ ! -s $CURL_LOG && ! -e $GH_LOG ]] || fail "attestations were looked up while gh is logged out"
+  # Logged in, none published: the digest alone.
+  GH_LOGGED_IN=yes
+  ATTESTATION_STATUS=404
+  install_archive_binary starship tar.gz https://example.invalid/s.tar.gz "$sha" "$HOME/.local/bin/starship" starship/starship
+  assert_equals "$RELEASE_VERIFIED_BY" digest
+  assert_contains "$(cat "$CURL_LOG")" "<https://api.github.com/repos/starship/starship/attestations/sha256:$sha>"
+  [[ ! -e $GH_LOG ]] || fail "gh attestation verify ran for a repository without attestations"
+  # Published and verified.
+  ATTESTATION_STATUS=200
+  install_archive_binary starship tar.gz https://example.invalid/s.tar.gz "$sha" "$HOME/.local/bin/starship" starship/starship
+  assert_equals "$RELEASE_VERIFIED_BY" attestation
+  assert_contains "$(cat "$GH_LOG")" "attestation verify "
+  assert_contains "$(cat "$GH_LOG")" "/starship.tar.gz --repo starship/starship"
+  # A gh too old for `gh attestation` says so and relies on the digest.
+  GH_ATTESTATION_SUPPORTED=1
+  out=$(install_archive_binary starship tar.gz https://example.invalid/s.tar.gz "$sha" "$HOME/.local/bin/starship" starship/starship 2>&1)
+  assert_contains "$out" "this gh cannot verify them"
+  GH_ATTESTATION_SUPPORTED=0
+  # Published but not verifying: nothing is installed.
+  rm -f "$HOME/.local/bin/starship"
+  GH_VERIFY_STATUS=1
+  out=$( (install_archive_binary starship tar.gz https://example.invalid/s.tar.gz "$sha" "$HOME/.local/bin/starship" starship/starship) 2>&1 ) &&
+    fail "an archive failing its attestation was installed"
+  assert_contains "$out" "starship.tar.gz does not verify against starship/starship's attestation; nothing was installed"
+  [[ ! -e $HOME/.local/bin/starship ]] || fail "an archive failing its attestation was installed"
+  # GitHub cannot say whether there is one: stop rather than guess.
+  GH_VERIFY_STATUS=0
+  ATTESTATION_STATUS=502
+  out=$( (install_archive_binary starship tar.gz https://example.invalid/s.tar.gz "$sha" "$HOME/.local/bin/starship" starship/starship) 2>&1 ) &&
+    fail "an unreadable attestation answer was accepted"
+  assert_contains "$out" "Could not read starship/starship's attestations"
+  [[ ! -e $HOME/.local/bin/starship ]] || fail "starship was installed without an attestation answer"
+  rm -rf "$temp"
+}
+
+# When no release can be picked (GitHub unreachable or refusing, or every
+# recent release too new), a release tool that is installed and verifies is
+# kept with a warning; without one the run stops and says what to do.
 test_release_lookup_failure_keeps_a_verified_install() {
   local temp out status=0
   temp=$(mktemp -d)
@@ -2033,31 +2430,151 @@ test_release_lookup_failure_keeps_a_verified_install() {
   mkdir -p "$HOME/.local/bin"
   OS_FAMILY=apt
   DRY_RUN=0
+  fix_now
+  MIN_RELEASE_AGE=7
   uname() { if [[ ${1:-} == -m ]]; then printf 'x86_64\n'; else command uname "$@"; fi; }
-  download_verified() { fail "downloaded without a release lookup"; }
-  github_latest_asset() { return "$GITHUB_LOOKUP_UNREACHABLE"; }
+  download_verified() { fail "downloaded without a release"; }
+  fake_github_api "$temp/curl-argv"
+  FAKE_API_STATUS=000
   printf '#!/bin/sh\nprintf "starship 1.22.0\\n"\n' > "$HOME/.local/bin/starship"
   chmod 755 "$HOME/.local/bin/starship"
   out=$(artifact_install starship 2>&1) || fail "an installed, verified starship failed the run: $out"
-  assert_contains "$out" "kept the installed starship; could not reach GitHub releases"
-  github_latest_asset() { return "$GITHUB_LOOKUP_REFUSED"; }
+  assert_contains "$out" "kept the installed starship: could not read starship/starship's releases from GitHub"
+  FAKE_API_STATUS=403
   out=$(artifact_install starship 2>&1) || fail "a rate-limited lookup failed a verified starship: $out"
+  assert_contains "$out" "kept the installed starship: GitHub refused the request"
+  unset FAKE_API_STATUS
+  MIN_RELEASE_AGE=365
+  fix_now
+  out=$(artifact_install starship 2>&1) || fail "a run of new releases failed a verified starship: $out"
+  assert_contains "$out" "kept the installed starship: none of starship/starship's 30 newest releases is at least 365 days old"
   # Nothing installed: the run stops with the reason.
   rm -f "$HOME/.local/bin/starship"
+  out=$( (artifact_install starship) 2>&1 ) && fail "no release old enough installed nothing and passed"
+  assert_contains "$out" "Rerun with a smaller --min-release-age"
+  MIN_RELEASE_AGE=7
+  fix_now
+  FAKE_API_STATUS=403
   out=$( (artifact_install starship) 2>&1 ) || status=$?
   assert_equals "$status" 1
   assert_contains "$out" "rate limit"
   assert_contains "$out" "GITHUB_TOKEN"
-  github_latest_asset() { return "$GITHUB_LOOKUP_UNREACHABLE"; }
+  FAKE_API_STATUS=000
   out=$( (artifact_install starship) 2>&1 ) && fail "an unreachable GitHub installed nothing and passed"
-  assert_contains "$out" "Could not read the latest starship/starship release from GitHub"
+  assert_contains "$out" "could not read starship/starship's releases from GitHub; check the network"
   [[ $out != *GITHUB_TOKEN* ]] || fail "an unreachable GitHub was blamed on the rate limit"
   # A release that publishes no usable asset still fails, even with a copy.
+  unset FAKE_API_STATUS
   printf '#!/bin/sh\nprintf "starship 1.22.0\\n"\n' > "$HOME/.local/bin/starship"
   chmod 755 "$HOME/.local/bin/starship"
-  github_latest_asset() { die "GitHub publishes no SHA-256 digest for x"; }
-  out=$( (artifact_install starship) 2>&1 ) && fail "a release without a digest kept passing"
-  assert_contains "$out" "no SHA-256 digest"
+  out=$( (artifact_install starship) 2>&1 ) && fail "a release without the asset kept passing"
+  assert_contains "$out" "has no starship-x86_64-unknown-linux-musl.tar.gz"
+  rm -rf "$temp"
+}
+
+# inspect names the release each Linux release tool resolves to now and how
+# it will be verified: the attestation when gh is logged in and the project
+# publishes one for the asset, otherwise GitHub's digest.
+test_inspect_reports_the_picked_release() {
+  local temp output
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  mkdir -p "$HOME"
+  OS_FAMILY=apt
+  fix_now
+  MIN_RELEASE_AGE=7
+  SELECTED_STEPS=plugins
+  REQUESTED_STEPS=plugins
+  SELECTED_GROUPS=""
+  REQUESTED_GROUPS=""
+  verify_step() { return 1; }
+  uname() { if [[ ${1:-} == -m ]]; then printf 'x86_64\n'; else command uname "$@"; fi; }
+  artifact_release_asset() { printf 'fixture/tool\ttool-linux-x64.tar.gz\n'; }
+  fake_github_api "$temp/curl-argv"
+  output=$(inspect_tsv)
+  assert_contains "$output" $'policy\trelease-age\t7'
+  assert_contains "$output" $'release\tstarship\tv1.4.2\t2026-11-02T08:00:00Z\tdigest'
+  [[ $(cat "$CURL_LOG") != *attestations* ]] || fail "inspect asked for attestations while gh is logged out"
+  GH_LOGGED_IN=yes
+  ATTESTATION_STATUS=200
+  output=$(inspect_tsv)
+  assert_contains "$output" $'release\tstarship\tv1.4.2\t2026-11-02T08:00:00Z\tattestation'
+  # The age comes from the option: with none, v1.5.1 is the pick; the asset
+  # lookup for it fails here, so inspect reports it unresolved instead of
+  # stopping.
+  MIN_RELEASE_AGE=0
+  fix_now
+  output=$(inspect_tsv 2>/dev/null)
+  assert_contains "$output" $'policy\trelease-age\t0'
+  assert_contains "$output" $'release\tstarship\tunresolved\t-\tresolve-during-apply'
+  rm -rf "$temp"
+}
+
+# Signatures never name a release: a new upstream release (and the pick
+# moving to it) leaves every recorded step valid.
+test_signatures_are_unchanged_by_a_new_upstream_release() {
+  local temp step i=0
+  local -a before=() after=()
+  temp=$(mktemp -d)
+  OS_FAMILY=apt
+  TARGET=/fixture/profile
+  INSTALL_FONTS=yes
+  FONT_NAME=Fixture
+  NODE_POLICY=current-lts
+  uname() { if [[ ${1:-} == -m ]]; then printf 'x86_64\n'; else command uname "$@"; fi; }
+  fix_now
+  MIN_RELEASE_AGE=7
+  fake_github_api "$temp/curl-argv"
+  github_release_tag_pick fixture/tool
+  assert_equals "$RELEASE_TAG" v1.4.2
+  for step in pyenv rbenv bun fnm uv plugins fonts; do before+=("$(step_signature "$step")"); done
+  # A week later v1.5.1 is old enough and becomes the pick.
+  FIXED_NOW=$(( FIXED_NOW + 7 * 86400 ))
+  fix_now
+  RELEASE_TAG_CACHE=""
+  github_release_tag_pick fixture/tool
+  assert_equals "$RELEASE_TAG" v1.5.1
+  NERD_FONTS_RELEASE_BASE="$NERD_FONTS_DOWNLOAD_URL/v3.5.0"
+  for step in pyenv rbenv bun fnm uv plugins fonts; do after+=("$(step_signature "$step")"); done
+  for step in pyenv rbenv bun fnm uv plugins fonts; do
+    assert_equals "$step:${after[$i]}" "$step:${before[$i]}"
+    i=$(( i + 1 ))
+  done
+  rm -rf "$temp"
+}
+
+# --min-release-age: a whole number of days from 0 to 365, saved as the
+# profile's release-age row; a profile without the row (written before it
+# existed) means 7.
+test_min_release_age_is_validated_and_saved() {
+  local temp value
+  temp=$(mktemp -d)
+  for value in 0 7 30 365; do
+    MIN_RELEASE_AGE=$value
+    validate_options || fail "--min-release-age $value was rejected"
+  done
+  for value in -1 366 1000 7d 1.5 '' 007 ' 7'; do
+    MIN_RELEASE_AGE=$value
+    ! (validate_options) >/dev/null 2>&1 || fail "--min-release-age '$value' was accepted"
+  done
+  parse_args apply --min-release-age 14
+  assert_equals "$MIN_RELEASE_AGE" 14
+  LOCAL_DIR="$temp/local"
+  PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
+  DRY_RUN=0
+  write_profile
+  assert_equals "$(awk -F '\t' '$1 == "release-age" { print $2 }' "$PROFILE_FILE")" 14
+  MIN_RELEASE_AGE=7
+  read_profile
+  assert_equals "$MIN_RELEASE_AGE" 14
+  grep -v '^release-age' "$PROFILE_FILE" > "$temp/old" && cat "$temp/old" > "$PROFILE_FILE"
+  MIN_RELEASE_AGE=30
+  read_profile
+  assert_equals "$MIN_RELEASE_AGE" 7
+  printf 'release-age\t400\n' >> "$PROFILE_FILE"
+  ! (read_profile) >/dev/null 2>&1 || fail "a saved release-age of 400 was accepted"
+  # reconcile takes the saved value, not an option.
+  ! (parse_args reconcile --yes --min-release-age 3) >/dev/null 2>&1 || fail "reconcile accepted --min-release-age"
   rm -rf "$temp"
 }
 
@@ -2068,7 +2585,8 @@ test_release_version_strips_the_tag_prefix() {
 }
 
 # A Linux release install downloads only when the installed version is not
-# the latest release, and checks the result reports that version.
+# the picked release, and checks the result reports that version. A newer
+# installed copy is replaced too: the pick is what the release age allows.
 test_release_install_skips_the_installed_latest_version() {
   local temp out
   temp=$(mktemp -d)
@@ -2079,9 +2597,12 @@ test_release_install_skips_the_installed_latest_version() {
   OS_FAMILY=apt
   DRY_RUN=0
   uname() { if [[ ${1:-} == -m ]]; then printf 'x86_64\n'; else command uname "$@"; fi; }
-  github_latest_asset() {
+  github_release_pick() {
     printf '%s %s\n' "$1" "$2" >> "$RELEASE_FIXTURE/latest.log"
-    printf 'v1.23.0\thttps://github.com/starship/starship/releases/download/v1.23.0/%s\t%s\n' "$2" "$(printf x | hash_text)"
+    RELEASE_TAG=v1.23.0
+    RELEASE_PUBLISHED=2026-11-01T00:00:00Z
+    RELEASE_URL="https://github.com/starship/starship/releases/download/v1.23.0/$2"
+    RELEASE_SHA=$(printf x | hash_text)
   }
   download_verified() {
     printf '%s %s\n' "$1" "$2" >> "$RELEASE_FIXTURE/download.log"
@@ -2095,13 +2616,16 @@ test_release_install_skips_the_installed_latest_version() {
   # The latest version is installed: nothing is downloaded.
   fake_starship "$HOME/.local/bin/starship" 1.23.0
   out=$(artifact_install starship)
-  assert_contains "$out" "starship 1.23.0 is the latest release and already installed"
+  assert_contains "$out" "starship 1.23.0 is already installed (the newest release at least 7 days old, published 2026-11-01T00:00:00Z)"
   assert_equals "$(cat "$temp/latest.log")" "starship/starship starship-x86_64-unknown-linux-musl.tar.gz"
   [[ ! -e $temp/download.log ]] || fail "the installed latest release was downloaded again"
   # An older one is replaced with the verified latest.
   fake_starship "$HOME/.local/bin/starship" 1.22.0
   artifact_install starship >/dev/null
   assert_equals "$(cat "$temp/download.log")" "https://github.com/starship/starship/releases/download/v1.23.0/starship-x86_64-unknown-linux-musl.tar.gz $(printf x | hash_text)"
+  assert_equals "$("$HOME/.local/bin/starship" --version)" "starship 1.23.0"
+  fake_starship "$HOME/.local/bin/starship" 1.24.0
+  artifact_install starship >/dev/null
   assert_equals "$("$HOME/.local/bin/starship" --version)" "starship 1.23.0"
   # A download that does not report the release's version fails the install.
   fake_starship "$HOME/.local/bin/starship" 1.22.0
@@ -2113,8 +2637,8 @@ test_release_install_skips_the_installed_latest_version() {
   : > "$temp/latest.log"
   DRY_RUN=1
   out=$(artifact_install starship)
-  assert_contains "$out" "Would install the latest starship release (starship-x86_64-unknown-linux-musl.tar.gz from github.com/starship/starship)"
-  [[ ! -s $temp/latest.log ]] || fail "a dry run asked GitHub for the latest release"
+  assert_contains "$out" "Would install the newest starship release at least 7 days old (starship-x86_64-unknown-linux-musl.tar.gz from github.com/starship/starship)"
+  [[ ! -s $temp/latest.log ]] || fail "a dry run asked GitHub for a release"
   # A CPU upstream publishes no build for stops with that reason.
   DRY_RUN=0
   uname() { if [[ ${1:-} == -m ]]; then printf 'riscv64\n'; else command uname "$@"; fi; }
@@ -2781,8 +3305,10 @@ test_success_names_the_terminal_font_and_wsl_action() {
   DRY_RUN=0
   install_nerd_font() { :; }
   is_wsl() { return 0; }
+  # The Windows download comes from the release the Linux font came from.
+  NERD_FONTS_RELEASE_BASE="$NERD_FONTS_DOWNLOAD_URL/v3.4.0"
   install_fonts 2>/dev/null
-  assert_contains "$PENDING_MANUAL_ACTIONS" $'manual-action\tinstall-windows-font\t'"$XDG_DATA_HOME/fonts/NerdFonts"$'\t'"$NERD_FONTS_RELEASE_URL/CascadiaCode.zip"
+  assert_contains "$PENDING_MANUAL_ACTIONS" $'manual-action\tinstall-windows-font\t'"$XDG_DATA_HOME/fonts/NerdFonts"$'\t'"$NERD_FONTS_DOWNLOAD_URL/v3.4.0/CascadiaCode.zip"
   rm -rf "$temp"
 }
 
@@ -2810,46 +3336,53 @@ test_unexpected_failures_never_exit_2_or_3() {
 # resolved once, so a release published mid-run cannot pair them wrongly. The
 # font signature keeps its old URL text, so installs do not re-run.
 test_nerd_font_release_is_resolved_once() {
-  local temp
+  local temp err
   temp=$(mktemp -d)
   make_font_release "$temp/release" || { rm -rf "$temp"; return 0; }
   unset NERD_FONTS_TEST_RELEASE_URL
   HOME="$temp/home"
   OS_FAMILY=apt
   DRY_RUN=0
-  NERD_FONT_TAG=v3.4.0
+  fix_now
+  MIN_RELEASE_AGE=7
+  # v3.5.0 is two days old; v3.4.0 is the newest at least a week old.
+  NERD_FONT_RELEASES='[{"tag_name":"v3.5.0","draft":false,"prerelease":false,"published_at":"2026-11-10T00:00:00Z"},{"tag_name":"v3.4.0","draft":false,"prerelease":false,"published_at":"2026-10-01T00:00:00Z"}]'
   curl() {
     [[ ${1:-} == --help ]] && return 0
-    local out="" want=0 a url="" redirect=0
+    local out="" want=0 a url=""
     for a in "$@"; do
       [[ $want == 1 ]] && { out=$a; want=0; continue; }
       [[ $a == --output ]] && want=1
-      [[ $a == *redirect_url* ]] && redirect=1
       url=$a
     done
     printf '%s\n' "$url" >> "$FONT_RELEASE_DIR/curl.log"
-    if (( redirect )); then
-      printf 'https://github.com/ryanoasis/nerd-fonts/releases/tag/%s' "$NERD_FONT_TAG"
+    if [[ $url == https://api.github.com/* ]]; then
+      printf '%s\n200' "$NERD_FONT_RELEASES"
       return 0
     fi
     cp "$FONT_RELEASE_DIR/${url##*/}" "$out"
   }
   NERD_FONTS_CHECKSUMS_FILE="$temp/SHA-256.txt"
   fetch_nerd_font_checksums "$NERD_FONTS_CHECKSUMS_FILE"
-  NERD_FONT_TAG=v3.5.0   # a release published in between is not used
+  # A release that ages past the cutoff in between is not used: the run
+  # resolved its release once.
+  NERD_FONT_RELEASES='[{"tag_name":"v3.5.0","draft":false,"prerelease":false,"published_at":"2026-10-02T00:00:00Z"}]'
   install_nerd_font Fixture "$NERD_FONTS_CHECKSUMS_FILE"
   assert_equals "$(cat "$temp/release/curl.log")" \
-    "$NERD_FONTS_LATEST_URL"$'\n'"$NERD_FONTS_DOWNLOAD_URL/v3.4.0/SHA-256.txt"$'\n'"$NERD_FONTS_DOWNLOAD_URL/v3.4.0/Fixture.tar.xz"
+    "https://api.github.com/repos/ryanoasis/nerd-fonts/releases?per_page=30"$'\n'"$NERD_FONTS_DOWNLOAD_URL/v3.4.0/SHA-256.txt"$'\n'"$NERD_FONTS_DOWNLOAD_URL/v3.4.0/Fixture.tar.xz"
   [[ -f $HOME/.local/share/fonts/NerdFonts/FixtureNerdFont-Regular.ttf ]] || fail "the font was not installed"
   INSTALL_FONTS=yes
   FONT_NAME=Fixture
   assert_equals "$(signature_fonts)" "|yes|Fixture|https://github.com/ryanoasis/nerd-fonts/releases/latest/download"
-  # A redirect that is not a release tag stops the run.
+  # GitHub unreachable, or no release old enough: the run stops.
   NERD_FONTS_RELEASE_BASE=""
-  curl() { printf 'https://github.com/login'; }
-  local err
-  err=$( (resolve_nerd_fonts_release) 2>&1 ) && fail "a non-release redirect was accepted"
-  assert_contains "$err" "Could not find the latest Nerd Fonts release"
+  RELEASE_TAG_CACHE=""
+  curl() { printf '\n000'; return 7; }
+  err=$( (nerd_fonts_release) 2>&1 ) && fail "an unreachable GitHub picked a release"
+  assert_contains "$err" "Could not read the Nerd Fonts releases from GitHub"
+  curl() { printf '%s\n200' '[{"tag_name":"v3.5.0","draft":false,"prerelease":false,"published_at":"2026-11-10T00:00:00Z"}]'; }
+  err=$( (nerd_fonts_release) 2>&1 ) && fail "a release younger than the minimum age was picked"
+  assert_contains "$err" "No Nerd Fonts release among the 30 newest is at least 7 days old"
   rm -rf "$temp"
 }
 
@@ -3050,8 +3583,12 @@ TESTS=(
   test_bootstrap_installs_unzip_when_missing
   test_concurrent_lock_rejection
   test_equivalent_github_origins
-  test_follow_default_branch_moves_detached_checkouts_onto_the_branch
-  test_git_checkout_follows_rejects_detached_and_foreign_checkouts
+  test_follow_release_checkout_picks_by_mode_and_age
+  test_follow_release_checkout_protects_local_work
+  test_follow_release_checkout_keeps_local_tags
+  test_follow_release_checkout_trusts_origin_tags
+  test_git_sources_have_follow_modes
+  test_git_checkout_at_release_rejects_branch_and_foreign_checkouts
   test_recommended_and_whole_group_closure
   test_node_lts_is_resolved_once_per_run
   test_node_verifier_checks_the_real_executable
@@ -3082,7 +3619,13 @@ TESTS=(
   test_artifact_version_ok_accepts_any_version_without_one
   test_inspect_lists_every_selected_registry_artifact
   test_github_release_asset_record_parses_release_json
-  test_github_latest_asset_requires_a_sha256_digest
+  test_release_candidates_skip_drafts_prereleases_and_pre_tags
+  test_release_pick_takes_the_newest_release_old_enough
+  test_release_asset_templates_expand
+  test_release_attestation_is_checked_when_published
+  test_inspect_reports_the_picked_release
+  test_signatures_are_unchanged_by_a_new_upstream_release
+  test_min_release_age_is_validated_and_saved
   test_release_version_strips_the_tag_prefix
   test_release_install_skips_the_installed_latest_version
   test_macos_legacy_local_copies_are_removed_only_when_they_are_the_tool

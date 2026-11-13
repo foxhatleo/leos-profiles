@@ -57,8 +57,8 @@ The dotfile surface here is deliberately tiny — two managed blocks (three on
 macOS) plus a `STARSHIP_CONFIG` pointer — so templating and symlink-farm tools solve very
 little of the actual problem. What `install.sh` mostly does is *machine
 provisioning*: OS packages across four distribution families, bun/fnm/starship/uv/yarn/pnpm
-from Homebrew or their latest digest-checked releases, pyenv/rbenv/plugin clones
-that follow their default branch, local SSH/GPG preparation and read-only GitHub verification, a verified Nerd
+from Homebrew or week-old digest-checked releases, pyenv/rbenv/plugin clones
+at week-old releases, local SSH/GPG preparation and read-only GitHub verification, a verified Nerd
 Fonts release archive, and `chsh`. chezmoi covers that only through `run_once_` escape hatches, which
 would leave the same amount of shell to maintain plus a second tool to learn.
 
@@ -177,25 +177,37 @@ listed at the end, and the run exits 3.
 
 ## Installed channels and credentials
 
-Tools follow upstream rather than reviewed pins, so they stay current:
+Tools follow upstream rather than reviewed pins, so they stay current, but a
+release must have been public for a while before it installs: 7 days by
+default, `--min-release-age <days>` (0 to 365) to change it, saved for later
+reconciles. A compromised or broken release usually gets noticed and pulled
+within that time.
 
 | Source | macOS | Linux |
 |---|---|---|
-| bun, fnm, Starship, uv (and uvx) | Homebrew formula | latest GitHub release into `~/.local/bin`, checked against the SHA-256 digest GitHub publishes for the asset |
+| bun, fnm, Starship, uv (and uvx) | Homebrew formula | the newest GitHub release at least that old (never a draft or prerelease) into `~/.local/bin`, checked against the SHA-256 digest GitHub publishes for the asset and, when gh is logged in and the project publishes one, its GitHub attestation |
 | Yarn, pnpm | Homebrew formula | npm's latest into `~/.local/npm`, installed with fnm's Node |
-| pyenv, rbenv, ruby-build, Zsh plugins | Git checkout of the default branch | the same |
-| Nerd Fonts | latest release, checked against its `SHA-256.txt` | the same |
+| pyenv, rbenv, zsh-completions, fzf-tab | Git checkout of the newest version tag at least that old | the same |
+| zsh-autosuggestions, zsh-syntax-highlighting | Git checkout of the newest default-branch commit at least that old (their tags are years old) | the same |
+| ruby-build | Git checkout of its newest version tag, without delay (new tags are how new Ruby releases become installable) | the same |
+| Nerd Fonts | the newest release at least that old, checked against its `SHA-256.txt` | the same |
+
+Homebrew formulae, OS packages, npm's Yarn and pnpm and the Node LTS are not
+held back: they come at their package manager's current version (inspect
+says so). Checkouts are left detached at their release; one may move back to
+an older release when the newest one is not old enough yet.
 
 On macOS, `brew upgrade` therefore keeps the formulae current. Everywhere, a
 full upgrade (apply's default, or `upgrade-leos-profiles --full-upgrade`)
 moves every one of them forward: it re-runs those steps, which install the
-latest release (skipping the download when it is already installed), upgrade
-an outdated formula, and fast-forward each checkout. Without a full upgrade a
-run only repairs what is missing or broken. Set `GITHUB_TOKEN` if many Linux
-runs share one address: the release lookup uses GitHub's API, which allows 60
-anonymous requests an hour. When GitHub cannot be reached (or refuses, at that
-limit), a tool that is already installed and works is kept with a warning;
-only a missing or broken one stops the run.
+release that is now old enough (skipping the download when it is already
+installed), upgrade an outdated formula, and move each checkout to its
+release. Without a full upgrade a run only repairs what is missing or broken.
+The release lookup uses GitHub's API, which allows 60 anonymous requests an
+hour; the installer uses `GITHUB_TOKEN`, or gh's token when gh is logged in.
+When GitHub cannot be reached (or refuses, at that limit), a tool that is
+already installed and works is kept with a warning; only a missing or broken
+one stops the run.
 
 On macOS the full upgrade runs `brew update` and `brew upgrade --formula` (a
 bare `brew upgrade` would include casks). It upgrades casks (GUI apps; some
@@ -207,18 +219,20 @@ is nothing newer to follow: Homebrew's installer script (it runs once, on a
 Mac without Homebrew) and rpatool (its GitHub repository is archived).
 
 Equivalent GitHub HTTPS/SSH origins are accepted and normalized; dirty
-installer-managed checkouts, and checkouts with commits that are not on their
-default branch, are refused rather than overwritten.
+installer-managed checkouts, and checkouts at a commit made locally or with a
+local tag on one (the update deletes tags origin does not have), are refused
+rather than overwritten. Keep such work on a branch and delete the tag.
 
 Machines set up before 2026-10 carry pinned copies. Inspect reports each
 as a `migration` record and the next approved run moves it: on macOS the
 `~/.local/bin` and `~/.local/npm` copies are removed once the Homebrew formula
-is installed (they come first on PATH and would shadow it), and checkouts
-detached at a pinned commit move onto their default branch.
+is installed (they come first on PATH and would shadow it). Checkouts on their
+default branch (the 2026-10 layout) move to their release, detached; inspect
+names the tag or commit.
 
 uv and uvx install as one artifact (the static musl builds on Linux, as for
 Starship), with their completions cached like the other tools'. Nerd Fonts
-come from one font's archive in the latest release; an unknown font name is
+come from one font's archive in the picked release; an unknown font name is
 refused before anything is downloaded. Fonts go to
 `~/Library/Fonts/NerdFonts` on macOS and
 `${XDG_DATA_HOME:-~/.local/share}/fonts/NerdFonts` on Linux (then `fc-cache`).
@@ -519,7 +533,8 @@ default without a full upgrade, which leaves installed versions where they
 are. It checks saved credential
 references and pauses for any required manual registration or configuration.
 `--full-upgrade` also upgrades the host packages and moves every tool, plugin
-checkout and the Node default to their latest release, as described under
+checkout and the Node default forward (to the newest release old enough, and
+the current LTS), as described under
 [Installed channels](#installed-channels-and-credentials).
 
 `leos-doctor` checks the saved setup without changing anything: it runs
@@ -599,7 +614,7 @@ and Yarn/pnpm installation, repeated reconciliation, and repair after removing
 artifacts. Credentials are skipped, default-shell changes are disabled, and
 fonts are explicitly exercised. Separate isolated tests cover credentials.
 
-Package availability, latest-release resolution and digests, real plugin
+Package availability, release resolution and digests, real plugin
 integration, unit tests, and syntax checks remain separate gates; availability alone is not installation
 coverage. The weekly workflow repeats these checks. See the
 [workflow](./.github/workflows/ci.yml) for exact jobs and runner labels, and

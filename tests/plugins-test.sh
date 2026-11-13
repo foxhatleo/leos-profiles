@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Clone each plugin's default branch and source the combined Zsh stack.
+# Check out each plugin's release (sources.sh's follow mode, the default
+# minimum release age) and source the combined Zsh stack.
 # shellcheck disable=SC1091,SC2034
 
 set -Eeuo pipefail
@@ -37,7 +38,7 @@ install_plugins
 for plugin in zsh-autosuggestions zsh-syntax-highlighting zsh-completions fzf-tab; do
   [[ -d $TARGET/zsh/plugins/$plugin/.git ]]
   [[ -z $(git -C "$TARGET/zsh/plugins/$plugin" status --porcelain) ]]
-  git_checkout_follows "$TARGET/zsh/plugins/$plugin" "$(git -C "$TARGET/zsh/plugins/$plugin" remote get-url origin)"
+  git_checkout_at_release "$TARGET/zsh/plugins/$plugin" "$(git -C "$TARGET/zsh/plugins/$plugin" remote get-url origin)"
 done
 
 HOME="$HOME" LEOS_PROFILES_HOME="$TARGET" TERM=xterm-256color zsh -dfc '
