@@ -23,8 +23,7 @@ an account that can authenticate through GitHub CLI.
 
 `apply` and `reconcile` never ask *setup* questions, but they are not unattended:
 depending on the selection they can still pause for the Homebrew installer's own
-confirmation and `sudo` prompt, `sudo` authentication and re-prompts on Linux,
-`chsh` asking for the user's password on Linux, and an
+confirmation and `sudo` prompt, `sudo` authentication and re-prompts on Linux, and an
 `ssh-keygen`/`gpg` passphrase prompt when passphrase mode is `prompt`. Tell the
 user this before invoking apply so they know to stay at the keyboard. Before
 changing anything, apply checks for these: run without a terminal, a plan that

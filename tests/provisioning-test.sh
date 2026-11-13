@@ -30,6 +30,9 @@ collect_artifacts() {
   { umask; id; ls -ldn -- "$FIXTURE" "$HOME" "$XDG_CACHE_HOME"; ls -laRn -- "$XDG_CACHE_HOME"; } \
     > "$dest/permissions.txt" 2>&1 || true
   zsh -ic 'print -r -- "PATH=$PATH"' > "$dest/interactive-shell.txt" 2>&1 || true
+  # The state files are mode 600 and this user's UID need not match the
+  # runner's, which uploads the directory; make the copies readable to it.
+  chmod -R a+rX -- "$dest" 2>/dev/null || true
 }
 on_exit() {
   local rc=$?

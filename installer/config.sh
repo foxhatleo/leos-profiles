@@ -421,10 +421,9 @@ set_default_shell() {
     run_shell "Add $zsh_path to /etc/shells" \
       'printf "%s\n" "$2" | ${1:+"$1"} tee -a /etc/shells >/dev/null' "$SUDO" "$zsh_path"
   fi
-  if [[ $OS_FAMILY == macos ]]; then
-    run_root chsh -s "$zsh_path" "$(login_user)"
-  else
-    run chsh -s "$zsh_path"
-  fi
+  # As root on every family: chsh run as the user asks for the user's own
+  # password, which an unattended or passwordless-sudo run cannot answer, while
+  # root may change any account's shell. Root is already needed for /etc/shells.
+  run_root chsh -s "$zsh_path" "$(login_user)"
 }
 
