@@ -22,8 +22,9 @@ __leos_entry "path/gnu"
 # shadow the runtimes the version managers below select.
 __leos_entry "path/go"
 # User-local bins load BEFORE the version managers below, so their shims end up
-# in front. Otherwise a stale node/python/ruby left in ~/.local/bin permanently
-# shadows whatever fnm/pyenv/rbenv selected, defeating per-directory switching.
+# in front. Otherwise a node or ruby left in ~/.local/bin permanently shadows
+# whatever fnm/rbenv selected, defeating per-directory switching. (uv's
+# python3 lives there on purpose; an existing pyenv's shims still win.)
 __leos_entry "path/bin"
 __leos_entry "path/apt"
 __leos_entry "path/dnf"

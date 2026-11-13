@@ -1,4 +1,6 @@
-# pyenv
+# pyenv. The installer no longer installs it (uv's CPython in ~/.local/bin is
+# the profile's Python since 2026-11), but an existing one keeps working: its
+# shims then come before uv's python3, as before.
 export PYENV_ROOT=${PYENV_ROOT:-$HOME/.pyenv}
 __leos_add_path "$PYENV_ROOT/bin"
 # The installer's checkout is found by path; otherwise a pyenv elsewhere on
@@ -35,9 +37,9 @@ if [[ -n $__leos_pyenv_bin ]]; then
     pyenv-init $__leos_pyenv_bin init --no-rehash --no-push-path - zsh
   path=("$PYENV_ROOT/shims" ${path:#${(b)PYENV_ROOT}/shims})
   __leos_rehash_daily pyenv
-elif [[ ${LEOS_WARN_OPTIONAL_TOOLS:-0} == 1 && ! -f $LEOS_PROFILES/local/flags/no-pyenv ]]; then
-  __leos_puts_err "pyenv is not installed. To silence, touch \$LEOS_PROFILES/local/flags/no-pyenv." >&2
 fi
+# No LEOS_WARN_OPTIONAL_TOOLS warning without pyenv: the installer no longer
+# provides it, so a missing pyenv is the expected state.
 unset __leos_pyenv_bin
 
 :

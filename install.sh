@@ -24,11 +24,13 @@ COMMAND=""
 # shellcheck source=installer/registry.sh
 source "$SCRIPT_DIR/installer/registry.sh"
 # Every package group, in install order. Recommended selects all but the
-# opt-in ones: python (rpatool's interpreter; languages already has one) and
-# heroku (a large Node CLI few machines need; homebrew/core packages it, the
-# Linux distributions do not, so it is macOS only).
-readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,languages,python,media,network,heroku,system"
-readonly RECOMMENDED_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
+# opt-in ones: python (the OS python3 rpatool runs on; the cpython component
+# is the Python for your own work) and heroku (a large Node CLI few machines
+# need; homebrew/core packages it, the Linux distributions do not, so it is
+# macOS only). The languages group was retired with schema 4 (validate_options
+# says so).
+readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,python,media,network,heroku,system"
+readonly RECOMMENDED_GROUPS="core-utils,shell,dev-tools,media,network,system"
 # rpatool remains available as the explicit `bins` step, but is not a default
 # because its upstream does not publish a stable release.
 SELECTED_STEPS="${CANONICAL_STEPS/,bins/}"
@@ -58,7 +60,8 @@ RESOLVED_NODE_VERSION=""
 NODE_CHANNEL="current-lts"
 NODE_POLICY="current-lts"
 NODE_SELECTION=""
-PROFILE_SCHEMA=3
+# The saved profile's schema (state.sh); read_profile sets the one it read.
+PROFILE_SCHEMA=4
 AI_CLI_UPDATE_CHANNEL="native"
 PACKAGE_CHANNEL="system"
 BREW_MIRROR=""
@@ -124,8 +127,8 @@ Options:
   --brew-mirror <china|none>      macOS: use (china) or stop using (none) the USTC
                                   Homebrew mirror for this run and later shells
   --skip-existing-version-managers
-                                  Keep an existing ~/.pyenv or ~/.rbenv that is
-                                  not the profile's checkout; skip that component
+                                  Keep an existing ~/.rbenv that is not the
+                                  profile's checkout; skip the rbenv component
   --node-version <vX.Y.Z>         The Node version inspect resolved; apply stops
                                   (exit 2) if it would now choose another
   --saved                         inspect: use the saved profile's selection
@@ -148,7 +151,10 @@ macOS (Homebrew's current version), on Linux the newest GitHub release at least
 that old (checked against GitHub's SHA-256 digest and, when gh is logged in,
 the project's attestation), and Git checkouts detached at a tag or commit at
 least that old. A full upgrade moves them forward; otherwise a run only repairs.
-Node: fnm's default is the current LTS, moved forward by a full upgrade.
+Runtimes, the same on every OS: Node is the newest LTS line (fnm), Python the
+newest stable CPython (uv), Ruby the newest stable release (rbenv, compiled).
+A new major or minor line waits --min-release-age days; patch releases do not.
+A full upgrade moves them forward. pnpm and Yarn come from Corepack.
 Credentials: local creation is supported; GitHub registration and SSH identity
 configuration are manual. Exit 3 means user action is required; resume using
 reconcile --yes after completing the emitted manual-action record.
@@ -280,6 +286,7 @@ order_selected_steps() {
 }
 
 validate_options() {
+  reject_retired_selection
   [[ -z $SELECTED_STEPS ]] || valid_csv "$SELECTED_STEPS" "$CANONICAL_STEPS" || die "Invalid --groups value"
   [[ -z $SELECTED_GROUPS ]] || valid_csv "$SELECTED_GROUPS" "$CANONICAL_GROUPS" || die "Invalid --package-groups value"
   [[ $SSH_MODE == skip || $SSH_MODE == reuse || $SSH_MODE == generate ]] || die "Invalid --ssh value"
@@ -309,6 +316,23 @@ validate_options() {
   validate_tsv_value git-name "$GIT_NAME"
   validate_tsv_value git-email "$GIT_EMAIL"
   validate_tsv_value profile-root "$TARGET"
+}
+
+# Names schema 4 retired. A saved profile of schema 1-3 is migrated by
+# read_profile; on the command line (or in a schema-4 profile) they stop the
+# run with the replacement.
+reject_retired_selection() {
+  local item
+  if has_csv_item "$SELECTED_GROUPS" languages; then
+    die "The languages package group was removed: Node, Python and Ruby now come from the fnm, cpython and rbenv components at their newest stable lines on every OS. Remove languages from --package-groups; packages it installed earlier stay installed."
+  fi
+  for item in pyenv yarn pnpm; do
+    has_csv_item "$SELECTED_STEPS" "$item" || continue
+    case $item in
+      pyenv) die "The pyenv component was removed: the cpython component installs the newest stable CPython with uv. Use --groups cpython; an existing ~/.pyenv is left as it is." ;;
+      *) die "The $item component was removed: the corepack component provides pnpm and Yarn (Corepack, on fnm's Node). Use --groups corepack." ;;
+    esac
+  done
 }
 
 validate_tsv_value() {
@@ -521,12 +545,42 @@ inspect_artifacts() {
   done
 }
 
-# npm tools: Homebrew formulae on macOS, the npm registry's latest elsewhere.
-inspect_npm_tool() {
-  if [[ $OS_FAMILY == macos ]]; then
-    printf 'artifact\tformula\t%s\t%s\tlatest\n' "$1" "$1"
-  else
-    printf 'artifact\tnpm\t%s\tregistry.npmjs.org/%s\tlatest\n' "$1" "$1"
+# Corepack, from npm on every OS, and the package managers it installs.
+inspect_corepack() {
+  local spec
+  printf 'artifact\tnpm\tcorepack\tregistry.npmjs.org/corepack\tlatest\n'
+  for spec in $COREPACK_DEFAULTS; do
+    printf 'artifact\tcorepack\t%s\t%s\t%s\n' "${spec%@*}" "$spec" "${spec#*@}"
+  done
+}
+
+# The runtime records for Python and Ruby (Node's is in inspect_tsv):
+#   runtime python <x.y> latest-stable|release-date-unknown  (the line uv installs)
+#   runtime python <x.y.z> installed                         (kept: no full upgrade)
+#   runtime ruby <x.y.z> latest-stable|release-date-unknown|installed
+#   runtime <name> unresolved resolve-during-apply           (uv or ruby-build is
+#                                                             not installed yet)
+inspect_runtimes() {
+  local kept
+  if has_csv_item "$SELECTED_STEPS" cpython; then
+    printf 'external\tpython-release-dates\t%s\n' "$PYTHON_RELEASE_API"
+    if kept=$(python_default_kept); then
+      printf 'runtime\tpython\t%s\tinstalled\n' "$kept"
+    elif resolve_python_line; then
+      printf 'runtime\tpython\t%s\t%s\n' "$RESOLVED_PYTHON_LINE" "$PYTHON_SELECTION"
+    else
+      printf 'runtime\tpython\tunresolved\tresolve-during-apply\n'
+    fi
+  fi
+  if has_csv_item "$SELECTED_STEPS" rbenv; then
+    printf 'external\truby-sources\tcache.ruby-lang.org: rbenv install downloads and compiles the Ruby source ruby-build names\n'
+    if kept=$(ruby_default_kept); then
+      printf 'runtime\truby\t%s\tinstalled\n' "$kept"
+    elif resolve_ruby_version; then
+      printf 'runtime\truby\t%s\t%s\n' "$RESOLVED_RUBY_VERSION" "$RUBY_SELECTION"
+    else
+      printf 'runtime\truby\tunresolved\tresolve-during-apply\n'
+    fi
   fi
 }
 
@@ -545,6 +599,7 @@ inspect_tsv() {
   printf 'policy\tnode\t%s\n' "$NODE_POLICY"
   printf 'policy\trelease-age\t%s\n' "$MIN_RELEASE_AGE"
   report_release_age_scope
+  report_prompt_scope
   report_profile_migration
   report_legacy_loaders
   printf 'channel\tai-cli-updates\t%s\n' "$AI_CLI_UPDATE_CHANNEL"
@@ -617,13 +672,11 @@ inspect_tsv() {
   if [[ $GPG_MODE != skip ]]; then printf 'global\tgit\tuser.signingkey,gpg.format,commit.gpgsign\n'; fi
   if has_csv_item "$SELECTED_STEPS" default-shell && [[ $CHANGE_DEFAULT_SHELL != no ]]; then printf 'irreversible\tlogin-shell\tchsh may require a new login\n'; fi
   inspect_artifacts
-  if has_csv_item "$SELECTED_STEPS" pyenv; then printf 'artifact\tgit\tpyenv\t%s\t%s\n' "$PYENV_REPOSITORY" "$PYENV_FOLLOW"; fi
   if has_csv_item "$SELECTED_STEPS" rbenv; then
     printf 'artifact\tgit\trbenv\t%s\t%s\n' "$RBENV_REPOSITORY" "$RBENV_FOLLOW"
     printf 'artifact\tgit\truby-build\t%s\t%s\n' "$RUBY_BUILD_REPOSITORY" "$RUBY_BUILD_FOLLOW"
   fi
-  if has_csv_item "$SELECTED_STEPS" yarn; then inspect_npm_tool yarn; fi
-  if has_csv_item "$SELECTED_STEPS" pnpm; then inspect_npm_tool pnpm; fi
+  if has_csv_item "$SELECTED_STEPS" corepack; then inspect_corepack; fi
   if has_csv_item "$SELECTED_STEPS" fnm; then
     printf 'external\tnode-lts-index\t%s\n' "$(node_dist_index_url)"
   fi
@@ -657,6 +710,7 @@ inspect_tsv() {
       fi
     else printf 'runtime\tnode\tunresolved\tresolve-during-apply\n'; fi
   fi
+  inspect_runtimes
   while IFS=$'\t' read -r step message; do
     printf 'privileged\t%s\t%s\n' "$step" "$message"
   done < <(privileged_plan)
@@ -677,10 +731,10 @@ inspect_tsv() {
 # After a successful run: what the user still has to do in the terminal
 # itself (MI-10).
 print_terminal_font_hint() {
-  has_csv_item "$SELECTED_STEPS" plugins || has_csv_item "$SELECTED_STEPS" fonts || return 0
+  has_csv_item "$SELECTED_STEPS" starship || has_csv_item "$SELECTED_STEPS" fonts || return 0
   if has_csv_item "$SELECTED_STEPS" fonts && font_should_install && font_is_installed; then
     say "Set your terminal's font to \"$(nerd_font_family) Nerd Font\" (or its Mono variant) so the prompt's icons render, or set LEOS_PLAIN_PROMPT=1 in local/private.zsh for the plain prompt."
-  elif has_csv_item "$SELECTED_STEPS" plugins; then
+  elif has_csv_item "$SELECTED_STEPS" starship; then
     say "The themed prompt needs a Nerd Font in the terminal you use; without one, set LEOS_PLAIN_PROMPT=1 in local/private.zsh for the plain prompt."
   fi
 }

@@ -314,8 +314,13 @@ pkg_install() {
 # Fedora ships ffmpeg-free; the media group's full ffmpeg comes from RPM
 # Fusion. Everything else installs normally. ffmpeg alone then replaces
 # ffmpeg-free with `dnf swap ... --allowerasing`, RPM Fusion's documented
-# method, so package removal is scoped to that swap (SEC-4).
+# method, so package removal is scoped to that swap (SEC-4). Without
+# ffmpeg-free, Fedora's split libraries (libswresample-free, libavcodec-free,
+# ...) can still be installed as other packages' dependencies, and they
+# conflict with RPM Fusion's ffmpeg-libs; the plain install then needs the
+# same scoped --allowerasing to replace them.
 FEDORA_FFMPEG_SWAP=(dnf swap -y ffmpeg-free ffmpeg --allowerasing)
+FEDORA_FFMPEG_INSTALL=(dnf install -y --allowerasing ffmpeg)
 fedora_install_media() {
   local package
   local -a others=()
@@ -331,7 +336,7 @@ fedora_install_media() {
     if [[ $DRY_RUN -eq 1 ]] || rpm -q ffmpeg-free >/dev/null 2>&1; then
       run_root "${FEDORA_FFMPEG_SWAP[@]}"
     else
-      run_root dnf install -y ffmpeg
+      run_root "${FEDORA_FFMPEG_INSTALL[@]}"
     fi
   fi
 }
@@ -398,17 +403,22 @@ bootstrap_tools() {
   pkg_install "${missing[@]}"
 }
 
-# dev-tools carries the GitHub CLI and jq on every family (MI-8), and every
-# build dependency ruby-build's suggested build environment lists for Ruby 3
-# (openssl, readline, zlib, libyaml for psych, libffi), so `rbenv install`
-# works without extra packages (ONB-3); macOS takes libffi from the SDK.
+# dev-tools carries the GitHub CLI and jq on every family (MI-8), and what
+# ruby-build's suggested build environment lists for a current Ruby: a C
+# toolchain, autoconf, OpenSSL, libyaml (psych), zlib, libffi (fiddle), GMP
+# (fast Integer), and rustc, so the Ruby the rbenv step compiles has YJIT
+# (ONB-3). Ruby 3.3 and later no longer build against readline or ncurses.
+# macOS takes libffi from the SDK. CPython comes prebuilt from uv, so the
+# Python-only build dependencies pyenv needed (bz2, lzma, sqlite3, tk, xml2,
+# gdbm, uuid, nsl; clang and llvm on apt) are gone; already-installed copies
+# stay.
 #
 # macOS names are canonical Homebrew formula names, not aliases: `brew list
-# --formula` prints those, and an alias can move. pkgconf and sqlite are what
-# the pkg-config and sqlite3 aliases resolve to. python is the versioned
-# formula on purpose: the `python`/`python3` aliases follow Homebrew's newest
-# minor release, so each move made reconcile install another Python next to
-# the old one. Change python@3.15 here deliberately.
+# --formula` prints those, and an alias can move. pkgconf is what the
+# pkg-config alias resolves to. python is the versioned formula on purpose:
+# the `python`/`python3` aliases follow Homebrew's newest minor release, so
+# each move made reconcile install another Python next to the old one. Change
+# python@3.15 here deliberately.
 # eza is in every dev-tools map but apt's: Debian 13 and Ubuntu 24.04+ package
 # it, Debian 12 and Ubuntu 22.04 do not, and the apt map is one list for
 # every release (the per-image package-map gate would fail there). The
@@ -416,13 +426,15 @@ bootstrap_tools() {
 # heroku is a macOS-only, opt-in group: the formula is in homebrew/core (no
 # third-party tap), but no Linux distribution packages the CLI. It has no
 # members elsewhere, and main() refuses it there.
+#
+# There is no `languages` group any more (schema 4): Node, Python and Ruby
+# come from fnm, uv and rbenv at their newest stable lines on every OS.
 package_list_for_group() {
   local group=$1
   case "$OS_FAMILY:$group" in
     macos:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils gnu-indent gnu-sed gnu-tar gnu-which grep gawk gzip less nano' ;;
     macos:shell) printf '%s\n' 'zsh' ;;
-    macos:dev-tools) printf '%s\n' 'bat direnv eza fd fzf gh git jq libyaml pkgconf openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib zoxide' ;;
-    macos:languages) printf '%s\n' 'node python@3.15 ruby' ;;
+    macos:dev-tools) printf '%s\n' 'autoconf bat direnv eza fd fzf gh git gmp jq libyaml pkgconf openssl@3 ripgrep rust vim xz zlib zoxide' ;;
     macos:python) printf '%s\n' 'python@3.15' ;;
     macos:media) printf '%s\n' 'ffmpeg imagemagick' ;;
     macos:network) printf '%s\n' 'wget rclone' ;;
@@ -430,24 +442,21 @@ package_list_for_group() {
     macos:system) printf '%s\n' 'smartmontools' ;;
     apt:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     apt:shell) printf '%s\n' 'zsh' ;;
-    apt:dev-tools) printf '%s\n' 'bat build-essential clang direnv fd-find fzf gcc gh git jq libbz2-dev libffi-dev liblzma-dev libncurses-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-dev libxmlsec1-dev libyaml-dev llvm ripgrep tk-dev vim xz-utils zlib1g-dev zoxide' ;;
-    apt:languages) printf '%s\n' 'nodejs npm python-is-python3 ruby' ;;
+    apt:dev-tools) printf '%s\n' 'autoconf bat build-essential direnv fd-find fzf gcc gh git jq libffi-dev libgmp-dev libssl-dev libyaml-dev ripgrep rustc vim xz-utils zlib1g-dev zoxide' ;;
     apt:python) printf '%s\n' 'python3' ;;
     apt:media) printf '%s\n' 'ffmpeg imagemagick' ;;
     apt:network) printf '%s\n' 'wget rclone' ;;
     apt:system) printf '%s\n' 'smartmontools' ;;
     fedora:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     fedora:shell) printf '%s\n' 'zsh' ;;
-    fedora:dev-tools) printf '%s\n' 'bat bzip2 bzip2-devel direnv eza fd-find fzf gcc gdbm-libs gh git jq libffi-devel libnsl2 libuuid-devel libyaml-devel make openssl-devel patch readline-devel ripgrep sqlite sqlite-devel tk-devel vim xz-devel zlib-devel zoxide' ;;
-    fedora:languages) printf '%s\n' 'nodejs python-unversioned-command ruby' ;;
+    fedora:dev-tools) printf '%s\n' 'autoconf bat bzip2 direnv eza fd-find fzf gcc gh git gmp-devel jq libffi-devel libyaml-devel make openssl-devel patch ripgrep rust sqlite vim zlib-devel zoxide' ;;
     fedora:python) printf '%s\n' 'python3' ;;
     fedora:media) printf '%s\n' 'ImageMagick ffmpeg' ;;
     fedora:network) printf '%s\n' 'wget rclone' ;;
     fedora:system) printf '%s\n' 'smartmontools' ;;
     arch:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     arch:shell) printf '%s\n' 'zsh' ;;
-    arch:dev-tools) printf '%s\n' 'base-devel bat direnv eza fd fzf git github-cli jq libffi libyaml openssl readline ripgrep tk vim xz zlib zoxide' ;;
-    arch:languages) printf '%s\n' 'nodejs npm python ruby' ;;
+    arch:dev-tools) printf '%s\n' 'base-devel bat direnv eza fd fzf git github-cli gmp jq libffi libyaml openssl ripgrep rust vim xz zlib zoxide' ;;
     arch:python) printf '%s\n' 'python' ;;
     arch:media) printf '%s\n' 'ffmpeg imagemagick' ;;
     arch:network) printf '%s\n' 'wget rclone' ;;
@@ -455,8 +464,6 @@ package_list_for_group() {
   esac
 }
 
-# SELECTED_PACKAGES: every member of the selected groups, in group order, each
-# package once (two groups may share a member, such as python and languages).
 # component_os_packages <step>: OS packages a selected component needs at run
 # time, independent of the package groups. Official Node binaries for Linux
 # link libatomic, which minimal Debian/Ubuntu/Fedora installs lack (Arch has it
@@ -468,6 +475,8 @@ component_os_packages() {
   esac
 }
 
+# SELECTED_PACKAGES: every member of the selected groups, in group order, then
+# what the selected components need (component_os_packages), each package once.
 collect_selected_packages() {
   local group step package seen=" "
   local -a groups=() steps=() group_packages=()

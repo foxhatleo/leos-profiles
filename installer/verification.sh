@@ -68,25 +68,47 @@ verify_packages() {
   selected_packages_installed && apt_compat_links_valid
 }
 
-verify_pyenv() {
-  local directory
-  [[ -x $HOME/.pyenv/bin/pyenv ]] && git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY"
-}
-
+# rbenv and ruby-build at their releases, and rbenv's global Ruby running,
+# unless the last compile failed (install_ruby): a full upgrade retries that.
 verify_rbenv() {
   local directory
   [[ -x $HOME/.rbenv/bin/rbenv ]] &&
     git_checkout_at_release "$HOME/.rbenv" "$RBENV_REPOSITORY" &&
-    git_checkout_at_release "$HOME/.rbenv/plugins/ruby-build" "$RUBY_BUILD_REPOSITORY"
+    git_checkout_at_release "$HOME/.rbenv/plugins/ruby-build" "$RUBY_BUILD_REPOSITORY" &&
+    { ruby_global_version >/dev/null || ruby_compile_failed; }
 }
 
 verify_bun() { artifact_verify bun; }
 
 verify_uv() { artifact_verify uv; }
 
-verify_yarn() { npm_tool_verify yarn; }
+verify_starship() { artifact_verify starship; }
 
-verify_pnpm() { npm_tool_verify pnpm; }
+# verify_corepack: Corepack, and its pnpm and Yarn shims answering --version
+# on fnm's default Node from what is already downloaded (no network: inspect
+# runs this too).
+verify_corepack() {
+  local prefix tool
+  prefix=$(corepack_prefix)
+  [[ -x $prefix/bin/corepack ]] || return 1
+  for tool in $COREPACK_TOOLS; do
+    [[ -x $prefix/bin/$tool && $(readlink "$prefix/bin/$tool" 2>/dev/null || true) == *corepack* ]] || return 1
+    corepack_tool_version "$tool" COREPACK_ENABLE_NETWORK=0 >/dev/null || return 1
+  done
+}
+
+# verify_cpython: ~/.local/bin/python3 is uv's: it resolves into `uv python
+# dir` and runs. Which version is not checked; a full upgrade moves it.
+verify_cpython() {
+  local uv directory resolved
+  uv=$(artifact_path uv)
+  [[ -x $uv && -x $HOME/.local/bin/python3 ]] || return 1
+  directory=$("$uv" python dir 2>/dev/null) || return 1
+  [[ -n $directory ]] || return 1
+  resolved=$(resolve_config_path "$HOME/.local/bin/python3") || return 1
+  [[ $resolved == "${directory%/}"/* ]] || return 1
+  python_default_version >/dev/null
+}
 
 # fnm with a working default Node. Which version that is, is not checked: a
 # full upgrade moves it to the current LTS, and a repair leaves it alone.
@@ -96,8 +118,7 @@ verify_fnm() {
 
 verify_plugins() {
   local directory="$TARGET/zsh/plugins"
-  artifact_verify starship &&
-    git_checkout_at_release "$directory/zsh-autosuggestions" "$ZSH_AUTOSUGGESTIONS_REPOSITORY" &&
+  git_checkout_at_release "$directory/zsh-autosuggestions" "$ZSH_AUTOSUGGESTIONS_REPOSITORY" &&
     git_checkout_at_release "$directory/zsh-syntax-highlighting" "$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY" &&
     git_checkout_at_release "$directory/zsh-completions" "$ZSH_COMPLETIONS_REPOSITORY" &&
     git_checkout_at_release "$directory/fzf-tab" "$FZF_TAB_REPOSITORY"

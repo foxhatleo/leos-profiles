@@ -222,8 +222,8 @@ follow_release_checkout() {
 
 install_local_bins() { artifact_install rpatool; }
 
-# pyenv and rbenv ship an optional native extension that speeds up their
-# bash code. Both work without it, so a failed compile only warns (BP-10).
+# rbenv ships an optional native extension that speeds up its bash code. It
+# works without it, so a failed compile only warns (BP-10).
 compile_optional_extension() {
   local root=$1 label=$2
   [[ $DRY_RUN -eq 0 && -x $root/src/configure ]] || return 0
@@ -232,15 +232,14 @@ compile_optional_extension() {
   fi
 }
 
-install_pyenv() {
-  follow_release_checkout PYENV "$HOME/.pyenv" pyenv
-  compile_optional_extension "$HOME/.pyenv" pyenv
-}
-
+# rbenv and ruby-build at their releases, then the newest stable Ruby
+# (install_ruby). pyenv is no longer installed (schema 4): uv's CPython
+# replaces it, and an existing ~/.pyenv is left alone.
 install_rbenv() {
   follow_release_checkout RBENV "$HOME/.rbenv" rbenv
   follow_release_checkout RUBY_BUILD "$HOME/.rbenv/plugins/ruby-build" ruby-build
   compile_optional_extension "$HOME/.rbenv" rbenv
+  install_ruby
 }
 
 install_plugins() {
@@ -386,49 +385,92 @@ ensure_user_npm_prefix() {
   mkdir -p "$prefix"
 }
 
-# Yarn and pnpm: Homebrew formulae on macOS; on Linux the latest npm release,
-# installed into ~/.local/npm with fnm's default Node (npm checks the
-# registry's integrity hash). Either way they run on fnm's Node.
-npm_tool_path() {
-  if [[ $OS_FAMILY == macos ]]; then
-    printf '%s/bin/%s\n' "$(brew_prefix)" "$1"
-  else
-    printf '%s\n' "$HOME/.local/npm/bin/$1"
-  fi
+# ---------------------------------------------------------------------------
+# Corepack (schema 4; it replaces the yarn and pnpm components). On every OS
+# the latest Corepack from npm, installed with fnm's default Node into
+# ~/.local/npm (Homebrew's corepack formula would pull in Homebrew's node).
+# Its pnpm and Yarn shims sit in ~/.local/npm/bin, ahead of any other copy on
+# PATH, and run on fnm's Node; outside a project with a packageManager field
+# they use the versions installed here: pnpm's latest and Yarn's stable
+# (modern) release. Yarn Classic (1.x) is no longer installed; a project that
+# pins it still gets it, through Corepack.
+COREPACK_PREFIX_NAME=.local/npm
+COREPACK_TOOLS="pnpm yarn"
+COREPACK_DEFAULTS="pnpm@latest yarn@stable"
+
+corepack_prefix() { printf '%s\n' "$HOME/$COREPACK_PREFIX_NAME"; }
+
+# legacy_npm_copy_present <yarn|pnpm>: the yarn or pnpm npm package an older
+# install put into ~/.local/npm (not Corepack's shim of the same name).
+legacy_npm_copy_present() {
+  local prefix link
+  prefix=$(corepack_prefix)
+  link="$prefix/bin/$1"
+  [[ ! -d $prefix/lib/node_modules/$1 ]] || return 0
+  [[ -e $link || -L $link ]] || return 1
+  [[ $(readlink "$link" 2>/dev/null || true) != *corepack* ]]
 }
 
-npm_tool_install() {
-  local package=$1
-  if [[ $OS_FAMILY == macos ]]; then
-    remove_legacy_npm_copy "$package"
-    brew_tool_install "$package"
-  else
-    ensure_user_npm_prefix
-    if [[ $DRY_RUN -eq 1 ]]; then
-      say "Would install the latest $package from npm with fnm's default Node"
-      return 0
+# retired_formula_installed <yarn|pnpm>: macOS: the profile's retired yarn or
+# pnpm step installed (or adopted) this Homebrew formula, and it is still
+# installed. The state file keeps those steps' rows until this step has dealt
+# with them (migrate_local_state).
+retired_formula_installed() {
+  [[ $OS_FAMILY == macos ]] || return 1
+  [[ -f $STATE_FILE ]] && awk -F '\t' -v step="$1" '$1 == step { found = 1 } END { exit !found }' "$STATE_FILE" || return 1
+  load_brew_formulae && brew_formula_installed "$1"
+}
+
+# remove_retired_npm_tools: what the retired yarn and pnpm steps left in the
+# way: their npm packages in ~/.local/npm (npm would refuse to link Corepack's
+# shims over them), and on macOS the Homebrew formulae the profile installed.
+# Then their state rows go.
+remove_retired_npm_tools() {
+  local tool status
+  for tool in $COREPACK_TOOLS; do
+    if legacy_npm_copy_present "$tool"; then remove_legacy_npm_copy "$tool"; fi
+    if retired_formula_installed "$tool"; then
+      status=0
+      run brew uninstall --formula "$tool" || status=$?
+      BREW_FORMULAE=""
+      (( status == 0 )) ||
+        warn "Could not uninstall Homebrew's $tool (status $status); Corepack's $tool in ~/.local/npm/bin comes first on PATH anyway. Remove it with: brew uninstall $tool"
     fi
-    # Not --ignore-scripts: pnpm's package sets itself up in an install script
-    # and does not run without it.
-    fnm_exec npm install --global --prefix "$HOME/.local/npm" "$package@latest"
-  fi
-  [[ $DRY_RUN -eq 1 ]] || npm_tool_verify "$package" || die "$package does not run after installation"
+  done
+  drop_state_rows yarn pnpm
 }
 
-npm_tool_verify() {
-  local package=$1 path
-  path=$(npm_tool_path "$package")
-  [[ -x $path ]] || return 1
-  if [[ $OS_FAMILY == macos ]]; then
-    [[ ! -e $HOME/.local/npm/bin/$package ]] || return 1
-    load_brew_formulae && brew_formula_installed "$package" || return 1
+install_corepack() {
+  local prefix tool
+  prefix=$(corepack_prefix)
+  if [[ $DRY_RUN -eq 1 ]]; then
+    remove_retired_npm_tools
+    say "Would install the latest Corepack from npm with fnm's default Node into $prefix, enable its pnpm and Yarn shims in $prefix/bin and install $COREPACK_DEFAULTS"
+    return 0
   fi
-  fnm_exec "$path" --version >/dev/null 2>&1
+  remove_retired_npm_tools
+  ensure_user_npm_prefix
+  fnm_exec npm install --global --prefix "$prefix" corepack@latest
+  fnm_exec "$prefix/bin/corepack" enable --install-directory "$prefix/bin"
+  # shellcheck disable=SC2086  # the defaults are separate words
+  fnm_exec env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "$prefix/bin/corepack" install --global $COREPACK_DEFAULTS
+  # Run each once while the network is allowed: current pnpm releases fetch
+  # their native binary on first use, and verify_corepack runs offline.
+  for tool in $COREPACK_TOOLS; do
+    corepack_tool_version "$tool" >/dev/null || die "Corepack's $tool does not run after installation"
+  done
+  verify_corepack || die "Corepack's pnpm or Yarn does not run after installation"
 }
 
-install_yarn() { npm_tool_install yarn; }
-
-install_pnpm() { npm_tool_install pnpm; }
+# corepack_tool_version <pnpm|yarn> [VAR=value...]: the tool's --version
+# through its Corepack shim on fnm's default Node, run from / so that no
+# project's packageManager field picks another version.
+corepack_tool_version() {
+  local tool=$1 prefix
+  shift
+  prefix=$(corepack_prefix)
+  (cd / && fnm_exec env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 ${1+"$@"} "$prefix/bin/$tool" --version) 2>/dev/null
+}
 
 machine_arch() {
   case $(uname -m) in
@@ -490,12 +532,13 @@ remove_legacy_local_copy() {
 }
 
 # remove_legacy_npm_copy <yarn|pnpm>: the package and the commands npm linked
-# for it in ~/.local/npm.
+# for it in ~/.local/npm (the retired yarn and pnpm components; macOS installs
+# before 2026-10 used it too).
 remove_legacy_npm_copy() {
   local package=$1 command prefix="$HOME/.local/npm"
   # The name becomes part of an `rm -rf` path: never a traversal or another package.
   [[ $package == yarn || $package == pnpm ]] || die "No legacy npm copy to remove for: $package"
-  [[ -e $prefix/bin/$package || -d $prefix/lib/node_modules/$package ]] || return 0
+  [[ -e $prefix/bin/$package || -L $prefix/bin/$package || -d $prefix/lib/node_modules/$package ]] || return 0
   run rm -rf -- "$prefix/lib/node_modules/$package"
   for command in "$package" yarnpkg pnpx; do
     case $package:$command in
@@ -977,22 +1020,48 @@ node_dist_index_url() {
   printf '%s/index.tab\n' "${base%/}"
 }
 
-# resolve_node_version: RESOLVED_NODE_VERSION becomes the current Node LTS.
+# node_lts_pick <cutoff-date> < index.tab: the newest release of the newest LTS
+# major whose first LTS release (the oldest row of that major with an LTS
+# codename) is dated on or before the cutoff (YYYY-MM-DD). A new LTS line
+# waits the minimum release age; its patch releases, and the patches of the
+# line already in use, do not. index.tab lists releases newest first; its
+# columns are $1 version, $2 date and $10 the LTS codename ("-" when none).
+node_lts_pick() {
+  awk -F '\t' -v cutoff="$1" '
+    NR == 1 || $10 == "-" || $10 == "" { next }
+    $1 ~ /^v[0-9]+[.][0-9]+[.][0-9]+$/ && $2 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ {
+      major = $1
+      sub(/^v/, "", major)
+      sub(/[.].*/, "", major)
+      if (!(major in newest)) { newest[major] = $1; order[++count] = major }
+      first[major] = $2
+    }
+    END {
+      for (i = 1; i <= count; i++)
+        if (first[order[i]] <= cutoff) { print newest[order[i]]; exit }
+    }
+  '
+}
+
+# resolve_node_version: RESOLVED_NODE_VERSION becomes the newest release of the
+# newest LTS line at least MIN_RELEASE_AGE days old (node_lts_pick).
 # Returns non-zero (does not die) so callers can degrade gracefully: `inspect`
 # falls back to "resolve-during-apply". install_fnm adds its own `|| die`.
 resolve_node_version() {
   [[ -z $RESOLVED_NODE_VERSION ]] || return 0
   local fnm_bin latest
+  release_age_cutoff
   if command -v curl >/dev/null 2>&1; then
     # Timeouts matter here: this runs inside apply while the install lock is
     # held, and inside the otherwise read-only `inspect`, so a stalled
     # connection would hang the whole operation.
-    # index.tab columns: $1 = version, $10 = the LTS codename ("-" when current).
     latest=$(curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
       --connect-timeout 15 --max-time 30 \
-      "$(node_dist_index_url)" 2>/dev/null | awk -F '\t' 'NR > 1 && $10 != "-" { print $1; exit }') || true
+      "$(node_dist_index_url)" 2>/dev/null | node_lts_pick "${RELEASE_CUTOFF_ISO%%T*}") || true
   fi
   if ! node_version_ok "${latest:-}"; then
+    # fnm's LTS list has no dates, so this fallback (only when the index
+    # cannot be read here) is not age-gated.
     fnm_bin=$(fnm_path)
     [[ -x $fnm_bin ]] || fnm_bin=$(command -v fnm 2>/dev/null || true)
     if [[ -n ${fnm_bin:-} ]]; then
@@ -1024,6 +1093,299 @@ node_default_kept() {
 }
 
 install_starship() { artifact_install starship; }
+
+# ---------------------------------------------------------------------------
+# Python and Ruby: the newest stable line, the same on every OS. Neither has an
+# LTS, so the newest stable release is the target. As for Node, a new minor
+# line waits MIN_RELEASE_AGE days, counted from its x.y.0 release; patch
+# releases are installed at once.
+
+# stable_version_lines < versions: "<major.minor><TAB><newest x.y.z>" for each
+# line among plain x.y.z versions (no previews, release candidates or other
+# implementations), newest line first.
+stable_version_lines() {
+  awk '/^[0-9]+[.][0-9]+[.][0-9]+$/' | LC_ALL=C sort -t . -k1,1nr -k2,2nr -k3,3nr |
+    awk -F . '!seen[$1 "." $2]++ { printf "%s.%s\t%s\n", $1, $2, $0 }'
+}
+
+# uv_cpython_versions < uv-python-list.json: the version of every CPython
+# build uv can download for this platform (`uv python list --only-downloads
+# --output-format json`): the default variant only (not freethreaded or debug
+# builds), one per line. Each JSON object is a record; its fields may come in
+# any order.
+uv_cpython_versions() {
+  awk '
+    BEGIN { RS = "}[ \t\r\n]*,[ \t\r\n]*[{]" }
+    function field(name,   text) {
+      if (!match($0, "\"" name "\"[ \t\r\n]*:[ \t\r\n]*\"[^\"]*\"")) return ""
+      text = substr($0, RSTART, RLENGTH)
+      sub(/^"[^"]*"[ \t\r\n]*:[ \t\r\n]*"/, "", text)
+      sub(/"$/, "", text)
+      return text
+    }
+    {
+      variant = field("variant")
+      if (field("implementation") == "cpython" && (variant == "" || variant == "default") &&
+          field("key") !~ /[+]/)
+        print field("version")
+    }
+  '
+}
+
+# python_release_date <x.y>: python.org's release date of Python x.y.0, as
+# GitHub-style ISO UTC (2025-10-07T14:13:54Z), or fail.
+python_release_date() {
+  local json date pattern
+  command -v curl >/dev/null 2>&1 || return 1
+  json=$(curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+    --connect-timeout 15 --max-time 30 "${PYTHON_RELEASE_API}?name=Python%20$1.0" 2>/dev/null) || return 1
+  date=$(awk '
+    BEGIN { RS = "[],{}[]" }
+    {
+      gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "")
+      if ($0 ~ /^"release_date"[ \t]*:/) {
+        sub(/^"release_date"[ \t]*:[ \t]*"/, "")
+        sub(/"$/, "")
+        print
+        exit
+      }
+    }
+  ' <<< "$json")
+  pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
+  [[ $date =~ $pattern ]] || return 1
+  printf '%sZ\n' "${date:0:19}"
+}
+
+# python_default_version: the version ~/.local/bin/python3 reports (3.14.6).
+python_default_version() {
+  local version
+  [[ -x $HOME/.local/bin/python3 ]] || return 1
+  version=$("$HOME/.local/bin/python3" --version 2>&1) || return 1
+  version=${version#Python }
+  [[ $version =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]] || return 1
+  printf '%s\n' "$version"
+}
+
+# pick_runtime_line <lines> <newest-line-date-status> <installed version>:
+# shared by Python and Ruby. <lines> is stable_version_lines output; the
+# status says whether the newest line's x.y.0 is old enough (old), too new
+# (new) or of unknown age (unknown). Sets PICKED_LINE, PICKED_VERSION and
+# PICKED_ORIGIN (latest-stable, or release-date-unknown when the previous line
+# is used because the newest line's age could not be read). An installed
+# version already on the newest line is never moved back to the previous one
+# for want of a date.
+PICKED_LINE=""
+PICKED_VERSION=""
+PICKED_ORIGIN=""
+pick_runtime_line() {
+  local lines=$1 status=$2 installed=$3 newest previous chosen
+  newest=$(sed -n '1p' <<< "$lines")
+  previous=$(sed -n '2p' <<< "$lines")
+  [[ -n $newest ]] || return 1
+  PICKED_ORIGIN="latest-stable"
+  case $status in
+    old) chosen=$newest ;;
+    new) chosen=$previous ;;
+    *)
+      if [[ -n $installed && ${installed%.*} == "${newest%%$'\t'*}" ]]; then
+        chosen=$newest
+      else
+        chosen=$previous
+        PICKED_ORIGIN="release-date-unknown"
+      fi ;;
+  esac
+  [[ -n $chosen ]] || return 1
+  PICKED_LINE=${chosen%%$'\t'*}
+  PICKED_VERSION=${chosen#*$'\t'}
+}
+
+# resolve_python_line: RESOLVED_PYTHON_LINE (3.14) and RESOLVED_PYTHON_VERSION
+# (its newest patch uv offers) become the newest stable CPython line uv can
+# download whose x.y.0 python.org released at least MIN_RELEASE_AGE days ago;
+# PYTHON_SELECTION says how (pick_runtime_line). When python.org gives no date,
+# the previous line, with a warning. Needs the uv the uv step installed. Once
+# per run; sets globals, so call it in the current shell. Returns non-zero
+# when uv cannot list its downloads.
+RESOLVED_PYTHON_LINE=""
+RESOLVED_PYTHON_VERSION=""
+PYTHON_SELECTION=""
+PYTHON_NEWEST_LINE=""
+resolve_python_line() {
+  [[ -z $RESOLVED_PYTHON_LINE ]] || return 0
+  local uv lines date status=unknown
+  uv=$(artifact_path uv)
+  [[ -x $uv ]] || return 1
+  lines=$("$uv" python list --only-downloads --output-format json 2>/dev/null | uv_cpython_versions | stable_version_lines) ||
+    return 1
+  [[ -n $lines ]] || return 1
+  PYTHON_NEWEST_LINE=$(sed -n '1p' <<< "$lines")
+  PYTHON_NEWEST_LINE=${PYTHON_NEWEST_LINE%%$'\t'*}
+  release_age_cutoff
+  if date=$(python_release_date "$PYTHON_NEWEST_LINE"); then
+    if [[ $date > "$RELEASE_CUTOFF_ISO" ]]; then status=new; else status=old; fi
+  fi
+  pick_runtime_line "$lines" "$status" "$(python_default_version 2>/dev/null || true)" || return 1
+  RESOLVED_PYTHON_LINE=$PICKED_LINE
+  RESOLVED_PYTHON_VERSION=$PICKED_VERSION
+  PYTHON_SELECTION=$PICKED_ORIGIN
+}
+
+# uv_python <arguments...>: `uv python <arguments>` with the uv the uv step
+# installed, putting the python executables into ~/.local/bin (whatever
+# XDG_BIN_HOME says). uv releases before 0.8 kept `--default` behind
+# --preview: when uv asks for it, the command is repeated with it.
+uv_python() {
+  local uv output status=0
+  uv=$(artifact_path uv)
+  printf '+ uv python %s\n' "$*"
+  output=$(UV_PYTHON_BIN_DIR="$HOME/.local/bin" "$uv" python "$@" 2>&1) || status=$?
+  if (( status != 0 )) && [[ $output == *--preview* ]]; then
+    status=0
+    output=$(UV_PYTHON_BIN_DIR="$HOME/.local/bin" "$uv" python "$@" --preview 2>&1) || status=$?
+  fi
+  [[ -z $output ]] || printf '%s\n' "$output" | sed 's/^/  uv: /'
+  return "$status"
+}
+
+# The cpython component: the newest stable CPython line (resolve_python_line)
+# from uv, as the default python3 and python in ~/.local/bin. A full upgrade
+# also moves the line to its newest patch (uv python upgrade).
+install_cpython() {
+  local uv status=0
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would install the newest stable CPython line at least $MIN_RELEASE_AGE days old with uv python install --default (python3 and python in ~/.local/bin)"
+    return 0
+  fi
+  uv=$(artifact_path uv)
+  [[ -x $uv ]] || die "uv is not installed at $uv; the cpython component needs the uv component"
+  if ! resolve_python_line; then
+    if verify_cpython; then
+      warn "kept the installed Python: uv could not list the CPython builds it downloads"
+      return 0
+    fi
+    die "Could not resolve the newest stable CPython line: uv could not list the CPython builds it downloads"
+  fi
+  if [[ $PYTHON_SELECTION == release-date-unknown ]]; then
+    warn "python.org did not give the release date of Python $PYTHON_NEWEST_LINE.0, so its age is unknown; installing the previous line, Python $RESOLVED_PYTHON_LINE"
+  fi
+  say "Selected Python $RESOLVED_PYTHON_LINE (now $RESOLVED_PYTHON_VERSION; the newest stable line at least $MIN_RELEASE_AGE days old)"
+  uv_python install --default "$RESOLVED_PYTHON_LINE" || status=$?
+  (( status == 0 )) || die "uv could not install Python $RESOLVED_PYTHON_LINE (status $status)"
+  if [[ $FULL_UPGRADE -eq 1 ]]; then
+    uv_python upgrade "$RESOLVED_PYTHON_LINE" || status=$?
+    (( status == 0 )) || die "uv could not upgrade Python $RESOLVED_PYTHON_LINE (status $status)"
+  fi
+}
+
+# python_default_kept: print the installed python3 version when this run
+# leaves it alone (no full upgrade; the step is recorded and verifies).
+python_default_kept() {
+  [[ $FULL_UPGRADE -eq 0 ]] && state_done cpython && verify_step cpython || return 1
+  python_default_version
+}
+
+# Ruby, compiled by rbenv install (ruby-build) after install_rbenv's
+# checkouts, under rbenv_root (where the rbenv step puts rbenv).
+rbenv_root() { printf '%s\n' "$HOME/.rbenv"; }
+
+# ruby_line_added <x.y>: when ruby-build gained the x.y.0 definition (epoch
+# seconds of the commit that added share/ruby-build/x.y.0), from the local
+# checkout's history.
+ruby_line_added() {
+  local added
+  added=$(git -C "$(rbenv_root)/plugins/ruby-build" log --diff-filter=A --format=%ct -- "share/ruby-build/$1.0" 2>/dev/null |
+    tail -n 1) || return 1
+  [[ $added =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$added"
+}
+
+# ruby_global_version: rbenv's global Ruby (its version file), when rbenv
+# installed it and it runs.
+ruby_global_version() {
+  local root version
+  root=$(rbenv_root)
+  [[ -f $root/version ]] || return 1
+  version=$(sed -n '1p' "$root/version")
+  [[ -n $version && $version != system && $version != */* ]] || return 1
+  [[ -x $root/versions/$version/bin/ruby ]] || return 1
+  "$root/versions/$version/bin/ruby" -e 'exit 0' >/dev/null 2>&1 || return 1
+  printf '%s\n' "$version"
+}
+
+# resolve_ruby_version: RESOLVED_RUBY_VERSION becomes the newest stable Ruby
+# (x.y.z) ruby-build has a definition for, on the newest line whose x.y.0
+# definition is at least MIN_RELEASE_AGE days old (ruby-build itself follows
+# its newest tag at once, so patch releases are not delayed); RUBY_SELECTION
+# as for Python. Needs the ruby-build checkout. Once per run, in the current
+# shell.
+RESOLVED_RUBY_VERSION=""
+RUBY_SELECTION=""
+RUBY_NEWEST_LINE=""
+resolve_ruby_version() {
+  [[ -z $RESOLVED_RUBY_VERSION ]] || return 0
+  local build lines added status=unknown
+  build="$(rbenv_root)/plugins/ruby-build"
+  [[ -x $build/bin/ruby-build ]] || return 1
+  lines=$("$build/bin/ruby-build" --definitions 2>/dev/null | stable_version_lines) || return 1
+  [[ -n $lines ]] || return 1
+  RUBY_NEWEST_LINE=$(sed -n '1p' <<< "$lines")
+  RUBY_NEWEST_LINE=${RUBY_NEWEST_LINE%%$'\t'*}
+  release_age_cutoff
+  if added=$(ruby_line_added "$RUBY_NEWEST_LINE"); then
+    if (( added > RELEASE_CUTOFF_EPOCH )); then status=new; else status=old; fi
+  fi
+  pick_runtime_line "$lines" "$status" "$(ruby_global_version 2>/dev/null || true)" || return 1
+  RESOLVED_RUBY_VERSION=$PICKED_VERSION
+  RUBY_SELECTION=$PICKED_ORIGIN
+}
+
+# RUBY_RESULT: this run's Ruby outcome, recorded in the state file's
+# diagnostic column for rbenv: ruby:<version>, or ruby-failed:<version> when
+# the compile failed. A failed compile only warns: rbenv itself works, and
+# verify_rbenv accepts a recorded failure, so a reconcile does not compile
+# again every time; a full upgrade (which re-runs rbenv) retries.
+RUBY_RESULT=""
+install_ruby() {
+  local rbenv version
+  rbenv="$(rbenv_root)/bin/rbenv"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would compile the newest stable Ruby at least $MIN_RELEASE_AGE days old with rbenv install and make it rbenv's global version"
+    return 0
+  fi
+  if ! resolve_ruby_version; then
+    if ruby_global_version >/dev/null; then
+      warn "kept the installed Ruby: ruby-build did not list its definitions"
+      return 0
+    fi
+    die "Could not read Ruby's versions from ruby-build in $(rbenv_root)/plugins/ruby-build"
+  fi
+  version=$RESOLVED_RUBY_VERSION
+  if [[ $RUBY_SELECTION == release-date-unknown ]]; then
+    warn "ruby-build's history does not say when Ruby $RUBY_NEWEST_LINE.0 was added, so its age is unknown; installing the previous line, Ruby $version"
+  fi
+  say "Selected Ruby $version (the newest stable release on the newest line at least $MIN_RELEASE_AGE days old)"
+  if ! run env RBENV_ROOT="$(rbenv_root)" "$rbenv" install --skip-existing "$version"; then
+    warn "Ruby $version did not compile (see ruby-build's output above); rbenv is installed without it. Install what the build lacked, then run a full upgrade (bash install.sh reconcile --yes --full-upgrade) to try again."
+    RUBY_RESULT="ruby-failed:$version"
+    return 0
+  fi
+  run env RBENV_ROOT="$(rbenv_root)" "$rbenv" global "$version"
+  RUBY_RESULT="ruby:$version"
+}
+
+# ruby_compile_failed: the newest recorded Ruby outcome (this run's, else
+# the state file's) is a failed compile.
+ruby_compile_failed() {
+  local detail=$RUBY_RESULT
+  [[ -n $detail ]] || detail=$(state_detail rbenv)
+  [[ $detail == ruby-failed:* ]]
+}
+
+# ruby_default_kept: print rbenv's global Ruby when this run leaves it alone.
+ruby_default_kept() {
+  [[ $FULL_UPGRADE -eq 0 ]] && state_done rbenv && verify_step rbenv || return 1
+  ruby_global_version
+}
 
 # uv and uvx; their Zsh completions are cached by zsh/path/uv.zsh (MI-13).
 install_uv() { artifact_install uv; }

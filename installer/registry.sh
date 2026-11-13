@@ -4,21 +4,25 @@
 # groups | install handler. Verification and signature handlers use name->_.
 #
 # A package group is implied only when the component needs its members:
-# rpatool runs on python3, pyenv/rbenv compile against dev-tools, and the
-# shell components need zsh. Bun, fnm, Yarn and pnpm are self-contained
-# (Yarn/pnpm run on fnm's Node), so they imply no OS runtimes (MI-4).
+# rpatool runs on python3, rbenv compiles Ruby against dev-tools, and the
+# shell components need zsh. Bun, fnm, Corepack, uv's CPython and Starship are
+# self-contained (Corepack's pnpm and Yarn run on fnm's Node), so they imply
+# no OS runtimes (MI-4).
+#
+# Retired components (schema 4, 2026-11): pyenv (cpython replaces it), yarn
+# and pnpm (corepack replaces both); read_profile maps them.
 component_registry() {
   cat <<'ROWS'
 packages|||install_os_packages
 bins|packages|python|install_local_bins
-pyenv|packages|dev-tools|install_pyenv
 rbenv|packages|dev-tools|install_rbenv
 bun|packages||install_bun
 fnm|packages||install_fnm
-yarn|fnm,packages||install_yarn
-pnpm|fnm,packages||install_pnpm
+corepack|fnm,packages||install_corepack
 uv|packages||install_uv
-plugins|packages|shell|install_prompt_plugins
+cpython|uv,packages||install_cpython
+starship|packages||install_starship
+plugins|packages|shell|install_plugins
 fonts|||install_fonts
 zsh-config|packages|shell|install_zsh_config
 default-shell|packages|shell|set_default_shell
@@ -122,7 +126,7 @@ artifact_registry() {
 rpatool|bins|RPATOOL|file|rpatool||
 bun|bun|BUN|zip|bun|%s|bun
 fnm|fnm|FNM|zip|fnm|fnm %s|fnm
-starship|plugins|STARSHIP|tar.gz|starship|starship %s|starship
+starship|starship|STARSHIP|tar.gz|starship|starship %s|starship
 uv|uv|UV|tar.gz|uv uvx|uv %s|uv
 ROWS
 }
@@ -193,11 +197,11 @@ artifact_release_asset() {
 }
 
 # step_follows_upstream <step>: a full upgrade re-runs it to move it forward:
-# packages, and the components that track a latest release or default branch.
-# bins (a pinned file) and fonts stay as installed.
+# packages, and the components that track a latest release, tag or runtime
+# line. bins (a pinned file) and fonts stay as installed.
 step_follows_upstream() {
   case $1 in
-    packages|pyenv|rbenv|bun|fnm|yarn|pnpm|uv|plugins) return 0 ;;
+    packages|rbenv|bun|fnm|corepack|uv|cpython|starship|plugins) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -213,5 +217,3 @@ step_signature() {
   handler=$(component_handler "$1" signature)
   { printf 'state-v3|%s|%s' "$OS_FAMILY" "$1"; "$handler"; } | hash_text
 }
-
-install_prompt_plugins() { install_starship; install_plugins; }

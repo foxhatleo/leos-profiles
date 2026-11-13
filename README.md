@@ -56,8 +56,9 @@ branch checkout with a configured upstream, then uses `git pull --ff-only`.
 The dotfile surface here is deliberately tiny — two managed blocks (three on
 macOS) plus a `STARSHIP_CONFIG` pointer — so templating and symlink-farm tools solve very
 little of the actual problem. What `install.sh` mostly does is *machine
-provisioning*: OS packages across four distribution families, bun/fnm/starship/uv/yarn/pnpm
-from Homebrew or week-old digest-checked releases, pyenv/rbenv/plugin clones
+provisioning*: OS packages across four distribution families, bun/fnm/starship/uv
+from Homebrew or week-old digest-checked releases, Corepack's pnpm and Yarn, the newest
+Node LTS, CPython and Ruby lines, rbenv/plugin clones
 at week-old releases, local SSH/GPG preparation and read-only GitHub verification, a verified Nerd
 Fonts release archive, and `chsh`. chezmoi covers that only through `run_once_` escape hatches, which
 would leave the same amount of shell to maintain plus a second tool to learn.
@@ -73,29 +74,32 @@ surface ever grows beyond a couple of managed blocks, revisit this.
 
 ## Selection model
 
-Component groups are `bins`, `packages`, `pyenv`, `rbenv`, `bun`, `yarn`,
-`pnpm`, `fnm`, `uv`, `plugins`, `fonts`, `zsh-config`, and `default-shell`.
-Package groups are `core-utils`, `shell`, `dev-tools`, `languages`, `python`,
-`media`, `network`, `heroku`, and `system`. Internal `bootstrap`, `ssh`, and
-`gpg` groups make the remaining mutations visible in the approved plan.
+Component groups are `bins`, `packages`, `rbenv`, `bun`, `fnm`, `corepack`,
+`uv`, `cpython`, `starship`, `plugins`, `fonts`, `zsh-config`, and
+`default-shell`. Package groups are `core-utils`, `shell`, `dev-tools`,
+`python`, `media`, `network`, `heroku`, and `system`. Internal `bootstrap`,
+`ssh`, and `gpg` groups make the remaining mutations visible in the approved
+plan.
 
 Groups are atomic: selecting one selects every member. A component implies a
 package group only when it needs its members: rpatool (`bins`) implies the
-small `python` group (python3 alone); pyenv/rbenv imply `dev-tools`, which
-carries every build dependency ruby-build suggests for Ruby 3 (OpenSSL,
-readline, zlib, libyaml, libffi) besides the GitHub CLI and jq; plugins, Zsh
-configuration, and default-shell setup imply `shell`. Bun, fnm, Yarn, pnpm and
-uv imply no OS runtimes: they are self-contained, and Yarn/pnpm run on fnm's
-Node, so selecting them never installs a system Node, Python or Ruby that
-non-interactive shells would then pick up. Yarn and pnpm imply fnm, which runs
-before their installation. The AI shows all selected and implied groups plus
-exact OS package membership before asking for approval.
+small `python` group (the OS python3 alone); rbenv implies `dev-tools`, which
+carries what ruby-build suggests for building a current Ruby (a C toolchain,
+autoconf, OpenSSL, libyaml, zlib, libffi, GMP, and rustc for YJIT) besides the
+GitHub CLI and jq; plugins, Zsh configuration, and default-shell setup imply
+`shell`. Bun, fnm, Corepack, uv's CPython and Starship imply no OS runtimes:
+they are self-contained, and Corepack's pnpm and Yarn run on fnm's Node, so
+selecting them never installs a system Node, Python or Ruby. `corepack`
+implies `fnm`, and `cpython` implies `uv`, which run before them. The AI shows
+all selected and implied groups plus exact OS package membership before asking
+for approval.
 
-`languages` (system node, python and ruby) stays its own group. `heroku` is
-macOS-only and opt-in: the Heroku CLI is a homebrew/core formula (no tap is
-added), but no Linux distribution packages it. A Mac that tapped
+`heroku` is macOS-only and opt-in: the Heroku CLI is a homebrew/core formula
+(no tap is added), but no Linux distribution packages it. A Mac that tapped
 `heroku/brew` for an older version of this installer can drop the tap with
-`brew untap heroku/brew` once `brew info heroku` names homebrew/core.
+`brew untap heroku/brew` once `brew info heroku` names homebrew/core. There is
+no `languages` group any more (see "Runtimes" below); `--package-groups
+languages` stops with that explanation.
 
 Recommended selects every component except `bins`, and every package group
 except `python` and `heroku`. Customize allows whole-group selection. The initial package pass keeps
@@ -115,11 +119,15 @@ The entire ignored `local/` directory is machine-owned:
 
 - `local/install-profile.tsv` records the normalized groups, upgrade/font/shell
   policies, Git identity, selected SSH path, GPG fingerprint, and moving-tool
-  channel choices. Schema 3 records `node-policy=current-lts`; an existing
-  schema-1 or schema-2 (`preserve-compatible`) profile migrates on approved
-  apply/reconcile. Inspection reports the migration without writing it.
+  channel choices. Schema 4 records `node-policy=current-lts`; an existing
+  schema-1, -2 (`preserve-compatible`) or -3 profile migrates on approved
+  apply/reconcile: `pyenv` becomes `cpython`, `yarn` and `pnpm` become
+  `corepack`, `plugins` gains `starship`, and the `languages` package group is
+  dropped (the packages it installed stay installed). Inspection reports the
+  migration without writing it.
 - `local/install-state.tsv` records verified step signatures, timestamps, and
-  resolved moving versions such as Node LTS.
+  resolved moving versions such as the Node LTS and the Ruby rbenv compiled
+  (or that its compile failed).
 - `local/private.zsh` contains private machine overrides and loads after public
   commands but before the interactive layer; `local/private-interactive.zsh`
   loads last, after completion, plugins and the prompt, for `compdef` and ZLE
@@ -167,9 +175,9 @@ password or a passphrase prompt stops at once with a
 status 3, having changed nothing: run that command in your own terminal. With
 passwordless sudo it proceeds. In a terminal, sudo asks once, up front. A
 mistyped Nerd Font name is rejected at this point too, and an existing
-`~/.pyenv` or `~/.rbenv` that is not the profile's Git checkout (for example
-Homebrew's pyenv root) stops the run unless `--skip-existing-version-managers`
-keeps it and skips that component; reconcile remembers the choice.
+`~/.rbenv` that is not the profile's Git checkout (for example Homebrew's
+rbenv root) stops the run unless `--skip-existing-version-managers` keeps it
+and skips the rbenv component; reconcile remembers the choice.
 
 Pass the Node version `inspect` resolved with `--node-version vX.Y.Z`: apply
 then installs exactly that one and stops with status 2 if it would now choose
@@ -190,16 +198,17 @@ within that time.
 | Source | macOS | Linux |
 |---|---|---|
 | bun, fnm, Starship, uv (and uvx) | Homebrew formula | the newest GitHub release at least that old (never a draft or prerelease) into `~/.local/bin`, checked against the SHA-256 digest GitHub publishes for the asset and, when gh is logged in and the project publishes one, its GitHub attestation |
-| Yarn, pnpm | Homebrew formula | npm's latest into `~/.local/npm`, installed with fnm's Node |
-| pyenv, rbenv, zsh-completions, fzf-tab | Git checkout of the newest version tag at least that old | the same |
+| Corepack (pnpm, Yarn) | npm's latest Corepack into `~/.local/npm`, installed with fnm's Node; it installs pnpm's latest and Yarn's stable release | the same |
+| rbenv, zsh-completions, fzf-tab | Git checkout of the newest version tag at least that old | the same |
 | zsh-autosuggestions, zsh-syntax-highlighting | Git checkout of the newest default-branch commit at least that old (their tags are years old) | the same |
 | ruby-build | Git checkout of its newest version tag, without delay (new tags are how new Ruby releases become installable) | the same |
 | Nerd Fonts | the newest release at least that old, checked against its `SHA-256.txt` | the same |
+| Node, Python, Ruby | see "Runtimes" below | the same |
 
-Homebrew formulae, OS packages, npm's Yarn and pnpm and the Node LTS are not
-held back: they come at their package manager's current version (inspect
-says so). Checkouts are left detached at their release; one may move back to
-an older release when the newest one is not old enough yet.
+Homebrew formulae, OS packages, and Corepack with the pnpm and Yarn it
+installs are not held back: they come at their package manager's current
+version (inspect says so). Checkouts are left detached at their release; one
+may move back to an older release when the newest one is not old enough yet.
 
 On macOS, `brew upgrade` therefore keeps the formulae current. Everywhere, a
 full upgrade (apply's default, or `upgrade-leos-profiles --full-upgrade`)
@@ -243,10 +252,13 @@ rather than overwritten. Keep such work on a branch and delete the tag.
 
 Machines set up before 2026-10 carry pinned copies. Inspect reports each
 as a `migration` record and the next approved run moves it: on macOS the
-`~/.local/bin` and `~/.local/npm` copies are removed once the Homebrew formula
-is installed (they come first on PATH and would shadow it). Checkouts on their
-default branch (the 2026-10 layout) move to their release, detached; inspect
-names the tag or commit.
+`~/.local/bin` copies are removed once the Homebrew formula is installed (they
+come first on PATH and would shadow it). Checkouts on their default branch
+(the 2026-10 layout) move to their release, detached; inspect names the tag or
+commit. Machines set up before 2026-11 had `yarn` and `pnpm` components: the
+`corepack` step removes their npm packages from `~/.local/npm` (Corepack's
+shims take those names) and, on macOS, uninstalls the Homebrew `yarn` and
+`pnpm` formulae only when the state file shows the profile installed them.
 
 uv and uvx install as one artifact (the static musl builds on Linux, as for
 Starship), with their completions cached like the other tools'. Nerd Fonts
@@ -267,13 +279,40 @@ Homebrew mirror (Homebrew's own code, metadata and bottles) for the run,
 including a Homebrew bootstrap, and for later shells, exactly like
 `brew-china-enable`. `--brew-mirror none` turns it off again.
 
-Node uses the saved `current-lts` policy: fnm installs the current Node LTS
-and makes it the default. A full upgrade moves the default to the newest LTS
-(older versions stay installed, so `fnm use` still reaches them); a run
-without one leaves a working default alone. Another Node on PATH is not
-adopted. Yarn/pnpm install and verification commands run through explicit
-`fnm exec --using=default`, so they do not depend on an interactive shell's
-PATH.
+### Runtimes
+
+Node, Python and Ruby are the same on every OS: the newest line, from a
+version manager, never the system's. Python and Ruby have no LTS, so their
+newest stable release is the target. A new major or minor line waits the
+minimum release age (counted from its first release: Node's first LTS release
+of that major, Python's x.y.0 on python.org, the commit that added Ruby's
+x.y.0 definition to ruby-build); patch releases install at once.
+
+- **Node**: fnm installs the newest LTS line that is old enough and makes it
+  the default (the saved `current-lts` policy). Another Node on PATH is not
+  adopted.
+- **Python** (`cpython`): `uv python install --default` installs the newest
+  stable CPython line uv offers as `python3` and `python` in `~/.local/bin`.
+  When python.org cannot say how old the newest line is, the previous one is
+  used, with a warning. This replaces pyenv, which is no longer installed or
+  updated: an existing `~/.pyenv` stays and keeps working (its shims come
+  first in interactive shells; `pyenv global system` hands `python3` to uv's).
+- **Ruby** (`rbenv`): rbenv and ruby-build, then `rbenv install` compiles the
+  newest stable Ruby and makes it rbenv's global version. A failed compile
+  only warns and is recorded, so reconcile does not compile again; a full
+  upgrade retries it.
+- **pnpm and Yarn** (`corepack`): Corepack's shims in `~/.local/npm/bin`, on
+  fnm's Node; outside a project they run pnpm's latest and Yarn's stable
+  (modern) release, inside one whatever its `packageManager` field pins.
+  Yarn Classic (1.x) is no longer installed.
+
+A full upgrade moves each to its newest line (`uv python upgrade` for the
+patch; older Node and Ruby versions stay installed, so `fnm use` and
+`rbenv local` still reach them); a run without one leaves a working runtime
+alone. Install and verification commands run through explicit
+`fnm exec --using=default` and the tools' own paths, so they do not depend on
+an interactive shell's PATH. `.zshenv` adds fnm's default Node, so scripts and
+`zsh -c` find `node`, `pnpm` and `yarn` too.
 
 SSH/GPG default to Skip. Reuse requires a specifically selected SSH private-key
 path or full GPG fingerprint; existing keys are never silently chosen. New SSH
@@ -310,25 +349,29 @@ The installer appends its loader to your `.zshrc`; it never rewrites the rest.
   `ZSH_THEME=""` and drop plugins the profile already provides
   (autosuggestions, syntax highlighting), or remove the oh-my-zsh lines.
 - **powerlevel10k**: Starship sets the prompt after it. Keep one: remove the
-  p10k source line and its instant-prompt block, or skip the `plugins`
+  p10k source line and its instant-prompt block, or skip the `starship`
   component and keep p10k.
 - **nvm**: fnm's default Node comes first in new shells; `nvm use` still
   switches. Remove nvm's loader to save its startup time once fnm has your
   versions (the installer adopts a compatible existing Node into fnm).
-- **conda**: at startup pyenv's shims come first, even ahead of the base
-  environment `conda init` activates; `conda activate` then puts that
-  environment's python ahead of them, as intended.
-- **asdf / mise**: their shims and fnm/pyenv/rbenv's all provide node, python
-  and ruby, and whichever activates last wins. Use one manager per language,
-  or skip the overlapping components (`fnm`, `pyenv`, `rbenv`).
+- **pyenv** (installed by this profile before 2026-11, or by you): no longer
+  installed or updated, and left in place; `zsh/path/pyenv.zsh` still
+  activates it, so in interactive shells its shims come before uv's `python3`.
+  `pyenv global system` hands `python3` to uv's, or remove `~/.pyenv`.
+- **conda**: `conda activate` puts that environment's python ahead of uv's,
+  as intended; a base environment `conda init` auto-activates does so in every
+  shell.
+- **asdf / mise**: their shims and fnm, uv's Python and rbenv all provide
+  node, python and ruby, and whichever comes first on PATH wins. Use one
+  manager per language, or skip the overlapping components (`fnm`, `cpython`,
+  `rbenv`).
 - **Linuxbrew copies of fnm, bun, Starship or uv**: on Linux the profile's
   copies in `~/.local/bin` come first (`shadow` records), so `brew upgrade` of
   those no longer changes what your shell runs; uninstall the Homebrew copies
   or keep them for other users. On macOS the profile uses Homebrew's.
-- **Homebrew pyenv/rbenv**: reported as `conflict … homebrew-install`. The
-  profile uses its own `~/.pyenv`/`~/.rbenv` checkout when present and
-  otherwise the one on PATH; `--skip-existing-version-managers` keeps
-  Homebrew's alone.
+- **Homebrew rbenv**: reported as `conflict … homebrew-install`. The
+  profile uses its own `~/.rbenv` checkout when present and otherwise the one
+  on PATH; `--skip-existing-version-managers` keeps Homebrew's alone.
 
 ## Zsh runtime
 
@@ -354,14 +397,15 @@ blocks are silent, so `scp`, `rsync` and non-interactive `ssh` cannot break on
 startup output. The `.zshenv` block also sets `skip_global_compinit=1`, which
 stops Debian and Ubuntu's global `compinit` from building a completion dump
 before the profile has its full `fpath`. The trade-off: a **non-interactive**
-shell (`ssh host cmd`, cron, scripts) sees only `~/.local/bin` and
-`~/.local/npm/bin` in front of the system PATH — no Homebrew, fnm, pyenv, rbenv
+shell (`ssh host cmd`, cron, scripts) sees only `~/.local/bin` (uv's
+`python3` among the tools there), `~/.local/npm/bin` (Corepack's pnpm and
+Yarn) and fnm's default Node in front of the system PATH — no Homebrew, rbenv
 or Go. The block adds each of them only when it is missing, so a child shell
 keeps the order its parent set up (version-manager shims stay in front), and
 it adds nothing for root with another user's HOME (`sudo -s`). Remote
 one-liners that need those tools should use absolute paths or activate just
 the required tool explicitly. On macOS, a login shell's
-`/etc/zprofile` runs `path_helper`, which would push those two directories
+`/etc/zprofile` runs `path_helper`, which would push those directories
 behind the system and Homebrew paths; the managed `.zprofile` block puts them
 back in front, so `zsh -l -c` sees the same order. A non-interactive login
 shell alone does not source the interactive profile. For example, after fnm
@@ -416,7 +460,7 @@ background job deletes multishell links older than a day whose shell has
 exited (fnm itself never removes them).
 After an update changes only some other implementation file, run
 `leos-refresh-init-cache`; `brew-checkup`, `apt-checkup`, `dnf-checkup` and
-`pacman-checkup` do this automatically. pyenv/rbenv use `--no-rehash` and refresh their shims in the
+`pacman-checkup` do this automatically. rbenv (and an existing pyenv) use `--no-rehash` and refresh their shims in the
 background at most once a day. Yarn uses the bundled `_yarn` completion.
 
 Startup latency depends on the host and installed tools. See the reproducible
@@ -431,7 +475,7 @@ Performance notes:
   the completion search path changes (a directory added, or a completion file
   added to or removed from one, which changes its mtime); other shells load the dump with
   `compinit -C`.
-- pyenv starts without forking bash to rewrite PATH and without its legacy
+- An existing pyenv starts without forking bash to rewrite PATH and without its legacy
   `compctl` completion; `zsh/completions/_pyenv` completes pyenv through the
   completion system instead.
 - zsh-autosuggestions wraps its widgets once, at the first prompt; lines
@@ -484,8 +528,8 @@ with a `#fragment` work; `~` still excludes, and `(#i)`-style flags need
 `setopt extended_glob` inside an `emulate -L zsh` function. Set
 `LEOS_PLAIN_PROMPT=1` for the ASCII prompt (chosen automatically on the Linux
 console, `TERM=linux`), set `STARSHIP_CONFIG` yourself to use your own Starship
-configuration, or set `LEOS_WARN_OPTIONAL_TOOLS=1` for optional pyenv/rbenv
-warnings. Both prompts show `user@host` over SSH and just the user name
+configuration, or set `LEOS_WARN_OPTIONAL_TOOLS=1` for an optional rbenv
+warning. Both prompts show `user@host` over SSH and just the user name
 locally, in red for root. The themed prompt leaves out Java and Kotlin versions:
 reading them starts a JVM on every prompt. History is kept in
 `${ZDOTDIR:-~}/.zsh_history`.
@@ -610,8 +654,8 @@ remote and environment.
 - macOS 15 and later on Apple silicon, matching Homebrew's
   [Tier 1 support](https://docs.brew.sh/Support-Tiers). macOS 14 and Intel
   Macs are unsupported: Homebrew no longer publishes bottles there for
-  packages this setup installs (node, python, ruby), so installs fail or build
-  from source for hours. `inspect` reports such a Mac with an
+  packages this setup installs (Ruby's build dependencies, Rust, ffmpeg), so
+  installs fail or build from source for hours. `inspect` reports such a Mac with an
   `unsupported-platform` warning and apply repeats it.
 - Ubuntu 22.04, 24.04, and 26.04 LTS on x86_64 and arm64, aligned with
   [Canonical's standard-support lifecycle](https://ubuntu.com/about/release-cycle).
@@ -628,9 +672,10 @@ containers for each listed Ubuntu, Debian, and Fedora release, plus Arch
 x86_64. macOS jobs cover the hosted Apple-silicon macOS 15 and 26 runners with a
 fresh HOME on the runner's existing OS and Homebrew installation. This is not
 a factory-fresh macOS VM or proof of a clean Command Line Tools/Homebrew
-bootstrap. The workflow tests minimal and recommended selections, pnpm-only
-and Yarn/pnpm installation, repeated reconciliation, and repair after removing
-artifacts. Credentials are skipped, default-shell changes are disabled, and
+bootstrap. The workflow tests minimal and recommended selections, a
+Corepack-only selection running pnpm and Yarn, Node, pnpm, Yarn and Python in
+a non-interactive `zsh -c` and Ruby in an interactive one, repeated
+reconciliation, and repair after removing artifacts. Credentials are skipped, default-shell changes are disabled, and
 fonts are explicitly exercised. Separate isolated tests cover credentials.
 
 Package availability, release resolution and digests, real plugin
@@ -647,8 +692,9 @@ recorded; review it before use and keep a backup.
 
 `bash install.sh inventory` lists everything the installer creates or manages,
 with its path and whether it is present: the managed blocks and their
-backups, the `~/.local/bin` executables, the npm prefix, plugin checkouts,
-pyenv/rbenv roots, the font directory, the init cache, `local/` files and
+backups, the `~/.local/bin` executables, the npm prefix (Corepack and its
+shims), uv's Python and rbenv's Rubies, plugin checkouts, the rbenv root (and
+a pyenv root left by an earlier install), the font directory, the init cache, `local/` files and
 flags, and the global Git settings it may write (`--tsv` for typed records).
 It, and `remove-blocks`, also run on hosts the installer does not support.
 

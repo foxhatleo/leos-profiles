@@ -11,7 +11,7 @@ The implementation stays compatible with macOS Bash 3.2.
 | `installer/registry.sh` | Ordered component registry, dependency closure, handler validation, the tool-artifact table, and which steps a full upgrade re-runs |
 | `installer/state.sh` | Saved profiles, schema migration, state signatures, locking and cleanup |
 | `installer/packages.sh` | Platform bootstrap, package maps, package-manager operations and the extra repositories they need (RPM Fusion, GitHub CLI's apt repository) |
-| `installer/tools.sh` | Tool installs (Homebrew formulae, age-gated GitHub releases with digest and attestation checks, npm), release checkouts and Node LTS activation |
+| `installer/tools.sh` | Tool installs (Homebrew formulae, age-gated GitHub releases with digest and attestation checks, Corepack from npm), release checkouts and the runtimes: Node LTS activation, uv's CPython, rbenv's Ruby |
 | `installer/config.sh` | Managed shell blocks, symlink-aware rewrites and default-shell changes |
 | `installer/credentials.sh` | Local key preparation, read-only GitHub checks and manual-action pauses |
 | `installer/verification.sh` | Component postconditions |
@@ -47,13 +47,22 @@ Clean up using the original fixture variable, never `rm -rf "$HOME"`.
 ## State and TSV contract
 
 Inspection format and saved profile schema are independently versioned. The
-inspection stream uses `meta<TAB>schema<TAB>1`. Saved profiles use schema 3 and
-include `node-policy<TAB>current-lts` and the `current-lts` channel. Schema-1
-and schema-2 (`preserve-compatible`) profiles remain readable and are migrated
-by an approved apply/reconcile. Inspection and dry-run must not write the
-migration. Keys added since schema 3 are optional and need no schema bump: the
-reader takes their absence as the old behaviour (`version-managers` install,
-`upgrade-casks` no, `release-age` 7, no `gpg-generated` key).
+inspection stream uses `meta<TAB>schema<TAB>1`. Saved profiles use schema 4 and
+include `node-policy<TAB>current-lts` and the `current-lts` channel. Schema-1,
+schema-2 (`preserve-compatible`) and schema-3 profiles remain readable and are
+migrated by an approved apply/reconcile. Inspection and dry-run must not write
+the migration. Schema 4 (2026-11) retired components: read_profile's
+`migrate_profile_selection` maps an older selection (`pyenv` to `cpython`,
+`yarn` and `pnpm` to `corepack`, `plugins` to `plugins` plus `starship`) and
+drops the `languages` package group, whose installed packages stay (inspect:
+`migration package-group languages`). A retired name on the command line, or
+in a schema-4 profile, stops the run with its replacement
+(`reject_retired_selection`). `migrate_local_state` drops pyenv's state rows;
+the corepack step drops yarn's and pnpm's once it has removed what they
+installed (on macOS it reads them to know the Homebrew formulae were the
+profile's). Keys added since schema 3 are optional and need no schema bump:
+the reader takes their absence as the old behaviour (`version-managers`
+install, `upgrade-casks` no, `release-age` 7, no `gpg-generated` key).
 
 The parser must preserve empty TSV columns and dispatch by record type; it must
 not treat prose progress output during apply as inspection records. Every
@@ -66,27 +75,27 @@ update it together with the emitter in `install.sh`.
 | --- | --- | --- | --- |
 | `meta` | 3 | `schema`, `1` | Inspection format version |
 | `platform` | 3 | `family`, value | Selected OS package family |
-| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now), `release-age-homebrew` (macOS: the selected Homebrew formulae install at Homebrew's current version, not age-gated), `release-age-npm` (Linux: npm's latest Yarn/pnpm, not age-gated), `zoxide-outdated` (Debian/Ubuntu dev-tools whose apt zoxide predates 0.8), `github-cli-apt-disabled` (Debian/Ubuntu dev-tools: a disabled apt source names GitHub CLI's repository, so setup adds its own next to it) |
+| `warning` | 3 | name, message | `unsupported-platform` (an Intel Mac or macOS before 15: Homebrew Tier 2/3), `no-release-build` (upstream publishes no Linux build for this CPU), `node-version` (the given `--node-version` is not what the plan resolves now), `release-age-homebrew` (macOS: the selected Homebrew formulae install at Homebrew's current version, not age-gated), `release-age-npm` (npm's latest Corepack, and the pnpm and Yarn it installs, not age-gated), `fallback-prompt` (zsh-config without the starship component), `zoxide-outdated` (Debian/Ubuntu dev-tools whose apt zoxide predates 0.8), `github-cli-apt-disabled` (Debian/Ubuntu dev-tools: a disabled apt source names GitHub CLI's repository, so setup adds its own next to it) |
 | `profile` | 3 | `root`, path | Authoritative local checkout |
 | `policy` | 3 | `node`, `full-upgrade`, `selection` or `release-age`, value | Node selection policy; `yes`/`no` host upgrade; `saved` when `inspect --saved` read the selection from the saved profile; the minimum release age in days |
 | `channel` | 3 | source, channel | Moving sources: `packages`, `node`, `ai-cli-updates` |
-| `migration` | 4 | `profile-schema`, old schema, `3`; `legacy-loader` / `legacy-environment`, file path, managed marker; or `local-bin` / `npm-prefix` / `git-checkout`, path, what happens | Pending profile migration; a legacy unmarked loader (`.zshrc`) or zshenv snippet (`.zshenv`) that `zsh-config` and `remove-blocks` remove; or an older layout: a macOS `~/.local/bin` or `~/.local/npm` copy removed once Homebrew's formula is in place, or a checkout on its default branch (the 2026-10 layout) that moves to its release, detached, naming the tag or commit its refs give as of its last fetch |
+| `migration` | 4 | `profile-schema`, old schema, `4`; `package-group`, `languages`, what happens; `legacy-loader` / `legacy-environment`, file path, managed marker; or `local-bin` / `npm-prefix` / `homebrew-formula` / `git-checkout`, path, what happens | Pending profile migration (and the retired `languages` group it drops); a legacy unmarked loader (`.zshrc`) or zshenv snippet (`.zshenv`) that `zsh-config` and `remove-blocks` remove; or an older layout: a macOS `~/.local/bin` copy removed once Homebrew's formula is in place, the retired yarn/pnpm components' npm package in `~/.local/npm` (`npm-prefix`) or, on macOS, Homebrew formula the profile installed (`homebrew-formula`), which the corepack step removes, or a checkout on its default branch (the 2026-10 layout) that moves to its release, detached, naming the tag or commit its refs give as of its last fetch |
 | `group` | 4 | category, name, status | Selected, implied or internal group |
 | `package` | 3 | OS family, name | Exact OS package member |
 | `action` | 3 | step, description | Planned effect of a step or bootstrap |
-| `artifact` | 5 | source kind, name, source, revision | Where a tool comes from. `formula`: Homebrew formula, `latest`; `release`: `github.com/<repo>` and the asset name (a Nerd Font's `<Font>.tar.xz` is checked against its release's `SHA-256.txt`); `npm`: registry package, `latest`; `git`: repository and follow mode (`tag`, `commit` or `tag-now`, see "Release age"); `direct`: pinned URL and SHA-256 |
+| `artifact` | 5 | source kind, name, source, revision | Where a tool comes from. `formula`: Homebrew formula, `latest`; `release`: `github.com/<repo>` and the asset name (a Nerd Font's `<Font>.tar.xz` is checked against its release's `SHA-256.txt`); `npm`: registry package (Corepack), `latest`; `corepack`: what Corepack installs for use outside projects, as a package spec (`pnpm@latest`, `yarn@stable`) and its tag; `git`: repository and follow mode (`tag`, `commit` or `tag-now`, see "Release age"); `direct`: pinned URL and SHA-256 |
 | `release` | 5 | name, tag, published_at, `digest` or `attestation` | The GitHub release a `release` artifact resolves to now (Linux tools, and the Nerd Font): the newest that is not a draft or prerelease, has a plain version tag and was published at least the minimum release age ago. `attestation` when gh is logged in and the project publishes an attestation for the asset, otherwise GitHub's SHA-256 digest (a Nerd Font: always `digest`, from `SHA-256.txt`). `unresolved`, `-`, `resolve-during-apply` when GitHub cannot be read or the release is unusable |
-| `external` | 3 | service, description or URL | External service the plan contacts |
+| `external` | 3 | service, description or URL | External service the plan contacts: `node-lts-index`, `python-release-dates` (python.org's release API, for a new Python line's age), `ruby-sources` (what `rbenv install` downloads), the Homebrew mirror, GitHub |
 | `file` | 3 | name, path | File the plan reads or writes; `zshrc`, `zshenv` and (macOS) `zprofile` give the resolved zsh startup files |
 | `global` | 3 | `git`, keys | Global Git settings the plan configures |
 | `irreversible` | 3 | effect, explanation | Effect that cannot be automatically undone: `host-upgrade` (package upgrades), `login-shell` (chsh) |
 | `privileged` | 3 | action, command or description | An action run as root (through sudo, or directly when root): `homebrew-bootstrap`, `bootstrap`, `package-manager`, `repository`, `dnf-swap`, `pacman-sync`, `credential-packages`, `etc-shells`, `login-shell`, `cask-upgrade` (macOS `--upgrade-casks`: some cask installers ask for sudo) |
 | `behaviour` | 3 | name, description | A side effect beyond the listed files and packages: `compat-symlinks` (apt fd/bat links), `gnu-tools` (GNU tools ahead of BSD on macOS), `git-identity` (global name/email writes), `github-cli-apt` (Debian/Ubuntu dev-tools take gh from GitHub CLI's apt repository), `brew-mirror`, `login-shell` (macOS uses `/bin/zsh`), `cask-upgrade` (the full upgrade also runs `brew upgrade --cask`; only with `--upgrade-casks`) |
-| `conflict` | 4 | component, path, reason | An existing installation in the way of `pyenv`/`rbenv`: `not-a-git-checkout`, `unexpected-origin`, `local-changes` (apply stops unless `--skip-existing-version-managers`), or `homebrew-install` (informational) |
-| `existing` | 4 | name, path, effect | A shell framework or version manager the profile coexists with: `oh-my-zsh`, `powerlevel10k`, `nvm`, `conda`, `asdf`, `mise` |
+| `conflict` | 4 | component, path, reason | An existing installation in the way of `rbenv`: `not-a-git-checkout`, `unexpected-origin`, `local-changes` (apply stops unless `--skip-existing-version-managers`), or `homebrew-install` (informational) |
+| `existing` | 4 | name, path, effect | A shell framework or version manager the profile coexists with: `oh-my-zsh`, `powerlevel10k`, `pyenv` (no longer installed or updated; its shims come before uv's python3), `nvm`, `conda`, `asdf`, `mise` |
 | `shadow` | 4 | executable, other copy, profile copy | Linux: a Homebrew copy of a tool that the profile's `~/.local/bin` copy will shadow |
-| `runtime` | 4 | `node`, version, origin | `current-lts` (what fnm will install), `installed` (a working default kept without a full upgrade), or `unresolved`/`resolve-during-apply` |
-| `postcondition` | 3 | component, status | Current `verified` or `needed` result; `skipped` when `--skip-existing-version-managers` keeps an existing pyenv/rbenv |
+| `runtime` | 4 | `node`, `python` or `ruby`, version, origin | Node: `current-lts` (what fnm will install); Python (the line, such as `3.14`) and Ruby (the version): `latest-stable` (the newest stable line at least the minimum release age old), or `release-date-unknown` (the newest line's age could not be read, so the previous line); any: `installed` (a working runtime kept without a full upgrade), or `unresolved`/`resolve-during-apply` (Python before uv is installed, Ruby before ruby-build is) |
+| `postcondition` | 3 | component, status | Current `verified` or `needed` result; `skipped` when `--skip-existing-version-managers` keeps an existing rbenv |
 | `manual-action` | 4 | action, public path, destination | Manual intervention required; process exits 3 |
 | `item` | 5 | kind, name, path, `present`/`absent` | `inventory --tsv` only: something the installer creates or manages |
 
@@ -123,7 +132,7 @@ every queued `manual-action` and exits 3; a credential pause calls it at
 once.
 
 `preflight` (installer/plan.sh) changes nothing. It stops on a blocking
-pyenv/rbenv conflict (unless `--skip-existing-version-managers`), checks
+rbenv conflict (unless `--skip-existing-version-managers`), checks
 `--node-version` against a live resolution (exit 2 when they differ), and
 collects what the run needs from the user: when stdin is not a terminal, a
 passphrase prompt or a sudo password (chsh runs as root, so it counts here)
@@ -159,7 +168,7 @@ The `zsh-config` step owns up to three managed blocks, each between
 | Marker | File | Content |
 | --- | --- | --- |
 | `loader` | `.zshrc` | `LEOS_PROFILES_HOME` default and the interactive-only `source …/zsh/start.zsh` |
-| `environment` | `.zshenv` | `skip_global_compinit=1`, and `~/.local/bin`, `~/.local/npm/bin` in front of PATH when missing (never moved, so a child shell keeps its parent's shims first; not for root with a foreign HOME) |
+| `environment` | `.zshenv` | `skip_global_compinit=1`, and `~/.local/bin`, `~/.local/npm/bin` and fnm's default-alias bin (`${FNM_DIR:-${XDG_DATA_HOME:-~/.local/share}/fnm}/aliases/default/bin`, or macOS's `~/Library/Application Support/fnm/...` when that is fnm's directory; only when it exists), in that order, in front of PATH when missing (never moved, so a child shell keeps its parent's shims first; not for root with a foreign HOME). Non-interactive shells get Node, and with it Corepack's shims, from the alias |
 | `login-path` | `.zprofile` (macOS only) | the same PATH entries again, after `/etc/zprofile`'s `path_helper` |
 
 `resolve_zsh_dotdirs` in `installer/config.sh` decides where those files are:
@@ -179,15 +188,55 @@ them after the one-time `.leos-profiles.bak` backup, and verification fails
 while one remains. The three-line wrapper is removed whole; any other matching
 line becomes a `:` no-op so an enclosing block still parses.
 
-## Node and package invariants
+## Runtime and package invariants
 
-Yarn and pnpm each depend on fnm. Node policy is `current-lts`: installing fnm
-resolves the current LTS (from `index.tab`, or `fnm list-remote --lts`),
-installs it and makes it the default; another Node on PATH is not adopted.
-Verification only requires a working default, so a newer LTS alone does not
-make the step look undone: a full upgrade re-runs the step and moves the
-default, while a repair leaves it. The state file's diagnostic column records
-the version installed. Run npm tool installation and verification with
+Node, Python and Ruby are the newest line on every OS, from fnm, uv and rbenv;
+no package group installs a system runtime (the `languages` group is gone).
+Each resolver (`resolve_node_version`, `resolve_python_line`,
+`resolve_ruby_version` in installer/tools.sh) holds a new major/minor line
+back until it is `MIN_RELEASE_AGE` days old and takes its newest patch at once:
+
+- Node: `node_lts_pick` reads `index.tab` (newest first) and takes the newest
+  release of the newest LTS major whose first LTS-codenamed row is dated on
+  or before the cutoff. `fnm list-remote --lts`, the fallback when the index
+  cannot be read, has no dates and is not gated.
+- Python: `uv python list --only-downloads --output-format json`, CPython's
+  default variant, plain x.y.z versions (`uv_cpython_versions`,
+  `stable_version_lines`); the newest line's x.y.0 date comes from python.org
+  (`PYTHON_RELEASE_API`). Without a date the previous line is used, with a
+  warning, unless `~/.local/bin/python3` is already on the newest line
+  (`pick_runtime_line` never moves it back for want of a date). The cpython
+  step runs `uv python install --default <x.y>` with `UV_PYTHON_BIN_DIR` set to
+  `~/.local/bin` (`uv_python` repeats it with `--preview` when uv asks for it,
+  as uv before 0.8 did), and on a full upgrade `uv python upgrade <x.y>`.
+  `verify_cpython` requires `~/.local/bin/python3` to resolve into
+  `uv python dir` and run.
+- Ruby: ruby-build follows its newest tag (`tag-now`), so its definitions are
+  current; the newest line's age is when its `share/ruby-build/x.y.0` was
+  added (`git log --diff-filter=A`, `ruby_line_added`). `install_ruby` runs
+  `rbenv install --skip-existing` and `rbenv global`. A failed compile warns
+  and sets `RUBY_RESULT=ruby-failed:<v>`, which `mark_done` records in the
+  state file's diagnostic column; `verify_rbenv` accepts it (the newest
+  recorded outcome, `ruby_compile_failed`), so a reconcile does not compile
+  again, and a full upgrade (rbenv follows upstream) retries.
+
+Corepack depends on fnm. Node policy is `current-lts`: installing fnm
+resolves the LTS as above, installs it and makes it the default; another Node
+on PATH is not adopted. Verification only requires a working runtime, so a
+newer line alone does not make a step look undone: a full upgrade re-runs the
+step and moves it, while a repair leaves it. The state file's diagnostic
+column records the Node version installed and the Ruby outcome. The corepack
+step installs npm's Corepack into `~/.local/npm` on every OS (Homebrew's
+formula would pull in Homebrew's node), runs `corepack enable
+--install-directory ~/.local/npm/bin` and `corepack install --global
+pnpm@latest yarn@stable` (with `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`), and first
+removes what the retired yarn/pnpm steps left: their npm packages
+(`legacy_npm_copy_present` never mistakes Corepack's own shims for one) and, on
+macOS, the Homebrew formulae their state rows show the profile installed.
+The step then runs each shim once with the network allowed (current pnpm
+releases fetch their native binary on first use); `verify_corepack` runs each
+with `COREPACK_ENABLE_NETWORK=0`, so inspect downloads nothing. Both run from
+`/`, so no project's `packageManager` field picks another version. Run npm and Corepack commands and verification with
 explicit `fnm exec --using=default` so a non-interactive installer does not
 accidentally use an older system Node.
 
@@ -265,8 +314,8 @@ bash tests/package-map-availability.sh macos  # or apt, fedora, arch
 The release check picks every Linux release asset for both CPUs (from any
 host) with the default minimum release age, verifies the two pinned digests
 and the picked Nerd Fonts archive, and then, on Linux, installs and runs each
-picked release (a second install must find it current) plus npm's Yarn and
-pnpm on the current LTS; on macOS it checks that each Homebrew formula
+picked release (a second install must find it current) plus npm's Corepack
+with its pnpm and Yarn on the current LTS; on macOS it checks that each Homebrew formula
 exists. Plugin checks check out each plugin's release and load the combined
 real Zsh plugin integration. CI also checks TOML and fenced Bash in the runbook.
 None of these alone substitutes for actual package installation.
@@ -332,8 +381,10 @@ macOS CI uses fresh HOME directories on hosted Apple-silicon macOS 15 and 26
 runners (Homebrew Tier 1; macOS 14 and Intel Macs are unsupported). Those images already have developer tools and Homebrew: the
 matrix does not establish factory-fresh macOS bootstrap coverage.
 
-Scenarios exercise minimal Zsh setup, pnpm-only dependency resolution,
-Yarn/pnpm execution, recommended provisioning, repeat reconciliation, a
+Scenarios exercise minimal Zsh setup, corepack-only dependency resolution
+with pnpm and Yarn execution, recommended provisioning (then `node`, `pnpm`,
+`yarn` and `python3` in a non-interactive `zsh -c`, and Ruby in an interactive
+shell), repeat reconciliation, a
 full-upgrade reconcile that re-runs the tools and finds them current (Linux),
 repair (of bun, Starship, the `.zshenv` managed block, a plugin checkout left
 on its default branch as the 2026-10 installs did, and the font) and the refusal to discard
@@ -376,11 +427,12 @@ an ISO-8601 UTC string that compares with GitHub's `published_at` as text
 - **Git checkouts** (`follow_release_checkout <PREFIX> <dir> <label>`) end
   detached, by `<PREFIX>_FOLLOW` in `sources.sh`: `tag` (the newest tag
   matching `^v?[0-9]+(\.[0-9]+)*$` whose creator date is at or before the
-  cutoff: pyenv, rbenv, zsh-completions, fzf-tab), `commit`
+  cutoff: rbenv, zsh-completions, fzf-tab), `commit`
   (`rev-list -1 --before=<cutoff> origin/HEAD`: zsh-autosuggestions and
   zsh-syntax-highlighting, whose last tags are from 2024 and 2023) or
   `tag-now` (the newest stable tag, no delay: ruby-build, so a Ruby security
-  release is installable at once). A checkout may move backwards. Before
+  release is installable at once; a new Ruby line still waits, see "Runtime
+  and package invariants"). A checkout may move backwards. Before
   fetching, it refuses uncommitted changes, and (`checkout_local_work`) a
   checked-out commit or a local tag on a commit that origin does not have:
   none of the remote-tracking branches as of the last fetch, nor the tags
@@ -392,10 +444,13 @@ an ISO-8601 UTC string that compares with GitHub's `published_at` as text
   moves on; a local tag upstream deleted or moved, on a commit no branch
   holds, stops the step until it is deleted. The fetch prunes tags, so a tag
   upstream deleted is not picked.
+- **Runtimes**: a new Node LTS major, Python minor or Ruby minor line waits
+  the same number of days; their patch releases do not (see "Runtime and
+  package invariants").
 - **Not gated**: Homebrew formulae and OS packages (their package managers'
-  current versions; inspect warns about formulae), npm's Yarn and pnpm, and
-  Node (the current LTS). The bootstrap and raw URLs on `master` are not
-  releases.
+  current versions; inspect warns about formulae), and npm's Corepack with
+  the pnpm and Yarn it installs. The bootstrap and raw URLs on `master` are
+  not releases.
 
 Signatures never contain the age or a tag (`release` for Git sources), so a
 new upstream release, or a different `--min-release-age`, re-runs nothing;
@@ -426,8 +481,9 @@ Tools are not pinned, so there is no routine dependency bump. What needs care:
    fingerprints from `gpg --show-keys` on the new file.
 5. A Git source whose tags stop (or start) tracking its branch: change its
    `<PREFIX>_FOLLOW` in `installer/sources.sh`.
-6. Behaviour changes upstream (a new major pnpm, a Node LTS that a tool does
-   not support yet) reach users on their next full upgrade. Run the real
+6. Behaviour changes upstream (a new major pnpm, a Node LTS, Python or Ruby
+   line that a tool does not support yet) reach users on their next full
+   upgrade, a week after the line's first release. Run the real
    provisioning matrix when a failure points there, and say in the change
    description which upstream versions it was tested with.
 

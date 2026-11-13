@@ -116,7 +116,9 @@ run_block 'alias opt-out and locale preservation' \
     [[ -z ${LC_ALL:-} ]]
   '
 
-run_block 'node.zsh adds ~/.yarn/bin from disk without spawning yarn' \
+# Corepack's Yarn (modern Yarn) has no global bin: Yarn Classic's ~/.yarn/bin
+# is no longer put on PATH, even where an old install left it.
+run_block 'node.zsh leaves Yarn Classic'"'"'s ~/.yarn/bin off PATH without spawning yarn' \
   HOME="$tmp/yarn-home" LEOS_TEST_ROOT="$root" -- '
   setopt err_return no_unset pipe_fail
   mkdir -p "$HOME/.yarn/bin"
@@ -124,8 +126,8 @@ run_block 'node.zsh adds ~/.yarn/bin from disk without spawning yarn' \
   typeset -ga path=()
   __leos_add_path() { [[ -d $1 ]] && path=("$1" $path); return 0; }
   source "$LEOS_TEST_ROOT/zsh/path/node.zsh"
-  (( ${path[(Ie)$HOME/.yarn/bin]} ))          # ~/.yarn/bin was added from disk
-  [[ ! -e $HOME/yarn-spawned ]]               # ...without spawning a Node process
+  (( ! ${path[(Ie)$HOME/.yarn/bin]} ))
+  [[ ! -e $HOME/yarn-spawned ]]
 '
 
 # Fake npm/pnpm/bun ahead of the real ones on PATH, so the spawn count below
@@ -1020,7 +1022,7 @@ mkdir -p "$tmp/doctor-profile"
 print -rl -- \
   "printf 'meta\\tschema\\t1\\n'" \
   "printf 'warning\\tunsupported-platform\\tIntel Mac\\n'" \
-  "printf 'conflict\\tpyenv\\t/home/u/.pyenv\\tnot-a-git-checkout\\n'" \
+  "printf 'conflict\\trbenv\\t/home/u/.rbenv\\tnot-a-git-checkout\\n'" \
   "printf 'postcondition\\tpackages\\tverified\\n'" \
   "printf 'postcondition\\tplugins\\t%s\\n' \"\${DOCTOR_PLUGINS:-needed}\"" \
   'printf "%s\n" "$*" > "$DOCTOR_LOG"' > "$tmp/doctor-profile/install.sh"
@@ -1033,7 +1035,7 @@ run_block 'leos-doctor summarises inspect --saved' \
   [[ "$(<$DOCTOR_LOG)" == "inspect --saved" ]]
   [[ $out == *"ok       packages"* && $out == *"NEEDED   plugins"* ]]
   [[ $out == *"warning  unsupported-platform: Intel Mac"* ]]
-  [[ $out == *"conflict pyenv: /home/u/.pyenv (not-a-git-checkout)"* ]]
+  [[ $out == *"conflict rbenv: /home/u/.rbenv (not-a-git-checkout)"* ]]
   [[ $out == *"Repair with:"* ]]
   out=$(DOCTOR_PLUGINS=verified leos-doctor)
   [[ $out == *"Everything the saved setup installs is in place."* ]]

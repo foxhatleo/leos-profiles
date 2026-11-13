@@ -282,7 +282,8 @@ test_artifact_sources_follow_the_platform() {
     fail "rpatool is not pinned to a commit and digest"
   [[ $HOMEBREW_INSTALL_URL == https://raw.githubusercontent.com/Homebrew/install/*/install.sh && $HOMEBREW_INSTALL_SHA256 =~ ^[0-9a-f]{64}$ ]] ||
     fail "Homebrew's installer is not pinned to a commit and digest"
-  assert_equals "$(component_handler plugins artifacts)" starship
+  assert_equals "$(component_handler starship artifacts)" starship
+  assert_equals "$(component_handler plugins artifacts)" ""
   assert_equals "$(component_handler zsh-config artifacts)" ""
 }
 
@@ -290,7 +291,7 @@ test_package_maps_cover_every_supported_os() {
   local family group packages
   for family in macos apt fedora arch; do
     OS_FAMILY=$family
-    for group in core-utils shell dev-tools languages python media network system; do
+    for group in core-utils shell dev-tools python media network system; do
       packages=$(package_list_for_group "$group")
       [[ -n $packages ]] || fail "missing package mapping for $family/$group"
     done
@@ -299,21 +300,20 @@ test_package_maps_cover_every_supported_os() {
     else
       assert_equals "$(package_list_for_group heroku)" ""
     fi
+    # Schema 4 retired the languages group on every family.
+    assert_equals "$(package_list_for_group languages)" ""
     # No YouTube tooling in any group.
     for group in ${CANONICAL_GROUPS//,/ }; do
       [[ " $(package_list_for_group "$group") " != *" yt-dlp "* ]] || fail "$family/$group still installs yt-dlp"
     done
   done
+  has_csv_item "$CANONICAL_GROUPS" languages && fail "languages is still a package group"
+  has_csv_item "$RECOMMENDED_GROUPS" languages && fail "Recommended still selects languages"
   # A keg-only formula never reaches PATH; gnutls had no user in the profile.
   OS_FAMILY=macos
   assert_equals "$(package_list_for_group network)" "wget rclone"
   OS_FAMILY=apt
   assert_contains "$(package_list_for_group dev-tools)" "libssl-dev"
-  assert_contains "$(package_list_for_group dev-tools)" "libreadline-dev"
-  # libncursesw5-dev was removed on Debian 13 / Ubuntu 24.04+; libncurses-dev is
-  # the portable replacement (pulls in libncursesw6).
-  assert_contains "$(package_list_for_group dev-tools)" "libncurses-dev"
-  [[ $(package_list_for_group dev-tools) != *libncursesw5-dev* ]] || fail "apt dev-tools still pins the removed libncursesw5-dev"
   # eza is not packaged on Debian 12 / Ubuntu 22.04, and the apt map covers both.
   [[ " $(package_list_for_group dev-tools) " != *" eza "* ]] || fail "apt dev-tools names eza, which Debian 12 and Ubuntu 22.04 lack"
   OS_FAMILY=fedora
@@ -323,23 +323,31 @@ test_package_maps_cover_every_supported_os() {
   assert_contains "$(package_list_for_group dev-tools)" "openssl@3"
 }
 
-# ONB-3: `rbenv install` of Ruby 3 builds openssl, psych (libyaml), readline,
-# zlib and fiddle (libffi) extensions. dev-tools must carry each library's
-# development package, per family. macOS uses the SDK's libffi and zlib, but
-# Homebrew's zlib is listed too.
+# ONB-3: `rbenv install` compiles the newest Ruby: openssl, psych (libyaml),
+# zlib and fiddle (libffi) extensions, GMP for fast Integer, autoconf and a C
+# toolchain, and rustc for YJIT. dev-tools must carry each, per family (macOS
+# uses the SDK's libffi). CPython comes prebuilt from uv, so the build
+# dependencies only pyenv needed are gone, and Ruby 3.3+ needs no readline.
 test_dev_tools_cover_ruby_build_dependencies() {
-  local family requirement members
+  local family requirement members python_only
   for family in macos apt fedora arch; do
     OS_FAMILY=$family
     members=" $(package_list_for_group dev-tools) "
     case $family in
-      macos) requirement='openssl@3 readline zlib libyaml' ;;
-      apt) requirement='libssl-dev libreadline-dev zlib1g-dev libyaml-dev libffi-dev build-essential' ;;
-      fedora) requirement='openssl-devel readline-devel zlib-devel libyaml-devel libffi-devel gcc make' ;;
-      arch) requirement='openssl readline zlib libyaml libffi base-devel' ;;
+      macos) requirement='openssl@3 zlib libyaml gmp autoconf rust'
+        python_only='tcl-tk sqlite readline' ;;
+      apt) requirement='libssl-dev zlib1g-dev libyaml-dev libffi-dev libgmp-dev autoconf rustc build-essential'
+        python_only='clang llvm libbz2-dev liblzma-dev libncurses-dev libreadline-dev libsqlite3-dev libxml2-dev libxmlsec1-dev tk-dev' ;;
+      fedora) requirement='openssl-devel zlib-devel libyaml-devel libffi-devel gmp-devel autoconf rust gcc make patch'
+        python_only='bzip2-devel gdbm-libs libnsl2 libuuid-devel readline-devel sqlite-devel tk-devel xz-devel' ;;
+      arch) requirement='openssl zlib libyaml libffi gmp rust base-devel'
+        python_only='readline tk' ;;
     esac
     for requirement in $requirement; do
       [[ $members == *" $requirement "* ]] || fail "$family dev-tools lacks ruby-build dependency $requirement"
+    done
+    for requirement in $python_only; do
+      [[ $members != *" $requirement "* ]] || fail "$family dev-tools still carries the Python-only build dependency $requirement"
     done
     # MI-8: GitHub CLI and jq.
     for requirement in jq "$( [[ $family == arch ]] && printf github-cli || printf gh)"; do
@@ -349,13 +357,16 @@ test_dev_tools_cover_ruby_build_dependencies() {
 }
 
 test_default_font_policy_and_npm_tool_sources() {
+  local family
   OS_FAMILY=macos
   INSTALL_FONTS=auto
   FONT_NAME=""
   font_should_install || fail "automatic font policy should install a font on desktop macOS"
-  assert_equals "$(inspect_npm_tool yarn)" $'artifact\tformula\tyarn\tyarn\tlatest'
-  OS_FAMILY=apt
-  assert_equals "$(inspect_npm_tool pnpm)" $'artifact\tnpm\tpnpm\tregistry.npmjs.org/pnpm\tlatest'
+  # Corepack comes from npm on every OS (Homebrew's would pull in its node).
+  for family in macos apt; do
+    OS_FAMILY=$family
+    assert_equals "$(inspect_corepack)" $'artifact\tnpm\tcorepack\tregistry.npmjs.org/corepack\tlatest\nartifact\tcorepack\tpnpm\tpnpm@latest\tlatest\nartifact\tcorepack\tyarn\tyarn@stable\tstable'
+  done
 }
 
 test_macos_package_verification_batches_brew_calls() {
@@ -394,19 +405,19 @@ test_macos_install_batches_and_resolves_aliases() {
     local IFS=' '
     printf '%s\n' "$*" >> "$BREW_CALLS_FILE"
     [[ $1 == list && $2 == --formula ]] || return 0
-    printf '%s\n' bat direnv eza fd fzf gh git jq libyaml openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib pkg-config
+    printf '%s\n' autoconf bat direnv eza fd fzf gh git gmp jq libyaml openssl@3 ripgrep rust vim xz zlib pkg-config
   }
   ensure_brew() { :; }
   out=$(install_os_packages 2>&1)
   assert_contains "$out" "+ brew install zoxide"
-  [[ $out != *"brew install"*pkgconf* && $out != *"brew install"*sqlite* ]] ||
+  [[ $out != *"brew install"*pkgconf* && $out != *"brew install"*rust* ]] ||
     fail "an installed formula or alias was requested again: $out"
   [[ $(grep -c '^list' "$BREW_CALLS_FILE") == 1 ]] || fail "brew list ran more than once: $(cat "$BREW_CALLS_FILE")"
   # A full upgrade requests everything without listing first.
   FULL_UPGRADE=1
   : > "$BREW_CALLS_FILE"
   out=$(install_os_packages 2>&1)
-  assert_contains "$out" "+ brew install bat direnv"
+  assert_contains "$out" "+ brew install autoconf bat direnv"
   ! grep -q '^list' "$BREW_CALLS_FILE" || fail "a full upgrade listed formulae"
   rm -rf "$BREW_CALLS_FILE" "$HOMEBREW_PREFIX"
 }
@@ -565,7 +576,7 @@ test_profile_round_trip_and_control_character_rejection() {
   PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
   DRY_RUN=0
   SELECTED_STEPS='packages,bun'
-  SELECTED_GROUPS='core-utils,languages'
+  SELECTED_GROUPS='core-utils,python'
   SAVED_FULL_UPGRADE=yes
   GIT_NAME='Leo Liang'
   SSH_KEY_PATH='/tmp/id test'
@@ -659,7 +670,7 @@ record_curl_argv() {
     if [[ -n $out ]]; then
       printf 'fixture-bytes' > "$out"
     else
-      printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv22.1.0\tx\tx\tx\tx\tx\tx\tx\tx\tIron\tfalse\n'
+      printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv22.1.0\t2025-04-22\tx\tx\tx\tx\tx\tx\tx\tIron\tfalse\n'
     fi
   }
 }
@@ -1176,7 +1187,7 @@ test_follow_release_checkout_trusts_origin_tags() {
 # commits for the two plugins whose tags lag years behind, ruby-build's
 # definitions without delay.
 test_git_sources_have_follow_modes() {
-  assert_equals "$PYENV_FOLLOW $RBENV_FOLLOW $RUBY_BUILD_FOLLOW" "tag tag tag-now"
+  assert_equals "$RBENV_FOLLOW $RUBY_BUILD_FOLLOW" "tag tag-now"
   assert_equals "$ZSH_AUTOSUGGESTIONS_FOLLOW $ZSH_SYNTAX_HIGHLIGHTING_FOLLOW" "commit commit"
   assert_equals "$ZSH_COMPLETIONS_FOLLOW $FZF_TAB_FOLLOW" "tag tag"
   local tag
@@ -1189,7 +1200,7 @@ test_git_sources_have_follow_modes() {
 }
 
 # git_checkout_at_release: a clean, detached checkout of the expected
-# repository. verify_pyenv uses it, so a checkout left on a branch (the
+# repository. verify_rbenv uses it, so a checkout left on a branch (the
 # 2026-10 layout) is moved by the step, and inspect reports the move.
 test_git_checkout_at_release_rejects_branch_and_foreign_checkouts() {
   local temp first
@@ -1199,47 +1210,51 @@ test_git_checkout_at_release_rejects_branch_and_foreign_checkouts() {
   fix_now
   MIN_RELEASE_AGE=7
   mkdir -p "$HOME"
-  ! git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a missing checkout was accepted"
-  fixture_git init -q -b master "$HOME/.pyenv"
-  mkdir -p "$HOME/.pyenv/bin"
-  printf '#!/bin/sh\n' > "$HOME/.pyenv/bin/pyenv"
-  chmod +x "$HOME/.pyenv/bin/pyenv"
-  fixture_git -C "$HOME/.pyenv" add bin/pyenv
-  fixture_git -C "$HOME/.pyenv" commit -q -m first
-  first=$(dated_commit "$HOME/.pyenv" second 30 v2.8.0)
-  dated_commit "$HOME/.pyenv" third 2 v2.8.1 >/dev/null
-  git -C "$HOME/.pyenv" checkout -q --detach "$first"
-  ! git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout without an origin was accepted"
-  git -C "$HOME/.pyenv" remote add origin git@github.com:PyEnv/pyenv.git
-  git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a detached checkout of an equivalent origin was rejected"
-  verify_pyenv || fail "verify_pyenv rejected a checkout detached at its release"
+  ! git_checkout_at_release "$HOME/.rbenv" "$RBENV_REPOSITORY" || fail "a missing checkout was accepted"
+  fixture_git init -q -b master "$HOME/.rbenv"
+  mkdir -p "$HOME/.rbenv/bin"
+  printf '#!/bin/sh\n' > "$HOME/.rbenv/bin/rbenv"
+  chmod +x "$HOME/.rbenv/bin/rbenv"
+  fixture_git -C "$HOME/.rbenv" add bin/rbenv
+  fixture_git -C "$HOME/.rbenv" commit -q -m first
+  first=$(dated_commit "$HOME/.rbenv" second 30 v2.8.0)
+  dated_commit "$HOME/.rbenv" third 2 v2.8.1 >/dev/null
+  git -C "$HOME/.rbenv" checkout -q --detach "$first"
+  ! git_checkout_at_release "$HOME/.rbenv" "$RBENV_REPOSITORY" || fail "a checkout without an origin was accepted"
+  git -C "$HOME/.rbenv" remote add origin git@github.com:RbEnv/rbenv.git
+  git_checkout_at_release "$HOME/.rbenv" "$RBENV_REPOSITORY" || fail "a detached checkout of an equivalent origin was rejected"
   OS_FAMILY=apt
-  SELECTED_STEPS=pyenv
+  SELECTED_STEPS=rbenv
   TARGET="$temp/profile"
   assert_equals "$(report_tool_migrations)" ""
-  git -C "$HOME/.pyenv" checkout -q master
-  ! git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout on a branch was accepted"
-  ! verify_pyenv || fail "verify_pyenv accepted a checkout on its branch"
-  assert_equals "$(report_tool_migrations)" $'migration\tgit-checkout\t'"$HOME/.pyenv"$'\tpyenv moves from origin\'s default branch to tag v2.8.0 (the newest stable tag at least 7 days old), detached'
-  git -C "$HOME/.pyenv" checkout -q --detach "$first"
-  printf 'local\n' >> "$HOME/.pyenv/history"
-  ! git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout with local changes was accepted"
-  git -C "$HOME/.pyenv" checkout -q -- history
-  git -C "$HOME/.pyenv" remote set-url origin https://github.com/example/not-pyenv.git
-  ! git_checkout_at_release "$HOME/.pyenv" "$PYENV_REPOSITORY" || fail "a checkout of another repository was accepted"
+  git -C "$HOME/.rbenv" checkout -q master
+  ! git_checkout_at_release "$HOME/.rbenv" "$RBENV_REPOSITORY" || fail "a checkout on a branch was accepted"
+  assert_equals "$(report_tool_migrations)" $'migration\tgit-checkout\t'"$HOME/.rbenv"$'\trbenv moves from origin\'s default branch to tag v2.8.0 (the newest stable tag at least 7 days old), detached'
+  git -C "$HOME/.rbenv" checkout -q --detach "$first"
+  printf 'local\n' >> "$HOME/.rbenv/history"
+  ! git_checkout_at_release "$HOME/.rbenv" "$RBENV_REPOSITORY" || fail "a checkout with local changes was accepted"
+  git -C "$HOME/.rbenv" checkout -q -- history
+  git -C "$HOME/.rbenv" remote set-url origin https://github.com/example/not-rbenv.git
+  ! git_checkout_at_release "$HOME/.rbenv" "$RBENV_REPOSITORY" || fail "a checkout of another repository was accepted"
   rm -rf "$temp"
 }
 
 test_recommended_and_whole_group_closure() {
-  [[ $SELECTED_STEPS == 'packages,pyenv,rbenv,bun,fnm,yarn,pnpm,uv,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
-  [[ $SELECTED_GROUPS == 'core-utils,shell,dev-tools,languages,media,network,system' ]] || fail "Recommended package groups changed"
-  # MI-4: the Node and Bun tools bring no OS runtimes.
-  SELECTED_STEPS=bun,yarn,pnpm
+  [[ $SELECTED_STEPS == 'packages,rbenv,bun,fnm,corepack,uv,cpython,starship,plugins,fonts,zsh-config,default-shell' ]] || fail "Recommended components changed"
+  [[ $SELECTED_GROUPS == 'core-utils,shell,dev-tools,media,network,system' ]] || fail "Recommended package groups changed"
+  # MI-4: the Node, Python and Bun tools bring no OS runtimes.
+  SELECTED_STEPS=bun,corepack,cpython,starship
   SELECTED_GROUPS=""
   normalise_dependencies
-  assert_equals "$SELECTED_STEPS" bun,yarn,pnpm,packages,fnm
+  order_selected_steps
+  assert_equals "$SELECTED_STEPS" packages,bun,fnm,corepack,uv,cpython,starship
   assert_equals "$SELECTED_GROUPS" ""
-  # rpatool needs python3 and nothing else from languages.
+  # Ruby compiles against dev-tools.
+  SELECTED_STEPS=rbenv
+  normalise_dependencies
+  assert_equals "$SELECTED_GROUPS" dev-tools
+  SELECTED_GROUPS=""
+  # rpatool needs the OS python3 and nothing else.
   SELECTED_STEPS=bins
   normalise_dependencies
   assert_equals "$SELECTED_GROUPS" python
@@ -1276,12 +1291,12 @@ test_node_lts_is_resolved_once_per_run() {
   temp=$(mktemp -d)
   HOME="$temp/home"
   mkdir -p "$HOME/.local/bin"
-  curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv22.1.0\tx\tx\tx\tx\tx\tx\tx\tx\tIron\tfalse\n'; }
+  curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv22.1.0\t2025-04-22\tx\tx\tx\tx\tx\tx\tx\tIron\tfalse\n'; }
   SELECTED_STEPS=fnm
   RESOLVED_NODE_VERSION=""
   resolve_node_version
   assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
-  curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv25.0.0\tx\tx\tx\tx\tx\tx\tx\tx\t-\tfalse\nv24.2.0\tx\tx\tx\tx\tx\tx\tx\tx\tKrypton\tfalse\n'; }
+  curl() { printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\nv25.0.0\t2025-10-01\tx\tx\tx\tx\tx\tx\tx\t-\tfalse\nv24.2.0\t2025-10-28\tx\tx\tx\tx\tx\tx\tx\tKrypton\tfalse\n'; }
   resolve_node_version
   assert_equals "$RESOLVED_NODE_VERSION" v22.1.0
   SELECTED_STEPS=fnm
@@ -1442,7 +1457,7 @@ test_full_upgrade_reruns_steps_that_follow_upstream() {
       assert_contains "$out" "Skipping $step (recorded complete and verified)"
     fi
   done
-  assert_equals "$(paste -sd, - < "$RUN_LOG")" packages,pyenv,rbenv,bun,fnm,yarn,pnpm,uv,plugins
+  assert_equals "$(paste -sd, - < "$RUN_LOG")" packages,rbenv,bun,fnm,corepack,uv,cpython,starship,plugins
   : > "$RUN_LOG"
   FULL_UPGRADE=0
   for step in "${steps[@]}"; do run_step "$step" >/dev/null 2>&1; done
@@ -1923,6 +1938,14 @@ test_fedora_media_swaps_only_ffmpeg() {
   SELECTED_GROUPS=core-utils
   out=$(install_os_packages)
   [[ $out != *rpmfusion* && $out != *swap* && $out != *allowerasing* ]] || fail "a non-media install touched RPM Fusion: $out"
+  # No ffmpeg-free, but Fedora's split -free libraries may still be present as
+  # other packages' dependencies: the plain install replaces them, scoped.
+  DRY_RUN=0
+  run_root() { printf '+ %s\n' "$*"; }
+  pkg_install() { printf '+ pkg_install %s\n' "$*"; }
+  out=$(fedora_install_media ImageMagick ffmpeg)
+  assert_contains "$out" "+ dnf install -y --allowerasing ffmpeg"
+  [[ $(grep -c -- --allowerasing <<< "$out") == 1 ]] || fail "--allowerasing reached another command: $out"
 }
 
 # Debian/Ubuntu dev-tools take gh from GitHub CLI's apt repository: the
@@ -2182,9 +2205,11 @@ test_artifact_signatures_name_the_source_not_a_version() {
   assert_equals "$(signature_fnm)" '|formula|fnm|current-lts'
   RESOLVED_NODE_VERSION=v24.2.0
   assert_equals "$(signature_fnm)" '|formula|fnm|current-lts'
-  assert_equals "$(signature_plugins)" "|$TARGET|formula|starship|$ZSH_AUTOSUGGESTIONS_REPOSITORY|$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY|$ZSH_COMPLETIONS_REPOSITORY|$FZF_TAB_REPOSITORY|release"
-  assert_equals "$(signature_pyenv)" "|$PYENV_REPOSITORY|release"
-  assert_equals "$(signature_rbenv)" "|$RBENV_REPOSITORY|$RUBY_BUILD_REPOSITORY|release"
+  assert_equals "$(signature_starship)" '|formula|starship'
+  assert_equals "$(signature_plugins)" "|$TARGET|$ZSH_AUTOSUGGESTIONS_REPOSITORY|$ZSH_SYNTAX_HIGHLIGHTING_REPOSITORY|$ZSH_COMPLETIONS_REPOSITORY|$FZF_TAB_REPOSITORY|release"
+  assert_equals "$(signature_rbenv)" "|$RBENV_REPOSITORY|$RUBY_BUILD_REPOSITORY|release|ruby-latest-stable"
+  assert_equals "$(signature_cpython)" "|uv-python|latest-stable|$HOME/.local/bin"
+  assert_equals "$(signature_corepack)" "|npm|corepack@latest|$HOME/.local/npm|pnpm@latest yarn@stable"
   # Nor the minimum release age: changing it re-runs nothing.
   local before
   before=$(step_signature plugins)
@@ -2278,7 +2303,7 @@ test_inspect_lists_every_selected_registry_artifact() {
   HOME="$temp/home"
   mkdir -p "$HOME"
   OS_FAMILY=macos
-  SELECTED_STEPS=bins,bun,pyenv,yarn,plugins
+  SELECTED_STEPS=bins,bun,corepack,starship,plugins
   SELECTED_GROUPS=""
   REQUESTED_STEPS=$SELECTED_STEPS
   REQUESTED_GROUPS=""
@@ -2287,12 +2312,13 @@ test_inspect_lists_every_selected_registry_artifact() {
   assert_contains "$output" $'artifact\tdirect\trpatool\t'"$RPATOOL_URL"$'\t'"$RPATOOL_SHA256"
   assert_contains "$output" $'artifact\tformula\tbun\tbun\tlatest'
   assert_contains "$output" $'artifact\tformula\tstarship\tstarship\tlatest'
-  assert_contains "$output" $'artifact\tformula\tyarn\tyarn\tlatest'
-  assert_contains "$output" $'artifact\tgit\tpyenv\t'"$PYENV_REPOSITORY"$'\ttag'
+  assert_contains "$output" $'artifact\tnpm\tcorepack\tregistry.npmjs.org/corepack\tlatest'
+  assert_contains "$output" $'artifact\tcorepack\tyarn\tyarn@stable\tstable'
   assert_contains "$output" $'artifact\tgit\tfzf-tab\t'"$FZF_TAB_REPOSITORY"$'\ttag'
   assert_contains "$output" $'artifact\tgit\tzsh-autosuggestions\t'"$ZSH_AUTOSUGGESTIONS_REPOSITORY"$'\tcommit'
   assert_contains "$output" $'policy\trelease-age\t7'
-  assert_contains "$output" $'warning\trelease-age-homebrew\tHomebrew formulae (bun, yarn, starship)'
+  assert_contains "$output" $'warning\trelease-age-homebrew\tHomebrew formulae (bun, starship)'
+  assert_contains "$output" $'warning\trelease-age-npm\tnpm installs the latest corepack'
   [[ $output != *$'\nrelease\t'* ]] || fail "macOS listed a GitHub release for a formula"
   [[ $output != *$'\tfnm\t'* ]] || fail "an unselected artifact was listed"
   OS_FAMILY=apt
@@ -2302,9 +2328,9 @@ test_inspect_lists_every_selected_registry_artifact() {
   assert_contains "$output" $'artifact\trelease\tbun\tgithub.com/oven-sh/bun\tbun-linux-aarch64.zip'
   # Offline (this suite's curl): the release is resolved during apply.
   assert_contains "$output" $'release\tbun\tunresolved\t-\tresolve-during-apply'
-  assert_contains "$output" $'warning\trelease-age-npm\tnpm installs the latest yarn'
+  assert_contains "$output" $'warning\trelease-age-npm\tnpm installs the latest corepack'
   assert_contains "$output" $'artifact\trelease\tstarship\tgithub.com/starship/starship\tstarship-aarch64-unknown-linux-musl.tar.gz'
-  assert_contains "$output" $'artifact\tnpm\tyarn\tregistry.npmjs.org/yarn\tlatest'
+  assert_contains "$output" $'artifact\tcorepack\tpnpm\tpnpm@latest\tlatest'
   [[ $output != *$'artifact\tformula\t'* ]] || fail "Linux listed a Homebrew formula"
   SELECTED_STEPS=fonts
   REQUESTED_STEPS=fonts
@@ -2682,8 +2708,8 @@ test_inspect_reports_the_picked_release() {
   OS_FAMILY=apt
   fix_now
   MIN_RELEASE_AGE=7
-  SELECTED_STEPS=plugins
-  REQUESTED_STEPS=plugins
+  SELECTED_STEPS=starship
+  REQUESTED_STEPS=starship
   SELECTED_GROUPS=""
   REQUESTED_GROUPS=""
   verify_step() { return 1; }
@@ -2726,7 +2752,7 @@ test_signatures_are_unchanged_by_a_new_upstream_release() {
   fake_github_api "$temp/curl-argv"
   github_release_tag_pick fixture/tool
   assert_equals "$RELEASE_TAG" v1.4.2
-  for step in pyenv rbenv bun fnm uv plugins fonts; do before+=("$(step_signature "$step")"); done
+  for step in rbenv bun fnm corepack uv cpython starship plugins fonts; do before+=("$(step_signature "$step")"); done
   # A week later v1.5.1 is old enough and becomes the pick.
   FIXED_NOW=$(( FIXED_NOW + 7 * 86400 ))
   fix_now
@@ -2734,8 +2760,8 @@ test_signatures_are_unchanged_by_a_new_upstream_release() {
   github_release_tag_pick fixture/tool
   assert_equals "$RELEASE_TAG" v1.5.1
   NERD_FONTS_RELEASE_BASE="$NERD_FONTS_DOWNLOAD_URL/v3.5.0"
-  for step in pyenv rbenv bun fnm uv plugins fonts; do after+=("$(step_signature "$step")"); done
-  for step in pyenv rbenv bun fnm uv plugins fonts; do
+  for step in rbenv bun fnm corepack uv cpython starship plugins fonts; do after+=("$(step_signature "$step")"); done
+  for step in rbenv bun fnm corepack uv cpython starship plugins fonts; do
     assert_equals "$step:${after[$i]}" "$step:${before[$i]}"
     i=$(( i + 1 ))
   done
@@ -3213,39 +3239,39 @@ test_preflight_refuses_prompts_without_terminal() {
 }
 
 # --- Version-manager conflicts (ONB-5, CI-11) ------------------------------
-test_existing_pyenv_is_reported_and_can_be_kept() {
+test_existing_rbenv_is_reported_and_can_be_kept() {
   local temp out status=0
   temp=$(mktemp -d)
   HOME="$temp/home"
   HOMEBREW_PREFIX="$temp/brew"
-  mkdir -p "$HOME/.pyenv/bin" "$HOMEBREW_PREFIX/bin" "$HOMEBREW_PREFIX/opt/rbenv"
+  mkdir -p "$HOME/.rbenv/bin" "$HOMEBREW_PREFIX/bin" "$HOMEBREW_PREFIX/opt/rbenv"
   OS_FAMILY=macos
-  SELECTED_STEPS=pyenv,rbenv
-  assert_equals "$(version_manager_conflicts pyenv)" "$HOME/.pyenv"$'\tnot-a-git-checkout'
-  assert_equals "$(version_manager_conflicts rbenv)" "$HOMEBREW_PREFIX/opt/rbenv"$'\thomebrew-install'
+  SELECTED_STEPS=rbenv
+  assert_equals "$(version_manager_conflicts rbenv)" "$HOME/.rbenv"$'\tnot-a-git-checkout\n'"$HOMEBREW_PREFIX/opt/rbenv"$'\thomebrew-install'
   out=$(report_conflicts)
-  assert_contains "$out" $'conflict\tpyenv\t'"$HOME/.pyenv"$'\tnot-a-git-checkout'
+  assert_contains "$out" $'conflict\trbenv\t'"$HOME/.rbenv"$'\tnot-a-git-checkout'
   assert_contains "$out" $'conflict\trbenv\t'"$HOMEBREW_PREFIX/opt/rbenv"$'\thomebrew-install'
+  # pyenv is no longer the profile's: an existing one is no conflict.
+  (version_manager_conflicts pyenv) >/dev/null 2>&1 && fail "pyenv still has version-manager conflicts"
   # Without the option, preflight stops before any change and names it.
   privileged_plan() { :; }
   out=$( (preflight) 2>&1 ) || status=$?
   assert_equals "$status" 1
   assert_contains "$out" "--skip-existing-version-managers"
-  # With it, both components are skipped and reported as such.
+  # With it, the component is skipped and reported as such.
   SKIP_EXISTING_VERSION_MANAGERS=1
-  install_pyenv() { fail "the kept pyenv was replaced"; }
-  install_rbenv() { fail "the Homebrew rbenv was shadowed"; }
-  out=$(run_step pyenv; run_step rbenv)
-  assert_contains "$out" "Skipping pyenv: keeping the existing installation"
+  install_rbenv() { fail "the kept rbenv was replaced"; }
+  out=$(run_step rbenv)
+  assert_contains "$out" "Skipping rbenv: keeping the existing installation"
   SELECTED_GROUPS=""
   REQUESTED_STEPS=$SELECTED_STEPS
   REQUESTED_GROUPS=""
-  assert_contains "$(inspect_tsv)" $'postcondition\tpyenv\tskipped'
-  # A pinned checkout of another repository is a conflict too.
-  rm -rf "$HOME/.pyenv"
-  git init -q "$HOME/.pyenv"
-  git -C "$HOME/.pyenv" remote add origin https://github.com/example/not-pyenv.git
-  assert_equals "$(version_manager_conflicts pyenv)" "$HOME/.pyenv"$'\tunexpected-origin'
+  assert_contains "$(inspect_tsv)" $'postcondition\trbenv\tskipped'
+  # A checkout of another repository is a conflict too.
+  rm -rf "$HOME/.rbenv"
+  git init -q "$HOME/.rbenv"
+  git -C "$HOME/.rbenv" remote add origin https://github.com/example/not-rbenv.git
+  assert_contains "$(version_manager_conflicts rbenv)" "$HOME/.rbenv"$'\tunexpected-origin'
   rm -rf "$temp"
 }
 
@@ -3256,13 +3282,15 @@ test_existing_setups_and_shadowed_artifacts_are_disclosed() {
   HOME="$temp/home"
   HOMEBREW_PREFIX="$temp/brew"
   TARGET="$temp/profile"
-  mkdir -p "$HOME/.oh-my-zsh" "$HOME/.nvm" "$HOME/miniconda3" "$HOMEBREW_PREFIX/bin" "$HOMEBREW_PREFIX/opt/powerlevel10k"
+  mkdir -p "$HOME/.oh-my-zsh" "$HOME/.nvm" "$HOME/miniconda3" "$HOME/.pyenv" "$HOMEBREW_PREFIX/bin" "$HOMEBREW_PREFIX/opt/powerlevel10k"
   printf '#!/bin/sh\n' > "$HOMEBREW_PREFIX/bin/starship"
   chmod +x "$HOMEBREW_PREFIX/bin/starship"
   unset ZSH NVM_DIR
   OS_FAMILY=macos
-  SELECTED_STEPS=plugins
+  SELECTED_STEPS=starship
   out=$(report_existing_setups)
+  # pyenv is no longer installed; one left by an earlier install is disclosed.
+  assert_contains "$out" $'existing\tpyenv\t'"$HOME/.pyenv"$'\tno longer installed or updated; it stays'
   assert_contains "$out" $'existing\toh-my-zsh\t'"$HOME/.oh-my-zsh"$'\t'
   assert_contains "$out" $'existing\tpowerlevel10k\t'"$HOMEBREW_PREFIX/opt/powerlevel10k"$'\t'
   assert_contains "$out" $'existing\tnvm\t'"$HOME/.nvm"$'\t'
@@ -3273,15 +3301,28 @@ test_existing_setups_and_shadowed_artifacts_are_disclosed() {
   OS_FAMILY=apt
   out=$(report_shadowed_artifacts)
   assert_equals "$out" $'shadow\tstarship\t'"$HOMEBREW_PREFIX/bin/starship"$'\t'"$HOME/.local/bin/starship"
-  SELECTED_STEPS=pyenv
-  [[ -z $(report_shadowed_artifacts) ]] || fail "an unselected artifact was reported as shadowing"
-  # macOS: an npm-prefix yarn from an older install is reported for removal.
-  OS_FAMILY=macos
-  SELECTED_STEPS=yarn,pnpm
-  mkdir -p "$HOME/.local/npm/bin"
+  SELECTED_STEPS=plugins
+  [[ -z $(report_shadowed_artifacts) ]] || fail "plugins still owns Starship"
+  # An npm-prefix yarn from the retired yarn component is reported for
+  # removal on every OS; Corepack's own shim is not.
+  SELECTED_STEPS=corepack
+  STATE_FILE="$temp/state.tsv"
+  mkdir -p "$HOME/.local/npm/bin" "$HOME/.local/npm/lib/node_modules/corepack/dist"
   printf '#!/bin/sh\n' > "$HOME/.local/npm/bin/yarn"
-  assert_equals "$(report_tool_migrations)" $'migration\tnpm-prefix\t'"$HOME/.local/npm/bin/yarn"$'\tremoved: Homebrew\'s yarn formula replaces it'
+  ln -s ../lib/node_modules/corepack/dist/pnpm.js "$HOME/.local/npm/bin/pnpm"
+  for family in apt macos; do
+    OS_FAMILY=$family
+    load_brew_formulae() { BREW_FORMULAE=$'\nyarn\npnpm\n'; }
+    assert_equals "$(report_tool_migrations)" $'migration\tnpm-prefix\t'"$HOME/.local/npm/bin/yarn"$'\tremoved: Corepack\'s yarn replaces it'
+  done
+  # macOS: Homebrew's yarn is uninstalled only when the profile's retired yarn
+  # step recorded it.
+  printf 'yarn\tsig\t2026-01-01T00:00:00Z\t\n' > "$STATE_FILE"
+  assert_contains "$(report_tool_migrations)" $'migration\thomebrew-formula\t'"$HOMEBREW_PREFIX/opt/yarn"$'\tuninstalled: the profile installed it'
+  [[ $(report_tool_migrations) != *"opt/pnpm"* ]] || fail "a Homebrew pnpm the profile never installed was reported for removal"
   OS_FAMILY=apt
+  [[ $(report_tool_migrations) != *homebrew-formula* ]] || fail "Linux reported a Homebrew formula migration"
+  SELECTED_STEPS=plugins
   assert_equals "$(report_tool_migrations)" ""
   rm -rf "$temp"
 }
@@ -3409,7 +3450,7 @@ test_inspect_saved_uses_the_saved_selection() {
   out=$(run_cli "$temp/profile" "$temp/home" inspect --saved 2>&1) && fail "inspect --saved worked without a saved profile"
   assert_contains "$out" "No saved install profile"
   mkdir -p "$temp/profile/local"
-  printf '%s\t%s\n' schema 2 groups zsh-config package-groups shell full-upgrade yes \
+  printf '%s\t%s\n' schema 2 groups zsh-config package-groups shell,languages full-upgrade yes \
     fonts no font '' default-shell no git-name '' git-email '' ssh skip ssh-key '' \
     ssh-passphrase empty gpg skip gpg-key '' gpg-passphrase empty node-channel current-lts \
     node-policy preserve-compatible ai-cli-update-channel native package-channel system > "$temp/profile/local/install-profile.tsv"
@@ -3417,8 +3458,10 @@ test_inspect_saved_uses_the_saved_selection() {
   assert_contains "$out" $'policy\tselection\tsaved'
   assert_contains "$out" $'policy\tfull-upgrade\tno'
   assert_contains "$out" $'policy\tnode\tcurrent-lts'
-  assert_contains "$out" $'migration\tprofile-schema\t2\t3'
+  assert_contains "$out" $'migration\tprofile-schema\t2\t4'
+  assert_contains "$out" $'migration\tpackage-group\tlanguages\tdropped: the packages it installed stay installed'
   assert_contains "$out" $'group\tcomponent\tzsh-config\tselected'
+  [[ $out != *$'group\tpackage\tlanguages'* ]] || fail "inspect --saved kept the retired languages group"
   [[ $out != *$'group\tcomponent\tfnm'* ]] || fail "inspect --saved used the default selection"
   out=$(run_cli "$temp/profile" "$temp/home" inspect --saved --groups fnm 2>&1) || status=$?
   [[ $status -ne 0 ]] || fail "inspect --saved accepted a selection option"
@@ -3493,7 +3536,7 @@ test_success_names_the_terminal_font_and_wsl_action() {
   XDG_DATA_HOME="$temp/xdg"
   mkdir -p "$XDG_DATA_HOME/fonts/NerdFonts"
   : > "$XDG_DATA_HOME/fonts/NerdFonts/CaskaydiaCoveNerdFont-Regular.ttf"
-  SELECTED_STEPS=plugins,fonts
+  SELECTED_STEPS=starship,fonts
   INSTALL_FONTS=yes
   FONT_NAME=CascadiaCode
   assert_contains "$(print_terminal_font_hint)" '"CaskaydiaCove Nerd Font"'
@@ -3734,6 +3777,444 @@ test_generated_gpg_key_survives_the_apply_profile_rewrite() {
 # later tests, and every test starts from install.sh's defaults. An EXIT trap
 # runs the installer's own cleanup, removing temporary files a test's code
 # under test tracked (ensure_github_known_hosts, download_verified, ...).
+# --- Runtimes and schema 4 (PR E) ------------------------------------------
+
+# day_before_now <days>: the YYYY-MM-DD that many days before FIXED_NOW.
+day_before_now() { epoch_to_iso "$(( FIXED_NOW - $1 * 86400 ))" | cut -c1-10; }
+
+# A schema-3 profile names the retired components and the languages group;
+# read_profile maps them to schema 4 without writing, inspect reports the
+# migration, and the next approved write records schema 4.
+test_profile_schema_3_migrates_to_4() {
+  local temp
+  temp=$(mktemp -d)
+  LOCAL_DIR="$temp/local"
+  PROFILE_FILE="$LOCAL_DIR/install-profile.tsv"
+  mkdir -p "$LOCAL_DIR"
+  printf '%s\t%s\n' schema 3 groups packages,pyenv,rbenv,fnm,yarn,pnpm,uv,plugins,zsh-config \
+    package-groups core-utils,shell,dev-tools,languages,media full-upgrade no \
+    fonts no font '' default-shell no git-name '' git-email '' ssh skip ssh-key '' \
+    ssh-passphrase empty gpg skip gpg-key '' gpg-passphrase empty node-channel current-lts \
+    node-policy current-lts ai-cli-update-channel native package-channel system > "$PROFILE_FILE"
+  cp "$PROFILE_FILE" "$temp/before"
+  read_profile
+  assert_equals "$PROFILE_SCHEMA" 3
+  assert_equals "$SELECTED_STEPS" packages,cpython,rbenv,fnm,corepack,uv,plugins,starship,zsh-config
+  assert_equals "$SELECTED_GROUPS" core-utils,shell,dev-tools,media
+  validate_options
+  normalise_dependencies
+  order_selected_steps
+  assert_equals "$SELECTED_STEPS" packages,rbenv,fnm,corepack,uv,cpython,starship,plugins,zsh-config
+  assert_equals "$(report_profile_migration)" $'migration\tprofile-schema\t3\t4\nmigration\tpackage-group\tlanguages\tdropped: the packages it installed stay installed; fnm, cpython (uv) and rbenv provide Node, Python and Ruby'
+  DRY_RUN=1
+  write_profile
+  cmp -s "$temp/before" "$PROFILE_FILE" || fail "a dry run wrote the migrated profile"
+  DRY_RUN=0
+  write_profile
+  grep -qx $'schema\t4' "$PROFILE_FILE" || fail "the profile was not written as schema 4"
+  grep -qx $'groups\tpackages,rbenv,fnm,corepack,uv,cpython,starship,plugins,zsh-config' "$PROFILE_FILE" ||
+    fail "the migrated selection was not saved: $(cat "$PROFILE_FILE")"
+  assert_equals "$(report_profile_migration)" ""
+  # Schema 4 is read as it is: no second mapping.
+  read_profile
+  assert_equals "$PROFILE_SCHEMA" 4
+  assert_equals "$SELECTED_STEPS" packages,rbenv,fnm,corepack,uv,cpython,starship,plugins,zsh-config
+  # A schema-4 profile naming a retired component is invalid, not migrated.
+  sed -i.bak $'s/^groups\t.*/groups\tpyenv,zsh-config/' "$PROFILE_FILE"
+  read_profile
+  ( validate_options ) >/dev/null 2>&1 && fail "a schema-4 profile with pyenv was accepted"
+  rm -rf "$temp"
+}
+
+# The retired names on the command line stop the run with their replacement.
+test_retired_components_and_languages_are_refused() {
+  local temp out status
+  temp=$(mktemp -d)
+  make_fixture_checkout "$temp/profile"
+  status=0
+  out=$(run_cli "$temp/profile" "$temp/home" inspect --package-groups core-utils,languages 2>&1) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "The languages package group was removed"
+  for item in pyenv yarn pnpm; do
+    status=0
+    out=$(run_cli "$temp/profile" "$temp/home" inspect --groups "$item" 2>&1) || status=$?
+    assert_equals "$item:$status" "$item:1"
+    assert_contains "$out" "The $item component was removed"
+  done
+  assert_contains "$out" "Use --groups corepack"
+  rm -rf "$temp"
+}
+
+# Non-interactive shells get fnm's default Node (and with it Corepack's
+# shims) from the .zshenv block, after the local bins, only when the alias
+# exists, and never twice.
+test_zshenv_block_adds_fnm_default_node() {
+  local temp default_bin
+  command -v zsh >/dev/null 2>&1 || return 0
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  assert_contains "$(zshenv_managed_content)" '${FNM_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/fnm}'
+  assert_contains "$(zshenv_managed_content)" '/aliases/default/bin'
+  assert_contains "$(zprofile_managed_content)" '/aliases/default/bin'
+  install_zsh_config
+  # No fnm yet: nothing is added.
+  # shellcheck disable=SC2016
+  assert_equals "$(HOME="$HOME" zsh -fc 'path=(/usr/bin /bin); source ~/.zshenv; print -r -- $PATH')" \
+    "$HOME/.local/bin:$HOME/.local/npm/bin:/usr/bin:/bin"
+  default_bin="$HOME/.local/share/fnm/aliases/default/bin"
+  mkdir -p "$default_bin"
+  printf '#!/bin/sh\necho v26.13.1\n' > "$default_bin/node"
+  chmod +x "$default_bin/node"
+  # shellcheck disable=SC2016
+  assert_equals "$(HOME="$HOME" zsh -fc 'path=(/usr/bin /bin); source ~/.zshenv; print -r -- $PATH')" \
+    "$HOME/.local/bin:$HOME/.local/npm/bin:$default_bin:/usr/bin:/bin"
+  # What `zsh -c` without -i runs: .zshenv, then the command.
+  assert_equals "$(env -i HOME="$HOME" PATH=/usr/bin:/bin ZDOTDIR="$HOME" zsh -c 'node -v')" v26.13.1
+  # Inherited: left as it is.
+  # shellcheck disable=SC2016
+  assert_equals "$(HOME="$HOME" zsh -fc 'path=("$HOME/.local/bin" "$HOME/.local/npm/bin" "$HOME/.local/share/fnm/aliases/default/bin" /usr/bin); source ~/.zshenv; print -r -- $PATH')" \
+    "$HOME/.local/bin:$HOME/.local/npm/bin:$default_bin:/usr/bin"
+  # FNM_DIR wins; macOS's Application Support is the fallback fnm itself uses.
+  mkdir -p "$temp/custom/aliases/default/bin" "$HOME/Library/Application Support/fnm/aliases/default/bin"
+  # shellcheck disable=SC2016
+  assert_equals "$(HOME="$HOME" FNM_DIR="$temp/custom" zsh -fc 'path=(/usr/bin); source ~/.zshenv; print -r -- $PATH')" \
+    "$HOME/.local/bin:$HOME/.local/npm/bin:$temp/custom/aliases/default/bin:/usr/bin"
+  rm -rf "$HOME/.local/share/fnm"
+  # shellcheck disable=SC2016
+  assert_equals "$(HOME="$HOME" zsh -fc 'path=(/usr/bin); source ~/.zshenv; print -r -- $PATH')" \
+    "$HOME/.local/bin:$HOME/.local/npm/bin:$HOME/Library/Application Support/fnm/aliases/default/bin:/usr/bin"
+  # shellcheck disable=SC2016
+  assert_equals "$(HOME="$HOME" zsh -fc 'path=(/usr/bin "$HOME/.local/bin"); source <(print -r -- "$1"); print -r -- $PATH' zsh "$(zprofile_managed_content)")" \
+    "$HOME/.local/bin:$HOME/.local/npm/bin:$HOME/Library/Application Support/fnm/aliases/default/bin:/usr/bin"
+  rm -rf "$temp"
+}
+
+# index.tab rows, newest first: version, date, 7 unused columns, LTS codename.
+node_index_fixture() {
+  printf 'version\tdate\tfiles\tnpm\tv8\tuv\tzlib\topenssl\tmodules\tlts\tsecurity\n'
+  printf '%s\t%s\tx\tx\tx\tx\tx\tx\tx\t%s\tfalse\n' \
+    v27.0.0 "$(day_before_now 1)" - \
+    v26.3.1 "$(day_before_now 1)" Lithium \
+    v26.3.0 "$(day_before_now 3)" Lithium \
+    v26.2.0 "$(day_before_now 20)" - \
+    v24.9.2 "$(day_before_now 1)" Krypton \
+    v24.9.1 "$(day_before_now 40)" Krypton \
+    v24.8.0 "$(day_before_now 400)" Krypton
+}
+
+# A new LTS line waits the minimum release age, counted from its first LTS
+# release; patches (of either line) do not.
+test_node_lts_line_waits_the_release_age() {
+  fix_now
+  MIN_RELEASE_AGE=7
+  assert_equals "$(node_index_fixture | node_lts_pick "$(day_before_now 7)")" v24.9.2
+  MIN_RELEASE_AGE=2
+  assert_equals "$(node_index_fixture | node_lts_pick "$(day_before_now 2)")" v26.3.1
+  assert_equals "$(node_index_fixture | node_lts_pick "$(day_before_now 500)")" ""
+  curl() { node_index_fixture; }
+  MIN_RELEASE_AGE=7
+  fix_now
+  RESOLVED_NODE_VERSION=""
+  resolve_node_version
+  assert_equals "$RESOLVED_NODE_VERSION" v24.9.2
+  MIN_RELEASE_AGE=0
+  fix_now
+  RESOLVED_NODE_VERSION=""
+  resolve_node_version
+  assert_equals "$RESOLVED_NODE_VERSION" v26.3.1
+}
+
+# uv's download list, as `uv python list --only-downloads --output-format
+# json` prints it (one line; fields in uv's order): previews, freethreaded
+# builds and other implementations must not count.
+uv_list_fixture() {
+  local version variant implementation key sep=""
+  printf '['
+  while read -r implementation version variant; do
+    key="$implementation-$version"
+    [[ $variant == default ]] || key="$key+$variant"
+    printf '%s{"key":"%s-linux-x86_64-gnu","version":"%s","version_parts":{"major":3,"minor":1,"patch":0},"path":null,"symlink":null,"url":"https://example.invalid/%s.tar.gz","os":"linux","variant":"%s","implementation":"%s","arch":"x86_64","libc":"gnu"}' \
+      "$sep" "$key" "$version" "$key" "$variant" "$implementation"
+    sep=,
+  done <<'ROWS'
+cpython 3.16.0a1 default
+cpython 3.15.2 freethreaded
+cpython 3.15.2 default
+cpython 3.15.1 default
+cpython 3.14.6 default
+cpython 3.14.6 freethreaded
+cpython 3.13.14 default
+pypy 3.17.1 default
+graalpy 3.18.0 default
+ROWS
+  printf ']\n'
+}
+
+# fake_uv <home>: a uv in ~/.local/bin that lists uv_list_fixture, reports
+# `python dir` as UV_FIXTURE_DIR, and logs every other call to UV_LOG; with
+# UV_NEEDS_PREVIEW, `--default` fails as uv before 0.8 did without --preview.
+fake_uv() {
+  mkdir -p "$1/.local/bin"
+  uv_list_fixture > "$1/uv-list.json"
+  cat > "$1/.local/bin/uv" <<'UV'
+#!/bin/sh
+case "$1 $2" in
+  "python list") cat "$HOME/uv-list.json"; exit 0 ;;
+  "python dir") printf '%s\n' "$UV_FIXTURE_DIR"; exit 0 ;;
+esac
+printf '%s\n' "$*" >> "$UV_LOG"
+case " $* " in
+  *" --default "*)
+    case " $* " in *" --preview "*) ;; *) [ -z "$UV_NEEDS_PREVIEW" ] || { echo "error: The --default flag is only available in preview mode; add the --preview flag to use --default" >&2; exit 2; } ;; esac ;;
+esac
+exit 0
+UV
+  chmod +x "$1/.local/bin/uv"
+}
+
+# python_org_fixture <x.y.0 release date or "">: curl answering python.org's
+# release API like the real one (a one-element list, or [] for none).
+python_org_fixture() {
+  PYTHON_ORG_DATE=$1
+  curl() {
+    local url
+    for url in "$@"; do :; done
+    printf '%s\n' "$url" >> "$PYTHON_ORG_LOG"
+    if [[ -z $PYTHON_ORG_DATE ]]; then printf '[]\n'; return 0; fi
+    printf '[{"name":"Python %s","slug":"python","version":3,"is_published":true,"is_latest":false,"release_date":"%s","pre_release":false,"release_page":null}]\n' \
+      "${url##*%20}" "$PYTHON_ORG_DATE"
+  }
+}
+
+test_python_line_waits_the_release_age() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  OS_FAMILY=apt
+  fake_uv "$HOME"
+  UV_LOG="$temp/uv.log"
+  PYTHON_ORG_LOG="$temp/python-org.log"
+  export UV_LOG UV_FIXTURE_DIR="$temp/uv-python"
+  fix_now
+  MIN_RELEASE_AGE=7
+  assert_equals "$(uv_cpython_versions < "$HOME/uv-list.json" | stable_version_lines)" $'3.15\t3.15.2\n3.14\t3.14.6\n3.13\t3.13.14'
+  # Python 3.15.0 came out 3 days ago: the previous line, at its newest patch.
+  python_org_fixture "$(day_before_now 3)T14:13:54Z"
+  resolve_python_line
+  assert_equals "$RESOLVED_PYTHON_LINE:$RESOLVED_PYTHON_VERSION:$PYTHON_SELECTION" 3.14:3.14.6:latest-stable
+  assert_equals "$(cat "$PYTHON_ORG_LOG")" "${PYTHON_RELEASE_API}?name=Python%203.15.0"
+  # 30 days ago: the new line, with its patches at once.
+  python_org_fixture "$(day_before_now 30)T14:13:54Z"
+  RESOLVED_PYTHON_LINE=""
+  resolve_python_line
+  assert_equals "$RESOLVED_PYTHON_LINE:$RESOLVED_PYTHON_VERSION:$PYTHON_SELECTION" 3.15:3.15.2:latest-stable
+  # python.org gives no date: the previous line, said so.
+  python_org_fixture ""
+  RESOLVED_PYTHON_LINE=""
+  resolve_python_line
+  assert_equals "$RESOLVED_PYTHON_LINE:$PYTHON_SELECTION:$PYTHON_NEWEST_LINE" 3.14:release-date-unknown:3.15
+  # ...unless python3 is already on the newest line: never moved back.
+  printf '#!/bin/sh\necho Python 3.15.1\n' > "$HOME/.local/bin/python3"
+  chmod +x "$HOME/.local/bin/python3"
+  RESOLVED_PYTHON_LINE=""
+  resolve_python_line
+  assert_equals "$RESOLVED_PYTHON_LINE:$PYTHON_SELECTION" 3.15:latest-stable
+  # Without uv, nothing resolves (inspect: resolve-during-apply).
+  rm -f "$HOME/.local/bin/uv"
+  RESOLVED_PYTHON_LINE=""
+  ! resolve_python_line || fail "a Python line resolved without uv"
+  rm -rf "$temp"
+}
+
+test_cpython_installs_with_uv_and_verifies() {
+  local temp out
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  fake_uv "$HOME"
+  export UV_LOG="$temp/uv.log" UV_FIXTURE_DIR="$temp/uv-python"
+  PYTHON_ORG_LOG="$temp/python-org.log"
+  python_org_fixture "$(day_before_now 30)T14:13:54Z"
+  fix_now
+  MIN_RELEASE_AGE=7
+  FULL_UPGRADE=0
+  : > "$UV_LOG"
+  out=$(install_cpython 2>&1)
+  assert_contains "$out" "Selected Python 3.15 (now 3.15.2"
+  assert_equals "$(cat "$UV_LOG")" "python install --default 3.15"
+  # A full upgrade also moves the line to its newest patch.
+  FULL_UPGRADE=1
+  : > "$UV_LOG"
+  install_cpython >/dev/null 2>&1
+  assert_equals "$(cat "$UV_LOG")" $'python install --default 3.15\npython upgrade 3.15'
+  # A uv that keeps --default behind --preview gets it.
+  FULL_UPGRADE=0
+  export UV_NEEDS_PREVIEW=1
+  : > "$UV_LOG"
+  install_cpython >/dev/null 2>&1 || fail "install_cpython failed with a preview-only --default"
+  assert_equals "$(cat "$UV_LOG")" $'python install --default 3.15\npython install --default 3.15 --preview'
+  unset UV_NEEDS_PREVIEW
+  # Verification: python3 in ~/.local/bin must be uv's and run.
+  ! verify_cpython || fail "cpython verified without python3"
+  mkdir -p "$UV_FIXTURE_DIR/cpython-3.15-linux-x86_64-gnu/bin"
+  printf '#!/bin/sh\necho Python 3.15.2\n' > "$UV_FIXTURE_DIR/cpython-3.15-linux-x86_64-gnu/bin/python3.15"
+  chmod +x "$UV_FIXTURE_DIR/cpython-3.15-linux-x86_64-gnu/bin/python3.15"
+  printf '#!/bin/sh\necho Python 3.12.3\n' > "$HOME/.local/bin/python3"
+  chmod +x "$HOME/.local/bin/python3"
+  ! verify_cpython || fail "a python3 that is not uv's verified"
+  ln -sf "$UV_FIXTURE_DIR/cpython-3.15-linux-x86_64-gnu/bin/python3.15" "$HOME/.local/bin/python3"
+  verify_cpython || fail "uv's python3 was rejected"
+  assert_equals "$(python_default_version)" 3.15.2
+  # A lookup failure keeps a working Python, and stops without one.
+  RESOLVED_PYTHON_LINE=""
+  printf '#!/bin/sh\ncase "$1 $2" in "python dir") echo "$UV_FIXTURE_DIR";; *) exit 2;; esac\n' > "$HOME/.local/bin/uv"
+  out=$(install_cpython 2>&1) || fail "a kept Python failed the run: $out"
+  assert_contains "$out" "kept the installed Python"
+  rm -f "$HOME/.local/bin/python3"
+  out=$( (install_cpython) 2>&1 ) && fail "an unresolvable Python passed"
+  assert_contains "$out" "Could not resolve the newest stable CPython line"
+  rm -rf "$temp"
+}
+
+# ruby_build_fixture <home>: a ruby-build checkout whose definitions were
+# added by dated commits, and a ruby-build that lists them.
+ruby_build_fixture() {
+  local build="$1/.rbenv/plugins/ruby-build" definition age
+  mkdir -p "$build/bin" "$build/share/ruby-build"
+  printf '#!/bin/sh\n[ "$1" = --definitions ] && ls "$(dirname "$0")/../share/ruby-build"\n' > "$build/bin/ruby-build"
+  chmod +x "$build/bin/ruby-build"
+  fixture_git init -q -b master "$build"
+  while read -r definition age; do
+    : > "$build/share/ruby-build/$definition"
+    fixture_git -C "$build" add "share/ruby-build/$definition"
+    GIT_AUTHOR_DATE="@$(( FIXED_NOW - age * 86400 )) +0000" GIT_COMMITTER_DATE="@$(( FIXED_NOW - age * 86400 )) +0000" \
+      fixture_git -C "$build" commit -q -m "Add $definition"
+  done <<'ROWS'
+3.3.9 900
+3.4.0 400
+3.4.7 60
+4.0.0-preview2 50
+jruby-10.0.0.0 45
+truffleruby-34.0.1 44
+3.4.8 2
+4.0.0 3
+4.0.0-dev 3
+ROWS
+}
+
+test_ruby_line_waits_the_release_age() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  git() { fixture_git "$@"; }
+  fix_now
+  MIN_RELEASE_AGE=7
+  ruby_build_fixture "$HOME"
+  # 4.0.0 was added 3 days ago: the previous line, with its 2-day-old patch.
+  resolve_ruby_version
+  assert_equals "$RESOLVED_RUBY_VERSION:$RUBY_SELECTION:$RUBY_NEWEST_LINE" 3.4.8:latest-stable:4.0
+  assert_equals "$(ruby_line_added 4.0)" "$(( FIXED_NOW - 3 * 86400 ))"
+  MIN_RELEASE_AGE=2
+  fix_now
+  RESOLVED_RUBY_VERSION=""
+  resolve_ruby_version
+  assert_equals "$RESOLVED_RUBY_VERSION" 4.0.0
+  # A line whose x.y.0 history is unknown (a shallow or copied checkout).
+  MIN_RELEASE_AGE=7
+  fix_now
+  : > "$HOME/.rbenv/plugins/ruby-build/share/ruby-build/4.1.1"
+  RESOLVED_RUBY_VERSION=""
+  resolve_ruby_version
+  assert_equals "$RESOLVED_RUBY_VERSION:$RUBY_SELECTION" 4.0.0:release-date-unknown
+  rm -rf "$temp"
+}
+
+# install_ruby compiles with rbenv install. A failed compile warns, records
+# ruby-failed:<v> and still verifies, so a reconcile does not compile again;
+# a full upgrade re-runs the step and retries.
+test_ruby_compile_failure_is_recorded_not_retried() {
+  local temp out rbenv
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  LOCAL_DIR="$temp/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
+  OS_FAMILY=apt
+  DRY_RUN=0
+  git() { fixture_git "$@"; }
+  fix_now
+  MIN_RELEASE_AGE=7
+  ruby_build_fixture "$HOME"
+  rbenv="$HOME/.rbenv/bin/rbenv"
+  mkdir -p "$HOME/.rbenv/bin"
+  cat > "$rbenv" <<'RBENV'
+#!/bin/sh
+printf '%s\n' "$*" >> "$RBENV_LOG"
+case "$1" in
+  install)
+    [ -z "$RBENV_FAIL" ] || exit 1
+    mkdir -p "$RBENV_ROOT/versions/$3/bin"
+    printf '#!/bin/sh\nexit 0\n' > "$RBENV_ROOT/versions/$3/bin/ruby"
+    chmod +x "$RBENV_ROOT/versions/$3/bin/ruby" ;;
+  global) printf '%s\n' "$2" > "$RBENV_ROOT/version" ;;
+esac
+RBENV
+  chmod +x "$rbenv"
+  export RBENV_LOG="$temp/rbenv.log" RBENV_FAIL=1
+  git_checkout_at_release() { return 0; }
+  out=$(install_ruby 2>&1; printf 'result=%s\n' "$RUBY_RESULT")
+  assert_contains "$out" "Ruby 3.4.8 did not compile"
+  assert_contains "$out" "result=ruby-failed:3.4.8"
+  assert_equals "$(cat "$RBENV_LOG")" "install --skip-existing 3.4.8"
+  RUBY_RESULT=ruby-failed:3.4.8
+  verify_rbenv || fail "a recorded failed compile did not verify"
+  mark_done rbenv
+  RUBY_RESULT=""
+  assert_equals "$(state_detail rbenv)" ruby-failed:3.4.8
+  verify_rbenv || fail "the state's failed compile did not verify"
+  step_follows_upstream rbenv || fail "a full upgrade would not retry the compile"
+  # The next compile works: rbenv's global is the new Ruby.
+  unset RBENV_FAIL
+  : > "$RBENV_LOG"
+  RESOLVED_RUBY_VERSION=""
+  install_ruby >/dev/null 2>&1
+  assert_equals "$(cat "$RBENV_LOG")" $'install --skip-existing 3.4.8\nglobal 3.4.8'
+  assert_equals "$RUBY_RESULT" ruby:3.4.8
+  assert_equals "$(ruby_global_version)" 3.4.8
+  mark_done rbenv
+  # A deleted Ruby no longer verifies once a compile has worked.
+  RUBY_RESULT=""
+  rm -rf "$HOME/.rbenv/versions/3.4.8"
+  ! verify_rbenv || fail "rbenv verified without its Ruby"
+  rm -rf "$temp"
+}
+
+# Schema 4 drops the state rows of retired steps: pyenv at once; yarn and pnpm
+# when the corepack step has removed what they installed.
+test_retired_state_rows_are_dropped() {
+  local temp
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  LOCAL_DIR="$TARGET/local"
+  STATE_FILE="$LOCAL_DIR/install-state.tsv"
+  LEGACY_STATE_FILE="$temp/legacy/install-state.tsv"
+  mkdir -p "$LOCAL_DIR" "$HOME"
+  printf '%s\tsig\t2026-01-01T00:00:00Z\t\n' packages pyenv yarn pnpm fnm > "$STATE_FILE"
+  DRY_RUN=1
+  migrate_local_state >/dev/null
+  assert_equals "$(cut -f1 "$STATE_FILE" | paste -sd, -)" packages,pyenv,yarn,pnpm,fnm
+  DRY_RUN=0
+  migrate_local_state
+  assert_equals "$(cut -f1 "$STATE_FILE" | paste -sd, -)" packages,yarn,pnpm,fnm
+  drop_state_rows yarn pnpm
+  assert_equals "$(cut -f1 "$STATE_FILE" | paste -sd, -)" packages,fnm
+  rm -rf "$temp"
+}
+
 TESTS=(
   test_default_does_not_include_unreleased_local_bin
   test_option_validation_rejects_bad_csv_and_implicit_keys
@@ -3854,7 +4335,7 @@ TESTS=(
   test_preflight_asks_for_sudo_once_on_a_terminal
   test_preflight_needs_no_sudo_without_root_actions
   test_preflight_refuses_prompts_without_terminal
-  test_existing_pyenv_is_reported_and_can_be_kept
+  test_existing_rbenv_is_reported_and_can_be_kept
   test_existing_setups_and_shadowed_artifacts_are_disclosed
   test_privileged_and_behaviour_records
   test_unsupported_macs_are_warned_about
@@ -3872,6 +4353,15 @@ TESTS=(
   test_known_hosts_symlink_is_written_through
   test_cask_upgrade_is_opt_in
   test_generated_gpg_key_survives_the_apply_profile_rewrite
+  test_profile_schema_3_migrates_to_4
+  test_retired_components_and_languages_are_refused
+  test_zshenv_block_adds_fnm_default_node
+  test_node_lts_line_waits_the_release_age
+  test_python_line_waits_the_release_age
+  test_cpython_installs_with_uv_and_verifies
+  test_ruby_line_waits_the_release_age
+  test_ruby_compile_failure_is_recorded_not_retried
+  test_retired_state_rows_are_dropped
 )
 failed=()
 for CURRENT_TEST in "${TESTS[@]}"; do

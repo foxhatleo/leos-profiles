@@ -50,19 +50,23 @@ homebrew_prefixes() {
   done
 }
 
-# version_manager_conflicts <pyenv|rbenv>: "<path><TAB><reason>" for each
-# existing installation the profile's checkout would collide with (ONB-5).
-# Blocking reasons stop apply in preflight unless
-# --skip-existing-version-managers keeps the existing installation:
+# version_manager_conflicts <rbenv>: "<path><TAB><reason>" for each existing
+# installation the profile's checkout would collide with (ONB-5). Blocking
+# reasons stop apply in preflight unless --skip-existing-version-managers
+# keeps the existing installation:
 #   not-a-git-checkout  the root exists but is no Git checkout (a Homebrew
-#                       pyenv root, a copied directory)
+#                       rbenv root, a copied directory)
 #   unexpected-origin   a checkout of another repository
 #   local-changes       a checkout with uncommitted changes
-# homebrew-install (a Homebrew pyenv/rbenv) is informational: both would be
-# installed, and the profile prefers its own checkout.
+# homebrew-install (a Homebrew rbenv) is informational: both would be
+# installed, and the profile prefers its own checkout. (pyenv is no longer
+# installed; report_existing_setups discloses an existing one.)
+# The components whose checkout can collide with an existing installation.
+VERSION_MANAGERS=rbenv
+
 version_manager_conflicts() {
-  local tool=$1 root="$HOME/.$1" repository prefix origin
-  if [[ $tool == pyenv ]]; then repository=$PYENV_REPOSITORY; else repository=$RBENV_REPOSITORY; fi
+  local tool=$1 root="$HOME/.$1" repository=$RBENV_REPOSITORY prefix origin
+  [[ $tool == rbenv ]] || die "No version-manager conflicts for: $tool"
   if [[ -e $root || -L $root ]]; then
     if [[ ! -d $root/.git ]]; then
       printf '%s\tnot-a-git-checkout\n' "$root"
@@ -92,14 +96,14 @@ version_manager_blocked() {
 component_skipped_for_existing() {
   [[ $SKIP_EXISTING_VERSION_MANAGERS -eq 1 ]] || return 1
   case $1 in
-    pyenv|rbenv) [[ -n $(version_manager_conflicts "$1") ]] ;;
+    rbenv) [[ -n $(version_manager_conflicts "$1") ]] ;;
     *) return 1 ;;
   esac
 }
 
 report_conflicts() {
   local tool path reason
-  for tool in pyenv rbenv; do
+  for tool in $VERSION_MANAGERS; do
     has_csv_item "$SELECTED_STEPS" "$tool" || continue
     while IFS=$'\t' read -r path reason; do
       printf 'conflict\t%s\t%s\t%s\n' "$tool" "$path" "$reason"
@@ -128,25 +132,31 @@ report_existing_setups() {
       break
     fi
   done
+  # pyenv was the profile's Python manager before schema 4; an existing one is
+  # left as it is, and zsh/path/pyenv.zsh still activates it.
+  path=${PYENV_ROOT:-$HOME/.pyenv}
+  if [[ -d $path ]]; then
+    existing pyenv "$path" "no longer installed or updated; it stays, and in interactive shells its shims come before uv's python3 in ~/.local/bin: pyenv global system hands python3 to uv's, or remove the directory"
+  fi
   path=${NVM_DIR:-$HOME/.nvm}
   if [[ -d $path ]]; then
     existing nvm "$path" "fnm's default Node comes first in new shells; nvm still switches when you run nvm use"
   fi
   for path in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3" "$HOME/mambaforge" "$(command -v conda 2>/dev/null || true)"; do
     if [[ -n $path && -e $path ]]; then
-      existing conda "$path" "conda activate puts that environment's python ahead of pyenv's shims; at startup the shims come first, even before an auto-activated base"
+      existing conda "$path" "conda activate puts that environment's python ahead of uv's python3 in ~/.local/bin; an auto-activated base does so in every shell"
       break
     fi
   done
   for path in "${ASDF_DATA_DIR:-$HOME/.asdf}" "$(command -v asdf 2>/dev/null || true)"; do
     if [[ -n $path && -e $path ]]; then
-      existing asdf "$path" "its shims and the profile's fnm, pyenv and rbenv shims both provide node, python and ruby; whichever loads last wins"
+      existing asdf "$path" "its shims and the profile's fnm, uv Python and rbenv both provide node, python and ruby; whichever comes first on PATH wins"
       break
     fi
   done
   for path in "$(command -v mise 2>/dev/null || true)" "${XDG_DATA_HOME:-$HOME/.local/share}/mise"; do
     if [[ -n $path && -e $path ]]; then
-      existing mise "$path" "mise activate rewrites PATH per directory after the profile; tools it manages win over fnm, pyenv and rbenv there"
+      existing mise "$path" "mise activate rewrites PATH per directory after the profile; tools it manages win over fnm, uv's Python and rbenv there"
       break
     fi
   done
@@ -178,13 +188,15 @@ report_shadowed_artifacts() {
 }
 
 # ---------------------------------------------------------------------------
-# What this run moves off an older layout: on macOS, the ~/.local/bin and
-# ~/.local/npm copies of the pinned installs before 2026-10, which Homebrew's
-# formulae replace; and Git checkouts on a branch (the default-branch layout
-# of 2026-10), which move to their release, detached. The release named is
-# what the checkout's refs give as of its last fetch; the step fetches first.
+# What this run moves off an older layout: on macOS, the ~/.local/bin copies
+# of the pinned installs before 2026-10, which Homebrew's formulae replace;
+# the retired yarn and pnpm components' npm packages in ~/.local/npm and, on
+# macOS, the Homebrew formulae they installed, which Corepack replaces; and
+# Git checkouts on a branch (the default-branch layout of 2026-10), which move
+# to their release, detached. The release named is what the checkout's refs
+# give as of its last fetch; the step fetches first.
 report_tool_migrations() {
-  local name path step directory label prefix mode release
+  local name path step directory label prefix mode release tool
   if [[ $OS_FAMILY == macos ]]; then
     while IFS= read -r name; do
       artifact_row "$name"
@@ -193,10 +205,15 @@ report_tool_migrations() {
         printf 'migration\tlocal-bin\t%s\tremoved: Homebrew'"'"'s %s formula replaces it\n' "$path" "$ARTIFACT_FORMULA"
       done < <(legacy_local_copy "$name")
     done < <(artifact_names)
-    for step in yarn pnpm; do
-      has_csv_item "$SELECTED_STEPS" "$step" || continue
-      if [[ -e $HOME/.local/npm/bin/$step ]]; then
-        printf 'migration\tnpm-prefix\t%s\tremoved: Homebrew'"'"'s %s formula replaces it\n' "$HOME/.local/npm/bin/$step" "$step"
+  fi
+  if has_csv_item "$SELECTED_STEPS" corepack; then
+    for tool in $COREPACK_TOOLS; do
+      if legacy_npm_copy_present "$tool"; then
+        printf 'migration\tnpm-prefix\t%s\tremoved: Corepack'"'"'s %s replaces it\n' "$(corepack_prefix)/bin/$tool" "$tool"
+      fi
+      if retired_formula_installed "$tool"; then
+        printf 'migration\thomebrew-formula\t%s\tuninstalled: the profile installed it; Corepack'"'"'s %s replaces it\n' \
+          "$(brew_prefix)/opt/$tool" "$tool"
       fi
     done
   fi
@@ -214,7 +231,6 @@ report_tool_migrations() {
     printf 'migration\tgit-checkout\t%s\t%s moves from origin'"'"'s default branch to %s (%s), detached\n' \
       "$directory" "$label" "$release" "$(follow_mode_description "$mode")"
   done <<EOF
-pyenv|PYENV|$HOME/.pyenv|pyenv
 rbenv|RBENV|$HOME/.rbenv|rbenv
 rbenv|RUBY_BUILD|$HOME/.rbenv/plugins/ruby-build|ruby-build
 plugins|ZSH_AUTOSUGGESTIONS|$TARGET/zsh/plugins/zsh-autosuggestions|zsh-autosuggestions
@@ -225,27 +241,31 @@ EOF
 }
 
 # What --min-release-age does not cover (a `warning` record): Homebrew
-# installs formulae at its current version on macOS, and on Linux npm's
-# Yarn and pnpm are its latest release. OS packages come from the
-# distribution's own repositories in either case.
+# installs formulae at its current version on macOS, and on every OS npm's
+# Corepack is its latest release, as are the pnpm and Yarn Corepack installs.
+# OS packages come from the distribution's own repositories in either case.
 report_release_age_scope() {
   local step names=""
   if [[ $OS_FAMILY == macos ]]; then
-    for step in bun fnm yarn pnpm uv plugins; do
-      has_csv_item "$SELECTED_STEPS" "$step" || continue
-      case $step in plugins) step=starship ;; esac
-      names+="${names:+, }$step"
-    done
-    [[ -z $names ]] ||
-      printf 'warning\trelease-age-homebrew\tHomebrew formulae (%s) install at Homebrew'"'"'s current version; --min-release-age applies to GitHub releases and Git checkouts only\n' "$names"
-  else
-    for step in yarn pnpm; do
+    for step in bun fnm uv starship; do
       has_csv_item "$SELECTED_STEPS" "$step" || continue
       names+="${names:+, }$step"
     done
     [[ -z $names ]] ||
-      printf 'warning\trelease-age-npm\tnpm installs the latest %s; --min-release-age applies to GitHub releases and Git checkouts only\n' "$names"
+      printf 'warning\trelease-age-homebrew\tHomebrew formulae (%s) install at Homebrew'"'"'s current version; --min-release-age applies to GitHub releases, Git checkouts and new runtime lines only\n' "$names"
   fi
+  if has_csv_item "$SELECTED_STEPS" corepack; then
+    printf 'warning\trelease-age-npm\tnpm installs the latest corepack, and Corepack the latest pnpm and Yarn'"'"'s stable release; --min-release-age applies to GitHub releases, Git checkouts and new runtime lines only\n'
+  fi
+}
+
+# report_prompt_scope: zsh-config without the starship component: the
+# interactive prompt is the profile's built-in fallback unless a Starship is
+# on PATH already (a `warning` record).
+report_prompt_scope() {
+  has_csv_item "$SELECTED_STEPS" zsh-config || return 0
+  has_csv_item "$SELECTED_STEPS" starship && return 0
+  printf 'warning\tfallback-prompt\tzsh-config without the starship component: interactive shells use the built-in fallback prompt unless Starship is already on PATH; add starship to --groups for the themed prompt\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -361,7 +381,7 @@ INVOCATION=""
 
 preflight() {
   local tool path reason reasons="" privileged
-  for tool in pyenv rbenv; do
+  for tool in $VERSION_MANAGERS; do
     has_csv_item "$SELECTED_STEPS" "$tool" || continue
     if [[ $SKIP_EXISTING_VERSION_MANAGERS -eq 1 ]]; then
       if component_skipped_for_existing "$tool"; then
@@ -483,11 +503,16 @@ inventory_records() {
   for name in fd bat; do
     if [[ -L $HOME/.local/bin/$name ]]; then item local-bin "$name" - "$HOME/.local/bin/$name"; fi
   done
-  item npm-prefix yarn - "$HOME/.local/npm/bin/yarn"
-  item npm-prefix pnpm - "$HOME/.local/npm/bin/pnpm"
+  for name in corepack pnpm yarn; do
+    item npm-prefix "$name" - "$HOME/.local/npm/bin/$name"
+  done
+  item runtime python3 - "$HOME/.local/bin/python3"
+  item runtime cpython - "${UV_PYTHON_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/uv/python}"
+  item runtime ruby - "$HOME/.rbenv/versions"
   for name in zsh-autosuggestions zsh-syntax-highlighting zsh-completions fzf-tab; do
     item plugin "$name" - "$TARGET/zsh/plugins/$name"
   done
+  # Installed by releases before schema 4; no longer updated.
   item version-manager pyenv - "$HOME/.pyenv"
   item version-manager rbenv - "$HOME/.rbenv"
   item version-manager ruby-build - "$HOME/.rbenv/plugins/ruby-build"

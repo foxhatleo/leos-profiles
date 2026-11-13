@@ -2,6 +2,10 @@
 # Sourced by install.sh; shares the installer context.
 # shellcheck disable=SC2034
 
+# The saved profile's schema write_profile writes. PROFILE_SCHEMA is the one
+# read_profile read (it reports a pending migration).
+readonly CURRENT_PROFILE_SCHEMA=4
+
 prepare_local_dir() {
   [[ $DRY_RUN -eq 0 ]] || return 0
   mkdir -p "$LOCAL_DIR/flags"
@@ -72,7 +76,7 @@ write_profile() {
   tmp=$(mktemp "$LOCAL_DIR/.install-profile.tmp.XXXXXX")
   track_temp "$tmp"
   {
-    printf 'schema\t3\n'
+    printf 'schema\t%s\n' "$CURRENT_PROFILE_SCHEMA"
     printf 'groups\t%s\n' "$SELECTED_STEPS"
     printf 'package-groups\t%s\n' "$SELECTED_GROUPS"
     printf 'full-upgrade\t%s\n' "$SAVED_FULL_UPGRADE"
@@ -142,7 +146,8 @@ read_profile() {
       node-policy) NODE_POLICY=$value ;;
       ai-cli-update-channel) AI_CLI_UPDATE_CHANNEL=$value ;;
       package-channel) PACKAGE_CHANNEL=$value ;;
-      # Optional (added after schema 2): keep an existing pyenv/rbenv.
+      # Optional (added after schema 2): keep an existing rbenv (pyenv too,
+      # before schema 4).
       version-managers)
         case $value in
           install) SKIP_EXISTING_VERSION_MANAGERS=0 ;;
@@ -165,7 +170,7 @@ read_profile() {
       *) die "Unknown install profile key: $key" ;;
     esac
   done < "$PROFILE_FILE"
-  [[ $schema == 1 || $schema == 2 || $schema == 3 ]] || die "Unsupported install profile schema: ${schema:-missing}"
+  [[ $schema == 1 || $schema == 2 || $schema == 3 || $schema == 4 ]] || die "Unsupported install profile schema: ${schema:-missing}"
   local required
   for required in groups package-groups full-upgrade fonts font default-shell git-name git-email \
     ssh ssh-key ssh-passphrase gpg gpg-key gpg-passphrase node-channel ai-cli-update-channel package-channel; do
@@ -177,8 +182,40 @@ read_profile() {
   # apply/reconcile: fnm's default now follows the current LTS. Keep reading
   # them until 2027-10, then reject them with a message to run apply again.
   if [[ $schema == 2 && $seen != *,node-policy,* ]]; then die "Profile schema 2 requires node-policy"; fi
-  if [[ $schema == 3 && $seen != *,node-policy,* ]]; then die "Profile schema 3 requires node-policy"; fi
+  if [[ ($schema == 3 || $schema == 4) && $seen != *,node-policy,* ]]; then die "Profile schema $schema requires node-policy"; fi
   if [[ $schema == 1 || $schema == 2 ]]; then NODE_POLICY=current-lts; fi
+  # Schemas 1-3 (before 2026-11) also name the retired components and the
+  # languages group: map them to schema 4's (migrate_profile_selection). Kept
+  # until 2027-11, like the schemas above.
+  if [[ $schema != 4 ]]; then migrate_profile_selection; fi
+}
+
+# migrate_profile_selection: a schema 1-3 selection in schema 4's terms:
+#   pyenv       -> cpython (uv's CPython; an existing ~/.pyenv stays, unmanaged)
+#   yarn, pnpm  -> corepack
+#   plugins     -> plugins and starship (Starship was part of plugins)
+#   languages   -> removed (its installed packages stay; see
+#                  report_profile_migration)
+# Inspect and dry runs only read the result; an approved apply/reconcile
+# writes it with the new schema.
+migrate_profile_selection() {
+  local item steps="" groups=""
+  local -a items=()
+  csv_split items "$SELECTED_STEPS"
+  for item in ${items[@]+"${items[@]}"}; do
+    case $item in
+      pyenv) add_csv_item steps cpython ;;
+      yarn|pnpm) add_csv_item steps corepack ;;
+      plugins) add_csv_item steps plugins; add_csv_item steps starship ;;
+      *) add_csv_item steps "$item" ;;
+    esac
+  done
+  csv_split items "$SELECTED_GROUPS"
+  for item in ${items[@]+"${items[@]}"}; do
+    [[ $item == languages ]] || add_csv_item groups "$item"
+  done
+  SELECTED_STEPS=$steps
+  SELECTED_GROUPS=$groups
 }
 
 migrate_one_local_file() {
@@ -235,6 +272,39 @@ migrate_local_state() {
   migrate_one_local_file "$HOME/.lp-nobrew" "$LOCAL_DIR/flags/no-brew"
   migrate_one_local_file "$HOME/.lp-nopyenv" "$LOCAL_DIR/flags/no-pyenv"
   migrate_one_local_file "$HOME/.lp-norbenv" "$LOCAL_DIR/flags/no-rbenv"
+  # Schema 4 (2026-11): rows of retired steps; remove after 2027-11.
+  # shellcheck disable=SC2086  # a list of step names
+  drop_state_rows $RETIRED_STATE_STEPS
+}
+
+# Steps schema 4 retired, with nothing left to verify. Their rows in the state
+# file are dropped by migrate_local_state (pyenv) or, for yarn and pnpm, by
+# the corepack step once it has removed what they installed (macOS: it reads
+# the rows to know Homebrew's yarn and pnpm were the profile's).
+RETIRED_STATE_STEPS="pyenv"
+
+# drop_state_rows <step...>: remove those steps' rows from the state file.
+drop_state_rows() {
+  local tmp list
+  [[ -f $STATE_FILE ]] || return 0
+  list=" $* "
+  awk -F '\t' -v list="$list" 'index(list, " " $1 " ") { found = 1 } END { exit !found }' "$STATE_FILE" || return 0
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say "Would drop the retired $* rows from $STATE_FILE"
+    return 0
+  fi
+  tmp=$(mktemp "$LOCAL_DIR/.install-state.tmp.XXXXXX")
+  track_temp "$tmp"
+  awk -F '\t' -v list="$list" '!index(list, " " $1 " ")' "$STATE_FILE" > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$STATE_FILE"
+}
+
+# state_detail <step>: the diagnostic column of the step's row (fnm: the Node
+# version; rbenv: ruby:<version> or ruby-failed:<version>).
+state_detail() {
+  [[ -f $STATE_FILE ]] || return 0
+  awk -F '\t' -v step="$1" '$1 == step { detail = $4 } END { print detail }' "$STATE_FILE"
 }
 
 state_done() {
@@ -256,22 +326,33 @@ mark_done() {
   else
     : > "$tmp"
   fi
-  # Column 4 is diagnostic only — nothing reads it back; it records which Node
-  # version the fnm step resolved so a state file can be inspected by hand.
-  [[ $step != fnm ]] || detail=$RESOLVED_NODE_VERSION
+  # Column 4 is diagnostic: the Node version the fnm step resolved, and the
+  # rbenv step's Ruby outcome, which verify_rbenv reads back (a recorded
+  # failed compile is not retried until a full upgrade).
+  case $step in
+    fnm) detail=$RESOLVED_NODE_VERSION ;;
+    rbenv) detail=$RUBY_RESULT ;;
+  esac
   printf '%s\t%s\t%s\t%s\n' "$step" "$signature" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$detail" >> "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$STATE_FILE"
 }
 
 
+# Pending migrations of the saved profile, as inspect records: the schema, and
+# a saved languages group, whose packages stay installed (nothing uninstalls
+# them; schema 4 just stops selecting them).
 report_profile_migration() {
-  local schema=$PROFILE_SCHEMA
+  local schema=$PROFILE_SCHEMA groups=""
   if [[ -f $PROFILE_FILE ]]; then
     schema=$(awk -F '\t' '$1 == "schema" { print $2; exit }' "$PROFILE_FILE")
+    groups=$(awk -F '\t' '$1 == "package-groups" { print $2; exit }' "$PROFILE_FILE")
   fi
-  if [[ $schema == 1 || $schema == 2 ]]; then
-    printf 'migration\tprofile-schema\t%s\t3\n' "$schema"
+  if [[ $schema == 1 || $schema == 2 || $schema == 3 ]]; then
+    printf 'migration\tprofile-schema\t%s\t%s\n' "$schema" "$CURRENT_PROFILE_SCHEMA"
+    if has_csv_item "$groups" languages; then
+      printf 'migration\tpackage-group\tlanguages\tdropped: the packages it installed stay installed; fnm, cpython (uv) and rbenv provide Node, Python and Ruby\n'
+    fi
   fi
   return 0
 }
