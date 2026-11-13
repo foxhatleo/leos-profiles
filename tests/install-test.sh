@@ -5,9 +5,18 @@ set -Eeuo pipefail
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 export LEOS_PROFILES_INSTALL_LIB_ONLY=1
-# The zsh-config tests resolve startup files from ZDOTDIR; never let the
-# developer's own value point them outside the fixture HOME.
+# Hermetic environment: the assertions below compare exact command lines and
+# paths, so nothing from the developer's or runner's environment may steer
+# them. The zsh-config tests resolve startup files from ZDOTDIR; proxy
+# variables make run_root add `sudo --preserve-env=...` (one test sets one on
+# purpose); XDG, tool-root, Homebrew and Git variables relocate or reconfigure
+# what the installer inspects. Tests that need any of these set them locally.
 unset ZDOTDIR
+unset http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY all_proxy
+unset XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CURRENT_DESKTOP DISPLAY WAYLAND_DISPLAY
+unset FNM_DIR FNM_NODE_DIST_MIRROR PYENV_ROOT RBENV_ROOT ASDF_DATA_DIR NVM_DIR ZSH ZSH_CUSTOM LEOS_PROFILES_HOME
+unset HOMEBREW_PREFIX HOMEBREW_BREW_GIT_REMOTE HOMEBREW_BOTTLE_DOMAIN HOMEBREW_API_DOMAIN
+unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GITHUB_TOKEN GH_TOKEN NERD_FONTS_TEST_RELEASE_URL
 # shellcheck source=../install.sh
 source "$ROOT/install.sh"
 

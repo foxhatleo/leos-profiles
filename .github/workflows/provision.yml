@@ -5,6 +5,8 @@ name: Provision
 # runs weekly, on demand, and on pull requests labelled `provision`. These jobs
 # are not required checks; a reviewer applies the label when a change touches
 # provisioning behaviour and reads the result before merging.
+# The checks that follow moving upstream releases and plugin branches (kept
+# out of ci.yml's gate) and a report on ci.yml's tool pins run here too.
 on:
   schedule:
     - cron: "23 8 * * 1"
@@ -117,11 +119,100 @@ jobs:
           path: ${{ runner.temp }}/provisioning-logs
           if-no-files-found: ignore
 
+  # The live upstream checks CI keeps out of its gate: install and run the
+  # latest Linux releases (or, on macOS, resolve them and check the Homebrew
+  # formulae) and clone each plugin's default branch. A failure here usually
+  # means upstream renamed or dropped something; fix installer/sources.sh.
+  upstream-live:
+    name: Upstream releases and plugins / ${{ matrix.runner }}
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'provision') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'provision'))
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install completion verification dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+      - name: Resolve the latest releases, install them (Linux) and check their digests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash tests/release-artifacts-test.sh
+      - name: Clone the plugins' default branches and source their combined Zsh integration
+        if: ${{ !cancelled() }}
+        run: bash tests/plugins-test.sh
+
+  # Dependabot keeps the actions current but cannot see the linters ci.yml
+  # downloads by version and SHA-256. Report each pin against its project's
+  # latest release; a newer release is a warning, never a failure. Bump a pin
+  # by changing VERSION and SHA256 together (pipx pins have no digest).
+  tool-pins:
+    name: CI tool pins vs latest releases (informational)
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'provision') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'provision'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare ci.yml's tool pins with the latest releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ci=.github/workflows/ci.yml
+          # The VERSION env value of the first step after the named one.
+          pin_after() { awk -v step="$1" 'index($0, step) { found = 1 } found && $1 == "VERSION:" { print $2; exit }' "$ci"; }
+          pipx_pin() { grep -o "$1==[0-9][0-9.]*" "$ci" | head -n 1 | cut -d= -f3; }
+          behind=0
+          {
+            echo '### CI tool pins'
+            echo
+            echo '| Tool | Pinned | Latest release |'
+            echo '| --- | --- | --- |'
+          } >> "$GITHUB_STEP_SUMMARY"
+          check() {
+            local tool=$1 repository=$2 pinned=${3#v} latest
+            if [[ -z $pinned ]]; then
+              echo "::warning::No $tool pin found in $ci; update this job's lookup."
+              return 0
+            fi
+            if ! latest=$(gh api "repos/$repository/releases/latest" --jq .tag_name); then
+              echo "::warning::Could not read the latest $repository release."
+              return 0
+            fi
+            latest=${latest#v}
+            echo "| $tool | $pinned | $latest |" >> "$GITHUB_STEP_SUMMARY"
+            if [[ $latest != "$pinned" ]]; then
+              echo "::warning::$tool is pinned to $pinned in $ci; the latest release is $latest."
+              behind=1
+            else
+              echo "$tool $pinned is the latest release"
+            fi
+          }
+          check shellcheck koalaman/shellcheck "$(pin_after 'Install pinned ShellCheck')"
+          check actionlint rhysd/actionlint "$(pin_after 'Install pinned actionlint')"
+          check shfmt mvdan/sh "$(pin_after 'shfmt formatting drift')"
+          check zizmor zizmorcore/zizmor "$(pipx_pin zizmor)"
+          check ruff astral-sh/ruff "$(pipx_pin ruff)"
+          (( behind == 0 )) || echo 'Some CI tool pins are behind; see the warnings and job summary.'
+
   # A red weekly run is easy to miss: nothing blocks on it. Open (or comment on)
   # one tracking issue so the failure reaches a notification.
   report-scheduled-failure:
     name: Report a failed scheduled run
-    needs: [provision-linux, provision-macos]
+    needs: [provision-linux, provision-macos, upstream-live]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
