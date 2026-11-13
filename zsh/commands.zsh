@@ -12,7 +12,8 @@ __rmdsstore() {
   # (ignores PYTHON* env and user site; drops the script dir from sys.path on
   # 3.11+). rmdsstore.py is stdlib-only, so the system Python is sufficient.
   # Note: the script itself lives in the user-owned checkout by design (see the
-  # README trust model); this closes the interpreter/env vectors, not that one.
+  # "Maintenance commands" in docs/development.md); this closes the
+  # interpreter/env vectors, not that one.
   if [[ ! -x /usr/bin/python3 ]]; then
     __leos_puts_err "/usr/bin/python3 (the system Python) is required for rmdsstore."
     return 1
@@ -313,5 +314,55 @@ gui-stop() {
 }
 gui-disable() { command -v systemctl >/dev/null 2>&1 || { __leos_puts_err "systemd is required."; return 1; }; sudo systemctl set-default multi-user.target && gui-stop; }
 gui-enable()  { command -v systemctl >/dev/null 2>&1 || { __leos_puts_err "systemd is required."; return 1; }; sudo systemctl set-default graphical.target && gui-start; }
+
+# A compact list of the profile's commands. Keep it in step with the README's
+# command table: tests/profile-test.zsh checks that every name listed here is
+# defined once the profile has loaded, and that every public function in
+# commands.zsh and path/*.zsh is listed. A heading has no `|`.
+leos-help() {
+  emulate -L zsh
+  local entry
+  local -a entries
+  if (( $# )); then
+    __leos_puts_err "Usage: leos-help"
+    return 2
+  fi
+  entries=(
+    'Profile'
+    'upgrade-leos-profiles|Pull the profile and reconcile the saved setup (--full-upgrade, ...)'
+    'leos-doctor|Check the saved setup without changing anything'
+    'leos-refresh-init-cache|Drop cached tool init scripts and recompile the profile'
+    'leos-help|This list'
+    'Maintenance'
+    'bye|Update packages and AI CLIs, tidy up, then exit (--no-exit, --wipe-history, ...)'
+    'brew-checkup|Homebrew: update, upgrade formulae and casks, clean up'
+    'apt-checkup|apt: update, upgrade, autoremove, clean (sudo)'
+    'dnf-checkup|dnf: upgrade, autoremove, clean (sudo)'
+    'pacman-checkup|pacman: -Syu, remove orphans, clean the cache (sudo)'
+    'ai-checkup|Update the installed AI CLIs (Claude Code, Codex, opencode)'
+    'clear-history|Clear shell and REPL history files (--aggressive for more)'
+    'rmdsstore|macOS: delete .DS_Store and other metadata files (sudo; --dry-run)'
+    'Shell and system'
+    'mkcdir|Make a directory and cd into it'
+    'hidden-on|macOS: show hidden files in Finder'
+    'hidden-off|macOS: hide hidden files in Finder'
+    'enable-gnu|macOS: put GNU tools ahead of the BSD ones (next shell)'
+    'disable-gnu|macOS: use the BSD tools again (next shell)'
+    'brew-china-enable|Use the USTC Homebrew mirror (asks first; --yes)'
+    'brew-china-disable|Go back to the official Homebrew sources'
+    'gui-start|Linux: start the display manager (sudo)'
+    'gui-stop|Linux: stop the display manager (sudo)'
+    'gui-enable|Linux: boot to the desktop and start it (sudo)'
+    'gui-disable|Linux: boot to text mode and stop the desktop (sudo)'
+  )
+  for entry in "${entries[@]}"; do
+    if [[ $entry == *'|'* ]]; then
+      printf '  %-24s %s\n' "${entry%%|*}" "${entry#*|}"
+    else
+      print -r -- "${entry}:"
+    fi
+  done
+  print -r -- "Some apply only where their tool or OS is present. Details: $LEOS_PROFILES/README.md"
+}
 
 :

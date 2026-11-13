@@ -1,12 +1,376 @@
 # Development guide
 
+The [README](../README.md) is the guide for people installing and using the
+profile. This file is the reference for how it works and why, for anyone
+changing it; `AGENTS.md` summarises its rules and checks.
+
+## Design notes
+
+### Why not chezmoi or GNU stow
+
+The dotfile surface here is deliberately tiny: two managed blocks (three on
+macOS) plus a `STARSHIP_CONFIG` pointer, so templating and symlink-farm tools
+solve very little of the actual problem. What `install.sh` mostly does is
+*machine provisioning*: OS packages across four distribution families,
+bun/fnm/starship/uv from Homebrew or age-gated, digest-checked releases,
+Corepack's pnpm and Yarn, the newest Node LTS, CPython and Ruby lines,
+rbenv/plugin checkouts at age-gated releases, local SSH/GPG preparation and
+read-only GitHub verification, a verified Nerd Fonts release archive, and
+`chsh`. chezmoi covers that only through `run_once_` escape hatches, which
+would leave the same amount of shell to maintain plus a second tool to learn.
+
+The engine is built around a plan you can read before anything changes:
+`inspect` emits typed TSV that setup renders, and `apply` is a non-interactive
+executor with per-step signatures and postcondition verification. The cost is
+a bespoke idempotency/state/locking engine to keep correct, which is why it
+carries a test suite and a per-OS CI matrix. If the dotfile surface ever grows
+beyond a couple of managed blocks, revisit this.
+
+`install.sh` derives the profile root only from its own physical directory.
+The local checkout is authoritative: local edits take effect immediately and
+the installer does not enforce a particular release, commit, origin, owner or
+signature. Only `upgrade-leos-profiles` is stricter, and only about pulling
+(a clean branch checkout with an upstream, `git merge --ff-only` after showing
+the incoming commits). Only `setup` asks questions; `apply` and `reconcile`
+never do.
+
+### Selection model
+
+Component groups are `bins`, `packages`, `rbenv`, `bun`, `fnm`, `corepack`,
+`uv`, `cpython`, `starship`, `plugins`, `fonts`, `zsh-config` and
+`default-shell`. Package groups are `core-utils`, `shell`, `dev-tools`,
+`python`, `media`, `network`, `heroku` and `system`. Internal `bootstrap`,
+`ssh` and `gpg` groups make the remaining mutations visible in the plan.
+
+Groups are atomic: selecting one selects every member. A component implies a
+package group only when it needs its members: rpatool (`bins`) implies the
+small `python` group (the OS python3 alone); rbenv implies `dev-tools`, which
+carries what ruby-build suggests for building a current Ruby (a C toolchain,
+autoconf, OpenSSL, libyaml, zlib, libffi, GMP, and rustc for YJIT) besides the
+GitHub CLI and jq; plugins, Zsh configuration and default-shell setup imply
+`shell`. Bun, fnm, Corepack, uv's CPython and Starship imply no OS runtimes:
+they are self-contained, and Corepack's pnpm and Yarn run on fnm's Node, so
+selecting them never installs a system Node, Python or Ruby. `corepack`
+implies `fnm`, and `cpython` implies `uv`, which run before them.
+
+Recommended (`RECOMMENDED_GROUPS` in `install.sh`) selects every component
+except `bins`, and every package group except `python` and `heroku`, with a
+full upgrade, fonts and the login shell on `auto`, and SSH and GPG on `skip`.
+`heroku` is macOS-only and opt-in: the Heroku CLI is a homebrew/core formula
+(no tap is added), and no Linux distribution packages it. A Mac that tapped
+`heroku/brew` for an older installer can `brew untap heroku/brew` once
+`brew info heroku` names homebrew/core. There is no `languages` group any more;
+`--package-groups languages` stops with that explanation.
+
+With `--no-full-upgrade`, only missing selected packages are requested from
+the package manager. Dependency resolution can still install or upgrade
+dependencies; this does not freeze the host package set. A full upgrade (here
+and in the `*-checkup` commands) stays within the current OS release
+(`apt-get upgrade`, `dnf upgrade`, `pacman -Syu`, `brew upgrade`) and never
+runs `do-release-upgrade` or `dnf system-upgrade`.
+
+### Local state
+
+The ignored `local/` directory is machine-owned (mode 700, files 600):
+
+- `local/install-profile.tsv`: the normalized groups, upgrade/font/shell
+  policies, Git identity, selected SSH path, GPG fingerprint, release age and
+  moving-tool channels (see "State and TSV contract").
+- `local/install-state.tsv`: verified step signatures, timestamps and resolved
+  moving versions such as the Node LTS and the Ruby rbenv compiled (or that its
+  compile failed).
+- `local/private.zsh` and `local/private-interactive.zsh`: the user's own
+  overrides (see "Zsh runtime").
+- `local/flags/`: GNU preference (`no-gnu`), Homebrew mirror (`brew-china`)
+  and optional-tool warning (`no-brew`, `no-rbenv`) choices.
+- Public GPG exports awaiting manual registration.
+
+The installer stores no passphrases, tokens, private keys or exported secret
+key material there; a user's `private.zsh` may contain secrets. On first use,
+legacy XDG installer state, `zsh/_private.zsh` and the old home-directory
+markers are migrated (`migrate_local_state`); conflicting old and new values
+stop with both paths for the user to resolve.
+
+Apply and reconcile use an atomic `local/.install.lock`, secure temporary
+paths, cleanup traps, atomic profile/state/config writes and first-write
+managed-block backups. A saved state row is only a resume hint:
+postconditions are checked, so missing or corrupt tools are repaired.
+
+### What a plan discloses
+
+Besides the selection, packages, artifacts and files, `inspect` reports every
+action that runs as root (`privileged`: package-manager runs, Arch's
+`pacman -Syu`, Fedora's RPM Fusion and ffmpeg swap, the GitHub CLI apt
+repository on Debian/Ubuntu, the `/etc/shells` edit, `sudo chsh`, cask
+upgrades), side effects (`behaviour`), effects that cannot be undone
+automatically (`irreversible`), existing installations in the way
+(`conflict`), shell setups the profile coexists with (`existing`), on Linux
+Homebrew copies the profile's tools will shadow (`shadow`), what moves off an
+older layout (`migration`) and `warning`s such as an unsupported Mac. The
+record table under "State and TSV contract" lists them all; `render_plan` in
+`installer/setup.sh` shows each type (all but `meta`) under a heading.
+
+Pass the Node version `inspect` resolved with `--node-version vX.Y.Z`: apply
+then installs exactly that one and stops with status 2 if it would now choose
+another. Components install before credentials, so a first SSH or GPG
+registration pause does not hold back the rest; every manual action is listed
+at the end and the run exits 3.
+
+### Where tools come from
+
+Tools follow upstream rather than reviewed pins, held back by the minimum
+release age (see "Release age"):
+
+| Source | macOS | Linux |
+|---|---|---|
+| bun, fnm, Starship, uv (and uvx) | Homebrew formula | the newest GitHub release at least that old (never a draft or prerelease) into `~/.local/bin`, checked against GitHub's SHA-256 digest for the asset and, when gh is logged in and the project publishes one, its attestation |
+| Corepack (pnpm, Yarn) | npm's latest Corepack into `~/.local/npm`, installed with fnm's Node; it installs pnpm's latest and Yarn's stable release | the same |
+| rbenv, zsh-completions, fzf-tab | Git checkout of the newest version tag at least that old | the same |
+| zsh-autosuggestions, zsh-syntax-highlighting | Git checkout of the newest default-branch commit at least that old (their tags are years old) | the same |
+| ruby-build | Git checkout of its newest version tag, without delay (new tags are how new Ruby releases become installable) | the same |
+| Nerd Fonts | the newest release at least that old, checked against its `SHA-256.txt` | the same |
+| Node, Python, Ruby | see "Runtime and package invariants" | the same |
+
+Homebrew formulae, OS packages, and Corepack with the pnpm and Yarn it
+installs are not held back (inspect warns). Checkouts are left detached at
+their release; one may move back to an older release when the newest is not
+old enough yet. A full upgrade re-runs the steps in `step_follows_upstream`,
+which install the release that is now old enough (skipping the download when
+it is already installed), upgrade an outdated formula and move each checkout;
+without one a run only repairs what is missing or broken. When GitHub cannot
+be reached, or refuses at the anonymous rate limit (60 requests an hour; the
+installer uses `GITHUB_TOKEN`, or gh's token when gh is logged in), a tool that
+is already installed and works is kept with a warning; only a missing or
+broken one stops the run.
+
+On macOS the full upgrade runs `brew update` and `brew upgrade` (formulae),
+and upgrades casks only with `--upgrade-casks` (saved for reconcile);
+`brew-checkup` always upgrades casks. Two downloads stay pinned to a reviewed
+URL and SHA-256: Homebrew's installer script (it runs once, on a Mac without
+Homebrew, and is re-pinned when a new macOS ships) and rpatool (its archived
+GitHub repository's final commit; development moved to
+codeberg.org/shiz/rpatool).
+
+On Debian and Ubuntu, dev-tools takes gh from GitHub CLI's own apt repository
+(`https://cli.github.com/packages`), because the distributions' gh is years
+old (2.4 on Ubuntu 22.04, 2.23 on Debian 12). The packages step installs its
+keyring, checked against the SHA-256 GitHub publishes, as
+`/etc/apt/keyrings/githubcli-archive-keyring.gpg` and its source line as
+`/etc/apt/sources.list.d/github-cli.list`, before the apt install; the plan
+lists both as a root action. An existing correct setup, or any other apt
+source for that repository, is left alone. A gh installed earlier from the
+distribution moves to the repository's version on the next full upgrade. On
+Fedora the media group enables RPM Fusion (free) for the full ffmpeg and swaps
+out `ffmpeg-free` (`fedora_install_media`).
+
+Equivalent GitHub HTTPS/SSH origins are accepted and normalized; dirty
+installer-managed checkouts, and checkouts at a commit made locally, are
+refused rather than overwritten. uv and uvx install as one artifact (the
+static musl builds on Linux, as for Starship). Nerd Fonts come from one font's
+archive in the picked release; an unknown font name is refused before
+anything is downloaded. Fonts go to `~/Library/Fonts/NerdFonts` on macOS and
+`${XDG_DATA_HOME:-~/.local/share}/fonts/NerdFonts` on Linux (then
+`fc-cache`); under WSL the run ends with an `install-windows-font` manual
+action.
+
+Proxies: the proxy variables (`http_proxy`, `https_proxy`, `no_proxy`,
+`ALL_PROXY` and their uppercase forms) are kept through sudo;
+`FNM_NODE_DIST_MIRROR` (an https URL) serves the Node LTS lookup as well as
+fnm's downloads; on macOS `--brew-mirror china` uses the USTC Homebrew mirror
+(Homebrew's own code, metadata and bottles) for the run, including a Homebrew
+bootstrap, and for later shells, exactly like `brew-china-enable`.
+
+### Migrations from older layouts
+
+Each is reported by inspect as a `migration` record and done by the next
+approved run:
+
+- Saved profiles before schema 4 (see "State and TSV contract"): `pyenv`
+  becomes `cpython`, `yarn` and `pnpm` become `corepack`, `plugins` gains
+  `starship`, and the `languages` package group is dropped (its packages stay
+  installed).
+- Machines set up before 2026-10 carry pinned copies: on macOS the
+  `~/.local/bin` copies are removed once the Homebrew formula is installed
+  (they come first on PATH and would shadow it). Checkouts on their default
+  branch (the 2026-10 layout) move to their release, detached.
+- Machines set up before 2026-11 had `yarn` and `pnpm` components: the
+  `corepack` step removes their npm packages from `~/.local/npm` (Corepack's
+  shims take those names) and, on macOS, uninstalls the Homebrew `yarn` and
+  `pnpm` formulae only when the state file shows the profile installed them.
+  pyenv is no longer installed or updated: an existing `~/.pyenv` stays and
+  `zsh/path/pyenv.zsh` still activates it.
+- Pre-installer loaders (see "Zsh startup files").
+
+### Credentials
+
+SSH and GPG default to Skip. Reuse requires a specifically selected SSH
+private-key path or full GPG fingerprint; existing keys are never silently
+chosen. New SSH keys default to `~/.ssh/id_ed25519`, or an explicitly chosen
+unused absolute path; existing files are not replaced. Both `empty` and
+`prompt` passphrase policies are supported; `empty` is the default and is
+warned about.
+
+GitHub operations are read-only. The installer never uploads keys, logs into
+GitHub without asking (setup offers to run `gh auth login`, which the user
+answers), or changes SSH identity configuration or GitHub CLI's Git protocol.
+SSH derives matching public material, compares GitHub host keys with the API,
+and verifies both the selected identity and ordinary SSH against the same
+GitHub account. GPG requires a verified email, signs a real temporary commit,
+and enables global **commit** signing only after registration is confirmed;
+`tag.gpgsign` is left alone. Reconciliation never generates credentials. If
+an initial run paused before another requested key was generated, resume the
+originally approved apply choices while reusing keys already created. A
+network/API failure remains an error, not evidence that a key is missing.
+
+### Existing setups
+
+The installer appends its loader to `.zshrc`; it never rewrites the rest.
+`report_existing_setups` (`installer/plan.sh`) emits an `existing` record for
+each of these; the README gives the short advice.
+
+- **oh-my-zsh**: its loader runs first, then the profile, so `compinit` runs
+  twice and Starship replaces the oh-my-zsh theme. Set `ZSH_THEME=""` and drop
+  plugins the profile already provides, or remove the oh-my-zsh lines.
+- **powerlevel10k**: Starship sets the prompt after it. Keep one: remove the
+  p10k source line and its instant-prompt block, or skip `starship`.
+- **nvm**: fnm's default Node comes first in new shells; `nvm use` still
+  switches.
+- **pyenv**: no longer installed or updated, and left in place;
+  `zsh/path/pyenv.zsh` still activates it, so in interactive shells its shims
+  come before uv's `python3`. `pyenv global system` hands `python3` to uv's.
+- **conda**: `conda activate` puts that environment's python ahead of uv's; a
+  base environment `conda init` auto-activates does so in every shell.
+- **asdf / mise**: they and fnm, uv's Python and rbenv all provide node,
+  python and ruby; whichever comes first on PATH wins. Use one manager per
+  language, or skip the overlapping components.
+- **Linuxbrew copies of fnm, bun, Starship or uv**: on Linux the profile's
+  copies in `~/.local/bin` come first (`shadow` records). On macOS the profile
+  uses Homebrew's.
+- **Homebrew rbenv**: `conflict … homebrew-install`. The profile uses its own
+  `~/.rbenv` checkout when present and otherwise the one on PATH;
+  `--skip-existing-version-managers` keeps Homebrew's alone.
+
+### Zsh runtime
+
+`start.zsh` loads, in order: the PATH and environment layer (`entries.zsh`:
+tool paths, `env.zsh`, `commands.zsh`), `local/private.zsh`, the interactive
+layer (`interactive.zsh`: key bindings, `compinit`, completion-registering
+tools, fzf-tab, zsh-autosuggestions, custom completions,
+zsh-syntax-highlighting as the last plugin, then the Starship prompt) and
+finally `local/private-interactive.zsh`. Both private files are sourced at the
+top level of `start.zsh`, so plain `typeset`, `local` and `typeset -A` in them
+stay global, and both get a warning when they are readable by anyone but
+their owner. While they load they can call `puts`, `puts-err`,
+`add-path <dir>` and `entry <name>`; those names are removed once the profile
+has loaded (unless an override file defined one itself), so code that runs
+later uses `__leos_puts`, `__leos_puts_err`, `__leos_add_path`,
+`__leos_entry` or plain `print`. With `TERM=dumb` (Emacs TRAMP and similar)
+the shell stops after `local/private.zsh`: PATH and environment are set, but
+there is no line editor, plugin or themed prompt. A root shell that kept
+another user's HOME (`sudo -s`) does not load the profile at all, so it cannot
+leave root-owned files in that HOME. `start.zsh` loads only once per shell.
+
+The `.zshrc` block is interactive-only and the `.zshenv` and `.zprofile`
+blocks are silent, so `scp`, `rsync` and non-interactive `ssh` cannot break on
+startup output. The trade-off: a non-interactive shell (`ssh host cmd`, cron,
+scripts) sees only `~/.local/bin`, `~/.local/npm/bin` and fnm's default Node in
+front of the system PATH; no Homebrew, rbenv or Go. Remote one-liners that need
+those use absolute paths or activate the tool explicitly, for example
+`"$HOME/.local/bin/fnm" exec --using=default -- node --version`. On macOS, a
+login shell's `/etc/zprofile` runs `path_helper`, which would push those
+directories behind the system and Homebrew paths; the `.zprofile` block puts
+them back in front, so `zsh -l -c` sees the same order.
+
+PATH precedence in interactive shells is deliberate: version-manager shims
+first, then `~/.local/bin`, then Go workspace bins, then Homebrew, so a stale
+binary in `~/.local/bin` or `$GOPATH/bin` cannot shadow the Node/Python/Ruby a
+project selected. fnm alone constructs its runtime PATH. Locale fallback
+validates `C.UTF-8`, then `en_US.UTF-8`, and otherwise uses `C`. `LS_COLORS`,
+`LSCOLORS`, `MANPAGER` and `MANROFFOPT` are set only when the environment does
+not define them already.
+
+Command wrappers stay compatible with the commands they replace. `ls` runs
+eza (with `--group-directories-first`) only when its output is a terminal and
+every argument means the same to eza as to ls: operands, `-1 -l -a -A -d -R`
+in any combination, and long options that only eza has (`--git`, `--tree`,
+`--icons`, ...) or that GNU ls spells the same way; anything else (`ls -ltr`,
+`ls --sort=time`, a pipe) runs the real `ls` with the platform's colour flag.
+The routing table is in `zsh/env.zsh`. `cat` runs
+`bat --style=plain --paging=never` only for a terminal and no options. `egrep`
+and `fgrep` become `grep -E`/`grep -F` with `--color=auto`, since GNU grep
+warns that they are obsolescent. `EXTENDED_GLOB` is on with `^` and `#`
+disabled as pattern characters (`disable -p`), so `git reset HEAD^` and
+`nix run nixpkgs#hello` work; functions under `emulate -L zsh` get every
+pattern back. The themed prompt leaves out Java and Kotlin versions: reading
+them starts a JVM on every prompt.
+
+Deterministic initialization scripts (rbenv, an existing pyenv, direnv,
+zoxide, fzf, Starship, and npm/pnpm/Bun/uv/uvx completions) are cached under
+`${XDG_CACHE_HOME:-~/.cache}/leos-profiles/init`; see "Startup benchmark" for
+the identity line and trust checks. Homebrew's `brew shellenv` runs in each
+shell because its output depends on the current environment (it prints
+nothing when the Homebrew paths are already on PATH, and its variables follow
+the prefix in use); an earlier version cached it and commit 36e6ab1 went back
+to running it per shell (about 20 ms). `fnm env` also runs per shell because
+it creates a unique `FNM_MULTISHELL_PATH`; a nested shell drops the multishell
+directory it inherited, and once a day a background job deletes multishell
+links older than a day whose shell has exited. rbenv (and an existing pyenv)
+use `--no-rehash` and refresh their shims in the background at most once a
+day. Yarn uses the `_yarn` completion bundled with zsh-completions.
+
+Performance notes:
+
+- A warm shell runs no cache bookkeeping forks: the cache directory is
+  validated once per shell and entries are named and checked in-process.
+- The completion system is audited and rebuilt at most once a day, or when the
+  completion search path changes; other shells load the dump with
+  `compinit -C`. `.zcompdump*` files earlier versions left in the home
+  directory are removed once.
+- An existing pyenv starts without forking bash to rewrite PATH and without
+  its legacy `compctl` completion; `zsh/completions/_pyenv` completes it
+  through the completion system instead.
+- zsh-autosuggestions wraps its widgets once, at the first prompt; lines
+  starting with commands whose completers start a Node, Ruby or Bash program
+  (brew, npm, pnpm, yarn, bun, heroku, pyenv, rbenv, gcloud, ref-taking git
+  subcommands) get history suggestions only.
+- The installer and `leos-refresh-init-cache` compile the profile and plugin
+  sources to `.zwc` files beside them. Zsh ignores a `.zwc` older than its
+  source or from another Zsh version, so an edit or a pull is never shadowed.
+- Starship's right prompt runs only when the configuration defines a
+  `right_format`, and its continuation prompt is computed when shown.
+
+### Maintenance commands
+
+`bye` runs every package checkup defined in the shell (`brew-checkup`,
+`apt-checkup`, `dnf-checkup`, `pacman-checkup`, each with autoremove, cache
+cleanup or orphan removal), `ai-checkup` (native `claude update`,
+`codex update`, and `opencode upgrade` for a copy Homebrew does not manage),
+and on macOS `rmdsstore` plus a Finder/Dock/SystemUIServer restart, then exits
+the shell. `--keep-history` is still accepted for old aliases; keeping history
+is the default. The checkups run `leos-refresh-init-cache` afterwards, since a
+package upgrade can change a tool's init logic in a file other than the
+launcher the cache is keyed on.
+
+`rmdsstore` (`util/rmdsstore.py`) deletes only named metadata files. With no
+root it scans the complete writable APFS data volume and every volume mounted
+directly under `/Volumes`. It rejects symlink roots, does not follow symlinks
+or implicitly cross nested mount boundaries, includes cloud-storage
+directories, and reports failures. On Linux, where only the tests run it, it
+reads `/proc/self/mountinfo` to preserve same-device bind mounts; an
+unreadable mount table aborts before deletion. Recycle-bin directory removal is opt-in
+(`--purge-recycle-bins`). The wrapper runs it under sudo with the system
+Python in isolated mode (`/usr/bin/python3 -I`), never a PATH-resolved one,
+but the script itself lives in the user-owned checkout: trust changes to the
+checkout before running maintenance with sudo. The same applies to
+`upgrade-leos-profiles`, which is why it lists the incoming commits and asks
+before running them through `reconcile` (with sudo).
+
 ## Installer structure
 
 `install.sh` owns argument parsing, validation, inspection, and orchestration.
 Sourced modules share its context and do not invoke provisioning when loaded.
 The implementation stays compatible with macOS Bash 3.2, and so does
-`bootstrap.sh`. `AGENTS.md` summarises the rules and checks for anyone
-changing the repository.
+`bootstrap.sh`.
 
 | File | Responsibility |
 | --- | --- |
@@ -218,7 +582,8 @@ which cannot happen at a terminal). Then:
    subshells and apply see the same one), `inspect_tsv` into a temporary
    file in this shell (globals such as the resolved Node and runtime lines
    do not survive `$(...)`), `render_plan` on it (grouped by record type,
-   every type but `meta`, ending with each `postcondition` as to do / done /
+   every type but `meta`, a release tool's `artifact` and `release` records
+   joined on one line, ending with each `postcondition` as to do / done /
    skipped and the counts), and one `ui_confirm`.
 4. `apply_selection` in the same process, with `COMMAND=setup` (it writes
    the profile as apply does).
@@ -230,7 +595,8 @@ bad answer; end of input (or cancelling a gum prompt) exits 130. Option
 labels contain no commas (gum's `--selected` splits on them).
 
 Manual actions: with `INTERACTIVE_MANUAL=1`, `credential_manual_action` calls
-`await_manual_action`, which shows the explanation and offers "Run it for
+`await_manual_action`, which shows the explanation (with its "then rerun"
+ending pointed at the choice below, `waiting_explanation`) and offers "Run it for
 me now" (when the caller set `MANUAL_ACTION_OFFER`: `gh auth login
 --hostname github.com --scopes <what the checks need>`, or the
 `gh auth refresh` for a missing scope), "Done: check again" and "Stop here".

@@ -148,7 +148,7 @@ await_manual_action() {
   MANUAL_ACTION_OFFER=""
   [[ $INTERACTIVE_MANUAL -eq 1 ]] || return 1
   ui_section "Action needed"
-  ui_note "$explanation"
+  ui_note "$(waiting_explanation "$explanation")"
   if [[ -n $offer ]]; then
     IFS=' ' read -r -a command <<< "$offer"
     options+=("Run it for me now: $offer")
@@ -162,6 +162,22 @@ await_manual_action() {
     "Done: check again") return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# waiting_explanation <explanation>: the explanation as setup shows it while
+# it waits in place. The explanations are written for a run that ends with
+# exit 3 ("then rerun", "resume with reconcile"); here the run continues once
+# the user is done, so those endings point to the choice below instead. The
+# queued explanation (the checklist after "Stop here") keeps the original.
+waiting_explanation() {
+  local text=$1 from to
+  from=', then rerun.'; to=', then choose "Done: check again" below.'
+  text=${text//$from/$to}
+  from=' Then rerun reconcile;'; to=' Then choose "Done: check again" below;'
+  text=${text//$from/$to}
+  from=' Resume with reconcile when no key generation remains pending.'; to=' Then choose "Done: check again" below.'
+  text=${text//$from/$to}
+  printf '%s\n' "$text"
 }
 
 # queue_manual_action <action> <public path> <destination> <explanation>

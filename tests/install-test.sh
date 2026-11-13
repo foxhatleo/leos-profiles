@@ -4406,7 +4406,9 @@ test_render_plan_shows_every_record_type() {
       type = $2; count = $3; gsub(/[ `]/, "", type); gsub(/ /, "", count); print type ":" count }' "$ROOT/docs/development.md")
   [[ $(wc -l < "$plan_rows") -gt 20 ]] || fail "could not read the record table"
   printf '%s\n' $'postcondition\tzsh-config\tverified' $'postcondition\tfnm\tneeded' \
-    $'release\tbun\tunresolved\t-\tresolve-during-apply' $'group\tcomponent\tpackages\timplied' >> "$plan_rows"
+    $'release\tbun\tunresolved\t-\tresolve-during-apply' $'group\tcomponent\tpackages\timplied' \
+    $'artifact\trelease\tstarship\tgithub.com/starship/starship\tstarship.tar.gz' \
+    $'release\tstarship\tv1.0.0\t2026-01-01T00:00:00Z\tdigest' >> "$plan_rows"
   out=$(render_plan "$plan_rows")
   while IFS=: read -r type columns; do
     [[ $type == meta ]] || assert_contains "$out" "M-$type"
@@ -4417,6 +4419,9 @@ test_render_plan_shows_every_record_type() {
   done
   assert_contains "$out" "packages (implied)"
   assert_contains "$out" "bun: release not resolved yet"
+  # A release tool's source and its picked release share one line.
+  assert_contains "$out" "starship: release github.com/starship/starship starship.tar.gz, v1.0.0, published 2026-01-01T00:00:00Z, checked by digest"
+  [[ $(grep -c 'starship' <<< "$out") -eq 1 ]] || fail "a release tool was listed more than once: $out"
   assert_contains "$out" "done       zsh-config"
   assert_contains "$out" "to do      fnm"
   assert_contains "$out" "2 to do, 1 already done; 1 packages; 1 root actions; 1 irreversible; 1 warnings"
@@ -4480,10 +4485,13 @@ test_setup_waits_for_manual_actions_at_a_terminal() {
       *) return 0 ;;
     esac
   }
-  # "Done: check again" twice; the third check passes.
+  # "Done: check again" twice; the third check passes. While setup waits in
+  # place, the explanation does not tell the user to rerun anything.
   setup_answers 2 2
-  ensure_github_auth 2>/dev/null
+  out=$(ensure_github_auth 2>&1)
   assert_answers_used
+  assert_contains "$out" 'then choose "Done: check again" below.'
+  [[ $out != *rerun* ]] || fail "setup told a waiting user to rerun: $out"
   assert_equals "$(grep -c '^auth status' "$GH_LOG")" 3
   assert_equals "$PENDING_MANUAL_ACTIONS" ""
   # "Run it for me now": gh auth login, with the scope the key check needs.
