@@ -25,7 +25,8 @@ COMMAND=""
 source "$SCRIPT_DIR/installer/registry.sh"
 # Every package group, in install order. Recommended selects all but the
 # opt-in ones: python (rpatool's interpreter; languages already has one) and
-# heroku (a third-party tap, macOS only).
+# heroku (a large Node CLI few machines need; homebrew/core packages it, the
+# Linux distributions do not, so it is macOS only).
 readonly CANONICAL_GROUPS="core-utils,shell,dev-tools,languages,python,media,network,heroku,system"
 readonly RECOMMENDED_GROUPS="core-utils,shell,dev-tools,languages,media,network,system"
 # rpatool remains available as the explicit `bins` step, but is not a default
@@ -37,12 +38,14 @@ SSH_PASSPHRASE_MODE="empty"
 GPG_MODE="skip"
 GPG_PASSPHRASE_MODE="empty"
 GPG_KEY_ID=""
+GPG_GENERATED_KEY=""
 INSTALL_FONTS="auto"
 CHANGE_DEFAULT_SHELL="auto"
 DRY_RUN=0
 ASSUME_YES=0
 FULL_UPGRADE=1
 SAVED_FULL_UPGRADE=yes
+UPGRADE_CASKS=0
 OS_FAMILY=""
 SSH_KEY_PATH=""
 GIT_NAME=""
@@ -66,6 +69,24 @@ LOCK_HELD=0
 say() { printf '%s\n' "==> $*"; }
 warn() { printf '%s\n' "WARNING: $*" >&2; }
 die() { printf '%s\n' "ERROR: $*" >&2; exit 1; }
+
+# The ERR trap (main installs it; set -E carries it into functions): a command
+# that fails where set -e would stop the run, outside die and the deliberate
+# exits, is a bug. Say where, and never let its own status pose as 2 (the
+# plan changed) or 3 (manual action): those are contract exits (CQ-2).
+# Subshells ($(...), ( )) are left alone: their status reaches the main shell,
+# which reports the failure there if it is not handled.
+on_unexpected_error() {
+  local status=$1 file=$2 line=$3
+  [[ ${BASH_SUBSHELL:-0} -eq 0 ]] || return 0
+  # Status 1 is also what `die` exits with inside a $(...), after it already
+  # printed its own message, so a location line there would only be noise.
+  if [[ $status -ne 1 ]]; then
+    printf '%s\n' "ERROR: unexpected failure (status $status) at $file:$line" >&2
+  fi
+  if [[ $status -eq 2 || $status -eq 3 ]]; then status=1; fi
+  exit "$status"
+}
 
 usage() {
   cat <<EOF
@@ -93,6 +114,8 @@ Options:
   --git-email <email>             Global Git email when identity is missing
   --full-upgrade                  Run the host package-manager upgrade phase
   --no-full-upgrade               Install/reconcile packages without a host upgrade
+  --upgrade-casks                 macOS: the full upgrade also upgrades every
+                                  Homebrew cask (GUI apps; some ask for sudo)
   --brew-mirror <china|none>      macOS: use (china) or stop using (none) the USTC
                                   Homebrew mirror for this run and later shells
   --skip-existing-version-managers
@@ -195,6 +218,7 @@ parse_args() {
     --node-version) require_value "$1" "${2:-}"; NODE_VERSION_APPROVED=$2; shift 2 ;;
     --full-upgrade) FULL_UPGRADE=1; shift ;;
     --no-full-upgrade) FULL_UPGRADE=0; shift ;;
+    --upgrade-casks) UPGRADE_CASKS=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -272,6 +296,7 @@ validate_options() {
   validate_tsv_value package-groups "$SELECTED_GROUPS"
   validate_tsv_value ssh-key "$SSH_KEY_PATH"
   validate_tsv_value gpg-key "$GPG_KEY_ID"
+  validate_tsv_value gpg-generated "$GPG_GENERATED_KEY"
   validate_tsv_value git-name "$GIT_NAME"
   validate_tsv_value git-email "$GIT_EMAIL"
   validate_tsv_value profile-root "$TARGET"
@@ -522,9 +547,6 @@ inspect_tsv() {
   if has_csv_item "$SELECTED_STEPS" packages; then
     printf 'action\tpackages\t%s\n' "$([[ $FULL_UPGRADE -eq 1 ]] && printf 'full host upgrade and selected package installation' || printf 'install missing selected packages without full host upgrade')"
     if [[ $FULL_UPGRADE -eq 1 ]]; then printf 'irreversible\thost-upgrade\tin-release package-manager upgrades (never an OS release upgrade) are not automatically reversible\n'; fi
-    if [[ $OS_FAMILY == macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
-      printf 'action\trepository\tHomebrew heroku/brew tap\n'
-    fi
     if [[ $OS_FAMILY == fedora ]] && has_csv_item "$SELECTED_GROUPS" media; then
       printf 'action\trepository\tRPM Fusion free\n'
     fi
@@ -619,6 +641,7 @@ main() {
   INVOCATION=${INVOCATION% }
   parse_args "$@"
   trap cleanup EXIT
+  trap 'on_unexpected_error "$?" "${BASH_SOURCE[0]:-install.sh}" "$LINENO"' ERR
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
   # These two only read, or remove the profile's own blocks: they work on any
@@ -642,10 +665,13 @@ main() {
   order_selected_steps
   detect_os
   if [[ $OS_FAMILY != macos ]] && has_csv_item "$SELECTED_GROUPS" heroku; then
-    die "The heroku package group is macOS-only (Heroku's Homebrew tap); remove it from --package-groups"
+    die "The heroku package group is macOS-only (no Linux distribution packages the Heroku CLI); remove it from --package-groups"
   fi
   if [[ $OS_FAMILY != macos && $BREW_MIRROR == china ]]; then
     die "--brew-mirror china applies to Homebrew on macOS only"
+  fi
+  if [[ $OS_FAMILY != macos && $UPGRADE_CASKS -eq 1 ]]; then
+    die "--upgrade-casks applies to Homebrew on macOS only"
   fi
   if [[ $COMMAND == inspect ]]; then
     inspect_tsv
@@ -663,6 +689,7 @@ main() {
   migrate_local_state
   if [[ $COMMAND == apply ]]; then
     if [[ $FULL_UPGRADE -eq 1 ]]; then SAVED_FULL_UPGRADE=yes; else SAVED_FULL_UPGRADE=no; fi
+    remember_generated_gpg_key
     write_profile
   fi
   apply_brew_mirror

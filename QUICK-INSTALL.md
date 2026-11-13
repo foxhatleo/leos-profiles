@@ -57,15 +57,18 @@ installer is only your deterministic execution engine.
    config, and default shell imply `packages` plus `shell`. Yarn and pnpm also
    imply fnm; install fnm before either npm tool.
 6. Ask conditional choices in later stages of no more than three questions:
-   fonts; full initial host upgrade; default-shell policy; SSH; GPG; missing
-   Git identity; and exact key selection. SSH and GPG must have **Skip**
+   fonts; full initial host upgrade (on macOS, also whether it upgrades
+   Homebrew casks: `--upgrade-casks`, off by default); default-shell policy;
+   SSH; GPG; missing Git identity; and exact key selection. SSH and GPG must have **Skip**
    preselected. Reuse must select one specifically discovered key. Never pick
    a key for the user. For generation, explain both passphrase policies:
    `empty` (supported default, unencrypted) and `prompt`. The default new SSH
    path is `~/.ssh/id_ed25519`; a different unused absolute path can be chosen.
    Never replace or silently reuse an existing key.
 7. For GPG, ensure the selected Git email is verified on the authenticated
-   GitHub account. Missing login or `user:email` access is a manual step: show
+   GitHub account. Missing login, `user:email` access, or the key-read scopes
+   (`github-key-scope`: the destination is the `gh auth refresh` command to
+   run) is a manual step: show
    the engine's guidance and let the user authenticate or grant scope. Do not
    execute login, key uploads, or SSH identity/protocol changes for the user.
 8. Run the checkout's `bash install.sh inspect ...` with the explicit choices.

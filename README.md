@@ -142,8 +142,9 @@ so missing or corrupt tools are repaired.
 Besides the selection, packages, artifacts and files, `inspect` reports every
 action that runs as root (`privileged`: package-manager runs, Arch's
 `pacman -Syu`, Fedora's ffmpeg swap, the `/etc/shells` edit,
-`sudo chsh`), side effects (`behaviour`: Debian's fd/bat links, GNU tools ahead
-of BSD on macOS, global Git identity writes, the Homebrew mirror), effects that
+`sudo chsh`, cask upgrades), side effects (`behaviour`: Debian's fd/bat links,
+GNU tools ahead of BSD on macOS, global Git identity writes, the Homebrew
+mirror, cask upgrades), effects that
 cannot be undone automatically (`irreversible`), existing installations in the
 way (`conflict`), shell setups the profile coexists with (`existing`), on Linux
 Homebrew copies the profile's tools will shadow (`shadow`), what moves off the
@@ -187,7 +188,14 @@ latest release (skipping the download when it is already installed), upgrade
 an outdated formula, and fast-forward each checkout. Without a full upgrade a
 run only repairs what is missing or broken. Set `GITHUB_TOKEN` if many Linux
 runs share one address: the release lookup uses GitHub's API, which allows 60
-anonymous requests an hour.
+anonymous requests an hour. When GitHub cannot be reached (or refuses, at that
+limit), a tool that is already installed and works is kept with a warning;
+only a missing or broken one stops the run.
+
+On macOS the full upgrade runs `brew update` and `brew upgrade --formula` (a
+bare `brew upgrade` would include casks). It upgrades casks (GUI apps; some
+cask installers ask for sudo) only with `--upgrade-casks`, which apply saves
+for later reconciles; `bye`'s `brew-checkup` still upgrades casks as before.
 
 Two downloads stay pinned to a reviewed URL and SHA-256 digest, because there
 is nothing newer to follow: Homebrew's installer script (it runs once, on a

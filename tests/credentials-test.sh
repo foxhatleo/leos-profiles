@@ -6,6 +6,9 @@ set -Eeuo pipefail
 ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=../installer/credentials.sh
 source "$ROOT/installer/credentials.sh"
+# resolve_config_path, for a symlinked known_hosts.
+# shellcheck source=../installer/config.sh
+source "$ROOT/installer/config.sh"
 # pkg_install and the root prefix used by the credential prerequisites.
 # shellcheck source=../installer/packages.sh
 source "$ROOT/installer/packages.sh"
@@ -22,6 +25,7 @@ GPG_MODE=reuse GPG_PASSPHRASE_MODE=empty
 SSH_KEY_PATH="$fixture/custom-key"
 GPG_KEY_ID=0123456789ABCDEF0123456789ABCDEF01234567
 GIT_NAME='Test User' GIT_EMAIL=test@example.com
+GPG_GENERATED_KEY=''
 TEMP_PATHS=()
 say() { :; }
 warn() { printf '%s\n' "$*" >&2; }
@@ -31,6 +35,7 @@ track_temp() { TEMP_PATHS+=("$1"); }
 prepare_local_dir() { mkdir -p "$LOCAL_DIR"; }
 write_profile() { printf '%s\t%s\n%s\t%s\n' "$SSH_MODE" "$SSH_KEY_PATH" "$GPG_MODE" "$GPG_KEY_ID" > "$PROFILE_FILE"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+gpg_secret_present=yes
 api_keys='' api_gpg='' ordinary_login=tester selected_login=tester auth_ok=yes api_ok=yes signing_ok=yes
 ssh_keygen_calls="$fixture/keygen-calls"
 gh() {
@@ -76,7 +81,10 @@ gpg() {
   local IFS=' '
   printf '%s\n' "$*" >> "$fixture/gpg-calls"
   case "$*" in
-    *--list-secret-keys*) printf 'fpr:::::::::%s:\n' "$GPG_KEY_ID" ;;
+    *--list-secret-keys*)
+      # gpg exits 2 for a secret key it does not have.
+      [[ $gpg_secret_present == yes ]] || return 2
+      printf 'fpr:::::::::%s:\n' "$GPG_KEY_ID" ;;
     *--list-keys*) printf 'uid:::::::::Test User <test@example.com>:\n' ;;
     '--armor --export '*) printf '%s\n' '-----BEGIN PGP PUBLIC KEY BLOCK-----' 'PUBLIC FIXTURE' '-----END PGP PUBLIC KEY BLOCK-----' ;;
     *--quick-generate-key*) printf '[GNUPG:] KEY_CREATED P %s\n' "$GPG_KEY_ID" ;;
@@ -132,7 +140,9 @@ grep -q 'identityfile ~/.ssh/wrong-key' "$fixture/error" || fail 'effective iden
 ! grep -q PRIVATE_SETTING_MUST_NOT_PRINT "$fixture/error" || fail 'unrelated SSH settings leaked'
 ordinary_login=tester
 expect_exit 0 provision_ssh
-grep -q '^-o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com$' "$fixture/ssh-calls" || fail 'ordinary SSH was not tested'
+# SEC-1: neither probe may prompt.
+grep -q '^-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -T git@github.com$' "$fixture/ssh-calls" || fail 'ordinary SSH was not tested in batch mode'
+grep -q "^-i $SSH_KEY_PATH -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes " "$fixture/ssh-calls" || fail 'selected-key SSH was not tested in batch mode'
 SSH_MODE=generate
 expect_exit 1 provision_ssh
 SSH_KEY_PATH="$fixture/new-custom-key"
@@ -160,6 +170,24 @@ grep -q "$GPG_KEY_ID" "$fixture/error" || fail 'GPG fingerprint missing'
 api_gpg=89ABCDEF01234567
 expect_exit 0 provision_gpg
 grep -q '^config --global commit.gpgsign true$' "$fixture/git-calls" || fail 'registered key did not enable signing'
+# A selected key that is not in the keyring (gpg exits 2) is reported as such,
+# with status 1.
+gpg_secret_present=no
+expect_exit 1 provision_gpg
+grep -q 'selected GPG secret key was not found' "$fixture/error" || fail "a missing GPG key was not reported: $(cat "$fixture/error")"
+gpg_secret_present=yes
+# Retrying --gpg generate after its pause reuses the key that run generated.
+GPG_MODE=generate GPG_GENERATED_KEY=$GPG_KEY_ID
+: > "$fixture/gpg-calls"
+expect_exit 0 provision_gpg
+! grep -q -- --quick-generate-key "$fixture/gpg-calls" || fail 'a retried generate created a second GPG key'
+grep -q $'^reuse\t'"$GPG_KEY_ID"'$' "$PROFILE_FILE" || fail 'the reused generated key was not saved'
+# Without a recorded key (or once it has left the keyring) it generates.
+GPG_MODE=generate GPG_GENERATED_KEY=''
+: > "$fixture/gpg-calls"
+expect_exit 0 provision_gpg
+grep -q -- --quick-generate-key "$fixture/gpg-calls" || fail 'generate without an earlier key created none'
+GPG_MODE=reuse
 auth_ok=no
 SSH_MODE=reuse
 expect_exit 3 provision_ssh

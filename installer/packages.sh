@@ -221,8 +221,9 @@ bootstrap_tools() {
 # formula on purpose: the `python`/`python3` aliases follow Homebrew's newest
 # minor release, so each move made reconcile install another Python next to
 # the old one. Change python@3.15 here deliberately.
-# heroku is a macOS-only group (the CLI comes from Heroku's Homebrew tap); it
-# has no members elsewhere, and main() refuses it there.
+# heroku is a macOS-only, opt-in group: the formula is in homebrew/core (no
+# third-party tap), but no Linux distribution packages the CLI. It has no
+# members elsewhere, and main() refuses it there.
 package_list_for_group() {
   local group=$1
   case "$OS_FAMILY:$group" in
@@ -401,12 +402,13 @@ install_os_packages() {
   case $OS_FAMILY in
     macos)
       ensure_brew
-      # Heroku's third-party tap is trusted only when its group is selected.
-      if has_csv_item "$SELECTED_GROUPS" heroku; then run brew tap heroku/brew; fi
       if [[ $FULL_UPGRADE -eq 1 ]]; then
         run brew update
-        run brew upgrade
-        run brew upgrade --cask
+        # A bare `brew upgrade` covers outdated casks too, so name formulae.
+        # Casks are GUI apps, often updating themselves, and some cask
+        # upgrades run installers that ask for sudo: only on request.
+        run brew upgrade --formula
+        if [[ $UPGRADE_CASKS -eq 1 ]]; then run brew upgrade --cask; fi
       fi
       pkg_install "${requested[@]}"
       BREW_FORMULAE="" ;;

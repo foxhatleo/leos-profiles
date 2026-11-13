@@ -232,11 +232,20 @@ packages_need_package_manager() {
   [[ $FULL_UPGRADE -eq 1 ]] || ! selected_packages_installed
 }
 
+# cask_upgrade_planned: this run's packages step runs `brew upgrade --cask`
+# (macOS, a full upgrade, --upgrade-casks).
+cask_upgrade_planned() {
+  [[ $OS_FAMILY == macos && $UPGRADE_CASKS -eq 1 && $FULL_UPGRADE -eq 1 ]] && packages_need_package_manager
+}
+
 privileged_plan() {
   local root=${SUDO:+sudo } zsh_path missing
   if [[ $OS_FAMILY == macos ]]; then
     if ! command -v brew >/dev/null 2>&1 && [[ ! -x /opt/homebrew/bin/brew && ! -x /usr/local/bin/brew ]]; then
       printf 'homebrew-bootstrap\tthe pinned Homebrew installer runs sudo to create the Homebrew prefix\n'
+    fi
+    if cask_upgrade_planned; then
+      printf 'cask-upgrade\tbrew upgrade --cask: some casks run installers that ask for sudo\n'
     fi
   else
     missing=$(bootstrap_missing)
@@ -262,8 +271,8 @@ privileged_plan() {
   fi
   if default_shell_change_needed; then
     zsh_path=$(preferred_zsh_path 2>/dev/null || printf 'zsh')
-    if [[ ! -r /etc/shells ]] || ! grep -qxF "$zsh_path" /etc/shells; then
-      printf 'etc-shells\t%sappend %s to /etc/shells\n' "$root" "$zsh_path"
+    if [[ ! -r $ETC_SHELLS ]] || ! grep -qxF "$zsh_path" "$ETC_SHELLS"; then
+      printf 'etc-shells\t%sappend %s to %s\n' "$root" "$zsh_path" "$ETC_SHELLS"
     fi
     printf 'login-shell\t%schsh -s %s %s\n' "$root" "$zsh_path" "$(login_user)"
   fi
@@ -288,6 +297,9 @@ report_behaviour() {
   fi
   if [[ $GPG_MODE != skip ]]; then
     printf 'behaviour\tgit-identity\twrites global user.name and user.email when either is unset (from --git-name/--git-email)\n'
+  fi
+  if cask_upgrade_planned; then
+    printf 'behaviour\tcask-upgrade\tfull upgrade also upgrades every Homebrew cask (GUI apps; some ask for sudo)\n'
   fi
   if [[ $OS_FAMILY == macos && $(brew_mirror_effective) == china ]]; then
     printf 'behaviour\tbrew-mirror\tHomebrew'"'"'s own code (brew.git), metadata and bottles come from the USTC mirror in this run and later shells\n'
