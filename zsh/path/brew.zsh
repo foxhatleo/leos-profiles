@@ -1,13 +1,14 @@
 # Homebrew
 
-if __leos_brew_bin_path=$(__leos_brew_bin); then
-  add-path "${__leos_brew_bin_path:h}"
+if __leos_brew_bin; then
+  __leos_brew_bin_path=$REPLY
+  __leos_add_path "${__leos_brew_bin_path:h}"
   # shellenv may legitimately emit nothing when PATH is already configured.
   # Its result depends on this process, so do not cache it or a failure marker.
   if __leos_brew_env=$("$__leos_brew_bin_path" shellenv zsh); then
     eval "$__leos_brew_env"
   else
-    puts-err "brew shellenv failed; Homebrew paths may be missing."
+    __leos_puts_err "brew shellenv failed; Homebrew paths may be missing."
   fi
   unset __leos_brew_env
 
@@ -35,12 +36,12 @@ if __leos_brew_bin_path=$(__leos_brew_bin); then
   brew-china-enable() {
     local answer
     if (( $# > 1 )) || [[ $# == 1 && $1 != --yes ]]; then
-      puts-err "Usage: brew-china-enable [--yes]"; return 2
+      __leos_puts_err "Usage: brew-china-enable [--yes]"; return 2
     fi
     if [[ ${1:-} != --yes ]]; then
-      puts-err "This routes Homebrew's own code (brew.git), its metadata and bottles through the third-party USTC mirror."
+      __leos_puts_err "This routes Homebrew's own code (brew.git), its metadata and bottles through the third-party USTC mirror."
       read -r "answer?Enable it? [y/N] "
-      [[ $answer == [yY] || $answer == [yY][eE][sS] ]] || { puts "Cancelled."; return 1; }
+      [[ $answer == [yY] || $answer == [yY][eE][sS] ]] || { __leos_puts "Cancelled."; return 1; }
     fi
     # Save prior values so a failed enable restores instead of clobbering
     # mirror env that startup legitimately exported from the flag file.
@@ -78,7 +79,7 @@ if __leos_brew_bin_path=$(__leos_brew_bin); then
   }
 else
   if [[ $OSTYPE == darwin* && ! -f $LEOS_PROFILES/local/flags/no-brew ]]; then
-    puts-err "brew is not installed. To silence, touch \$LEOS_PROFILES/local/flags/no-brew."
+    __leos_puts_err "brew is not installed. To silence, touch \$LEOS_PROFILES/local/flags/no-brew."
   fi
 fi
 

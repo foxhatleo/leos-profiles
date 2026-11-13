@@ -155,7 +155,7 @@ The `zsh-config` step owns up to three managed blocks, each between
 | Marker | File | Content |
 | --- | --- | --- |
 | `loader` | `.zshrc` | `LEOS_PROFILES_HOME` default and the interactive-only `source …/zsh/start.zsh` |
-| `environment` | `.zshenv` | `skip_global_compinit=1` and `~/.local/bin`, `~/.local/npm/bin` in front of PATH |
+| `environment` | `.zshenv` | `skip_global_compinit=1`, and `~/.local/bin`, `~/.local/npm/bin` in front of PATH when missing (never moved, so a child shell keeps its parent's shims first; not for root with a foreign HOME) |
 | `login-path` | `.zprofile` (macOS only) | the same PATH entries again, after `/etc/zprofile`'s `path_helper` |
 
 `resolve_zsh_dotdirs` in `installer/config.sh` decides where those files are:
@@ -447,9 +447,17 @@ resolved binary path, HOME, version-manager roots, the optional output filter
 (`__leos_init_filter`, which pyenv and Starship use) and the arguments, each
 field `(q+)`-quoted so newlines or NULs cannot forge it, plus any
 generator-specific variables the caller folds into the key (zoxide's
-`_ZO_ECHO` and `_ZO_RESOLVE_SYMLINKS`). The file name is the `%XX`-encoded key
-and a 32-bit FNV-1a digest of that line, computed in-process; the line itself,
-read with `read` (no fork), decides whether an entry is used. Bump the key when
+`_ZO_ECHO` and `_ZO_RESOLVE_SYMLINKS`). After a TAB, the line ends with
+`stat=` and the device, inode, size and mtime (`zstat`, no fork) of the
+launcher and of any implementation file the caller names in
+`__leos_init_deps` (rbenv's and pyenv's `libexec/*-init`). The file name is the
+`%XX`-encoded key and a 32-bit FNV-1a digest of the identity without the stat
+part, computed in-process, so an upgraded launcher replaces its entry in place;
+the whole line, read with `read` (no fork), decides whether an entry is used.
+A generator that exits non-zero or prints nothing leaves a `.failed` marker
+with the same line: the first shell reports it (status 1 from
+`leos-source-cached`), later ones skip it quietly (status 2) until the
+launcher changes. Bump the key when
 a filter's behaviour changes. The cache checks ownership, write permissions and
 symlinks before executing persisted scripts or compiled files, and creates
 private directories/files. `__leos_cache_dir` validates every ancestor once per
@@ -458,9 +466,10 @@ EUID; repeat calls lstat the root and the two profile-owned levels and validate
 in full again if their owner, mode or inode changed. Tests that change
 permissions mid-shell call `__leos_cache_forget`. A warm cache hit costs about
 0.4 ms, against 3 to 6 ms for running the cached generators directly (zoxide,
-direnv, Starship, fzf), so every generator stays cached. Launcher mtime controls
-freshness; use `leos-refresh-init-cache` after updates to other implementation
-files. It also recompiles the profile and plugin sources (`.zwc`), as the
+direnv, Starship, fzf), so every generator stays cached. The launcher's stat,
+compared for equality, controls freshness: dpkg and rpm keep build-time
+mtimes, so a newer-than test misses upgrades. Use `leos-refresh-init-cache`
+after updates to other implementation files; the package checkups do. It also recompiles the profile and plugin sources (`.zwc`), as the
 installer does after the plugins or zsh-config step.
 
 Startup files test for tools with `whence -p tool >/dev/null` and then read

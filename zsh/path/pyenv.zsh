@@ -1,6 +1,6 @@
 # pyenv
 export PYENV_ROOT=${PYENV_ROOT:-$HOME/.pyenv}
-add-path "$PYENV_ROOT/bin"
+__leos_add_path "$PYENV_ROOT/bin"
 # The installer's checkout is found by path; otherwise a pyenv elsewhere on
 # PATH (e.g. Homebrew). See entries.zsh for why `whence -p`, not $+commands.
 if [[ -x $PYENV_ROOT/bin/pyenv && ! -d $PYENV_ROOT/bin/pyenv ]]; then
@@ -27,13 +27,16 @@ if [[ -n $__leos_pyenv_bin ]]; then
   # --no-push-path replaces pyenv's PATH rewrite, which forks a bash process
   # on every shell, with a guarded prepend; the line below then moves the
   # shims to the front in-process, which is what pyenv's own rewrite did.
+  # `pyenv` is only a dispatcher: the script comes from libexec/pyenv-init
+  # beside the resolved launcher, so that file's stat is part of the identity.
+  __leos_init_deps=${__leos_pyenv_bin:A:h}/pyenv-init \
   __leos_init_filter=__leos_pyenv_init_filter leos-source-cached-warn \
     "pyenv init produced no output; pyenv shims may be missing from PATH." \
     pyenv-init $__leos_pyenv_bin init --no-rehash --no-push-path - zsh
   path=("$PYENV_ROOT/shims" ${path:#${(b)PYENV_ROOT}/shims})
   __leos_rehash_daily pyenv
 elif [[ ${LEOS_WARN_OPTIONAL_TOOLS:-0} == 1 && ! -f $LEOS_PROFILES/local/flags/no-pyenv ]]; then
-  puts-err "pyenv is not installed. To silence, touch \$LEOS_PROFILES/local/flags/no-pyenv." >&2
+  __leos_puts_err "pyenv is not installed. To silence, touch \$LEOS_PROFILES/local/flags/no-pyenv." >&2
 fi
 unset __leos_pyenv_bin
 

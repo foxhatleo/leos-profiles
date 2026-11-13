@@ -1,5 +1,5 @@
 # User local bin
-add-path "$HOME/.local/bin"
-add-path "$HOME/.local/npm/bin"
+__leos_add_path "$HOME/.local/bin"
+__leos_add_path "$HOME/.local/npm/bin"
 
 :

@@ -82,7 +82,8 @@ Pop = ""
 [username]
 show_always = true
 style_user = "bg:color_orange fg:color_fg0"
-style_root = "bg:color_orange fg:color_fg0"
+# Root stands out in red, as in starship-plain.toml.
+style_root = "bold bg:color_red fg:color_fg0"
 format = '[ $user]($style)'
 
 # Shown only over SSH, so a remote shell never looks like a local one. The
@@ -151,12 +152,16 @@ symbol = ""
 style = "bg:color_blue"
 format = '[[ $symbol( $version) ](fg:color_fg0 bg:color_blue)]($style)'
 
+# Disabled: both modules start a JVM (`java -Xinternalversion`, `kotlin
+# -version`) on every prompt in a JVM project, hundreds of milliseconds each.
 [java]
+disabled = true
 symbol = ""
 style = "bg:color_blue"
 format = '[[ $symbol( $version) ](fg:color_fg0 bg:color_blue)]($style)'
 
 [kotlin]
+disabled = true
 symbol = ""
 style = "bg:color_blue"
 format = '[[ $symbol( $version) ](fg:color_fg0 bg:color_blue)]($style)'

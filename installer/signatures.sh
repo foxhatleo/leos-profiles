@@ -91,7 +91,7 @@ signature_fonts() {
 signature_zsh_config() {
   local material="" asset
   resolve_zsh_dotdirs
-  material+="|loader-v3|$TARGET|$OS_FAMILY|$ZSH_RC_DIR|$ZSH_ENV_DIR"
+  material+="|loader-v4|$TARGET|$OS_FAMILY|$ZSH_RC_DIR|$ZSH_ENV_DIR"
   printf '%s' "$material"
 }
 

@@ -2,7 +2,7 @@
 
 __rmdsstore() {
   if [[ $(uname -s) != Darwin ]]; then
-    puts-err "rmdsstore only supports the macOS data-volume layout."
+    __leos_puts_err "rmdsstore only supports the macOS data-volume layout."
     return 1
   fi
   # Run the sweep with the OS interpreter, not a PATH-resolved one: `sudo` must
@@ -14,11 +14,11 @@ __rmdsstore() {
   # Note: the script itself lives in the user-owned checkout by design (see the
   # README trust model); this closes the interpreter/env vectors, not that one.
   if [[ ! -x /usr/bin/python3 ]]; then
-    puts-err "/usr/bin/python3 (the system Python) is required for rmdsstore."
+    __leos_puts_err "/usr/bin/python3 (the system Python) is required for rmdsstore."
     return 1
   fi
   sudo /usr/bin/python3 -I "$LEOS_PROFILES/util/rmdsstore.py" "$@" || return $?
-  puts "Finished scanning $*"
+  __leos_puts "Finished scanning $*"
 }
 
 # Remove all .DS_Store and sibling metadata files under standard macOS roots.
@@ -30,7 +30,7 @@ rmdsstore() {
     case $arg in
       --dry-run|--purge-recycle-bins) options+=("$arg"); shift ;;
       --) shift; break ;;
-      -*) puts-err "Usage: rmdsstore [--dry-run] [--purge-recycle-bins] [root ...]"; return 2 ;;
+      -*) __leos_puts_err "Usage: rmdsstore [--dry-run] [--purge-recycle-bins] [root ...]"; return 2 ;;
       *) break ;;
     esac
   done
@@ -42,7 +42,9 @@ rmdsstore() {
 clear-history() {
   local aggressive=${1:-} f exit_code=0
   local -a candidates
-  candidates=("$HOME/.zsh_history" "$HOME/.bash_history" "$HOME/.python_history"
+  # The profile's HISTFILE is in ZDOTDIR when that is set; the HOME copy is
+  # zsh's usual place, and where earlier versions of this profile kept it.
+  candidates=("${ZDOTDIR:-$HOME}/.zsh_history" "$HOME/.zsh_history" "$HOME/.bash_history" "$HOME/.python_history"
               "$HOME/.node_repl_history" "$HOME/.lesshst")
   if [[ $aggressive == --aggressive ]]; then
     # Completion dumps: the profile's own (cache root, one per Zsh version)
@@ -74,7 +76,7 @@ __hidden-set() {
     defaults write com.apple.Finder AppleShowAllFiles "$1" || return 1
     killall Finder >/dev/null 2>&1 || true
   else
-    puts-err "This command is only available on macOS."
+    __leos_puts_err "This command is only available on macOS."
     return 1
   fi
 }
@@ -90,52 +92,52 @@ mkcdir() {
 }
 
 # Clean up and quit the terminal. This intentionally performs the full Leo's
-# maintenance routine: package updates, AI CLI updates, history cleanup, and
-# on macOS a privileged metadata sweep plus Finder/Dock restart.
+# maintenance routine: package updates (with autoremove, cleanup and orphan
+# removal), AI CLI updates and, on macOS, a privileged metadata sweep plus
+# Finder/Dock restart. History is kept unless asked: --wipe-history clears the
+# known history files, and --aggressive-history (which implies it) the legacy
+# broad matches too.
 # Options are exact; destructive extensions are explicit opt-ins.
 bye() {
-  local keep_history non_interactive no_exit aggressive_history purge_recycle_bins shutdown_wsl arg exit_code=0
+  local wipe_history non_interactive no_exit aggressive_history purge_recycle_bins shutdown_wsl arg exit_code=0
   for arg in "$@"; do
     case $arg in
       # Dashed forms only: the usage string and the _leos_bye completion define
-      # the supported surface, and the bare aliases only ever existed for three
-      # of these six options.
-      --keep-history) keep_history=1 ;;
+      # the supported surface.
+      --wipe-history) wipe_history=1 ;;
+      # Keeping history became the default; the old opt-out is still accepted
+      # so existing aliases and scripts keep working.
+      --keep-history) ;;
       --non-interactive) non_interactive=1 ;;
       --no-exit) no_exit=1 ;;
-      --aggressive-history) aggressive_history=1 ;;
+      --aggressive-history) aggressive_history=1; wipe_history=1 ;;
       --purge-recycle-bins) purge_recycle_bins=1 ;;
       --shutdown-wsl) shutdown_wsl=1 ;;
-      *) puts-err "Usage: bye [--keep-history] [--non-interactive] [--no-exit] [--aggressive-history] [--purge-recycle-bins] [--shutdown-wsl]"; return 2 ;;
+      *) __leos_puts_err "Usage: bye [--wipe-history] [--aggressive-history] [--non-interactive] [--no-exit] [--purge-recycle-bins] [--shutdown-wsl]"; return 2 ;;
     esac
   done
   if [[ -n $shutdown_wsl && -n $no_exit ]]; then
-    puts-err "--shutdown-wsl and --no-exit are contradictory."
-    return 2
-  fi
-  if [[ -n $keep_history && -n $aggressive_history ]]; then
-    puts-err "--keep-history and --aggressive-history are contradictory."
+    __leos_puts_err "--shutdown-wsl and --no-exit are contradictory."
     return 2
   fi
 
-  puts "Bye!"
+  __leos_puts "Bye!"
 
-  sudo -v || { puts-err "sudo authentication is required for the cleanup routine."; return 1; }
+  sudo -v || { __leos_puts_err "sudo authentication is required for the cleanup routine."; return 1; }
 
   # A local export is automatically restored even on an early function return.
   if [[ -n $non_interactive ]]; then
     local -x HOMEBREW_NO_ASK=1
   fi
-  [[ -n $keep_history    ]] && puts "History will be preserved."
 
-  if (( $+functions[brew-checkup] )); then puts "Doing brew checkup..."; brew-checkup || exit_code=1; fi
-  if (( $+functions[apt-checkup]   )); then puts "Doing apt checkup...";  apt-checkup || exit_code=1; fi
-  if (( $+functions[dnf-checkup]   )); then puts "Doing dnf checkup...";  dnf-checkup || exit_code=1; fi
-  if (( $+functions[pacman-checkup] )); then puts "Doing pacman checkup..."; pacman-checkup || exit_code=1; fi
-  if (( $+functions[ai-checkup]    )); then puts "Doing AI tools checkup..."; ai-checkup || exit_code=1; fi
+  if (( $+functions[brew-checkup] )); then __leos_puts "Doing brew checkup..."; brew-checkup || exit_code=1; fi
+  if (( $+functions[apt-checkup]   )); then __leos_puts "Doing apt checkup...";  apt-checkup || exit_code=1; fi
+  if (( $+functions[dnf-checkup]   )); then __leos_puts "Doing dnf checkup...";  dnf-checkup || exit_code=1; fi
+  if (( $+functions[pacman-checkup] )); then __leos_puts "Doing pacman checkup..."; pacman-checkup || exit_code=1; fi
+  if (( $+functions[ai-checkup]    )); then __leos_puts "Doing AI tools checkup..."; ai-checkup || exit_code=1; fi
 
-  if [[ -z $keep_history ]]; then
-    puts "Clear all history files.."
+  if [[ -n $wipe_history ]]; then
+    __leos_puts "Clearing history files..."
     if [[ -n $aggressive_history ]]; then
       clear-history --aggressive || exit_code=1
     else
@@ -144,13 +146,13 @@ bye() {
   fi
 
   if [[ $(uname -s) == Darwin ]]; then
-    puts "Restarting Finder, Dock, SystemUIServer..."
+    __leos_puts "Restarting Finder, Dock, SystemUIServer..."
     if [[ -n $purge_recycle_bins ]]; then rmdsstore --purge-recycle-bins || exit_code=1; else rmdsstore || exit_code=1; fi
     killall Finder Dock SystemUIServer || exit_code=1
   fi
 
   if [[ -n $no_exit ]]; then
-    puts "Skipped exiting."
+    __leos_puts "Skipped exiting."
     return $exit_code
   elif [[ -n $shutdown_wsl ]] && command -v /mnt/c/Windows/system32/wsl.exe >/dev/null 2>&1; then
     /mnt/c/Windows/system32/wsl.exe --shutdown
@@ -179,33 +181,33 @@ upgrade-leos-profiles() {
       --full-upgrade) reconcile_args+=(--full-upgrade) ;;
       --yes) yes=1 ;;
       --verify-signatures) verify=1 ;;
-      *) puts-err "Usage: upgrade-leos-profiles [--full-upgrade] [--yes] [--verify-signatures]"; return 2 ;;
+      *) __leos_puts_err "Usage: upgrade-leos-profiles [--full-upgrade] [--yes] [--verify-signatures]"; return 2 ;;
     esac
   done
   # Without a saved setup there is nothing to reconcile: say so before
   # changing the checkout, not after (MI-12).
   if [[ ! -f $LEOS_PROFILES/local/install-profile.tsv ]]; then
-    puts-err "No saved setup in $LEOS_PROFILES/local/install-profile.tsv, so there is nothing to reconcile. Set up first (QUICK-INSTALL.md, or bash $LEOS_PROFILES/install.sh apply --yes); to update only the checkout, use git -C $LEOS_PROFILES pull --ff-only."
+    __leos_puts_err "No saved setup in $LEOS_PROFILES/local/install-profile.tsv, so there is nothing to reconcile. Set up first (QUICK-INSTALL.md, or bash $LEOS_PROFILES/install.sh apply --yes); to update only the checkout, use git -C $LEOS_PROFILES pull --ff-only."
     return 1
   fi
   if (( verify )); then
     if [[ -z $(git -C "$LEOS_PROFILES" config --get gpg.ssh.allowedSignersFile 2>/dev/null) ]] &&
         ! whence -p gpg >/dev/null; then
-      puts-err "--verify-signatures needs a way to check signatures: set gpg.ssh.allowedSignersFile for SSH-signed commits, or install gpg with the signer's public key."
+      __leos_puts_err "--verify-signatures needs a way to check signatures: set gpg.ssh.allowedSignersFile for SSH-signed commits, or install gpg with the signer's public key."
       return 1
     fi
     merge_args+=(--verify-signatures)
   fi
   branch=$(git -C "$LEOS_PROFILES" symbolic-ref --quiet --short HEAD) || {
-    puts-err "The profile checkout must be on a branch."
+    __leos_puts_err "The profile checkout must be on a branch."
     return 1
   }
   upstream=$(git -C "$LEOS_PROFILES" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) || {
-    puts-err "Branch $branch has no configured upstream."
+    __leos_puts_err "Branch $branch has no configured upstream."
     return 1
   }
   if [[ -n $(git -C "$LEOS_PROFILES" status --porcelain --untracked-files=normal) ]]; then
-    puts-err "Refusing to update because the profile checkout has local changes. Commit or stash them first."
+    __leos_puts_err "Refusing to update because the profile checkout has local changes. Commit or stash them first."
     return 1
   fi
   git -C "$LEOS_PROFILES" fetch --quiet || return $?
@@ -213,21 +215,21 @@ upgrade-leos-profiles() {
   # sudo through reconcile (SEC-3).
   incoming=$(git -C "$LEOS_PROFILES" log --oneline 'HEAD..@{upstream}') || return $?
   if [[ -z $incoming ]]; then
-    puts "$LEOS_PROFILES is up to date with $upstream; reconciling the saved setup."
+    __leos_puts "$LEOS_PROFILES is up to date with $upstream; reconciling the saved setup."
   else
-    puts "Incoming commits from $upstream:"
+    __leos_puts "Incoming commits from $upstream:"
     print -r -- "$incoming"
     if (( ! yes )); then
       if [[ -t 0 ]]; then
         read -r "answer?Fast-forward to these commits and reconcile? [y/N] "
-        [[ $answer == [yY] || $answer == [yY][eE][sS] ]] || { puts "Cancelled; nothing was changed."; return 1; }
+        [[ $answer == [yY] || $answer == [yY][eE][sS] ]] || { __leos_puts "Cancelled; nothing was changed."; return 1; }
       else
-        puts-err "Not a terminal: review the commits above, then run upgrade-leos-profiles --yes to apply them."
+        __leos_puts_err "Not a terminal: review the commits above, then run upgrade-leos-profiles --yes to apply them."
         return 1
       fi
     fi
     git -C "$LEOS_PROFILES" "${merge_args[@]}" '@{upstream}' || return $?
-    puts "Updated $LEOS_PROFILES from $upstream; reconciling the saved setup."
+    __leos_puts "Updated $LEOS_PROFILES from $upstream; reconciling the saved setup."
   fi
   command bash "$LEOS_PROFILES/install.sh" "${reconcile_args[@]}"
 }
@@ -238,15 +240,15 @@ leos-doctor() {
   local out rc=0 line needed=0
   local -a fields
   if (( $# )); then
-    puts-err "Usage: leos-doctor"
+    __leos_puts_err "Usage: leos-doctor"
     return 2
   fi
   out=$(command bash "$LEOS_PROFILES/install.sh" inspect --saved) || rc=$?
   if (( rc )); then
-    puts-err "leos-doctor: install.sh inspect --saved failed (exit $rc); see the message above."
+    __leos_puts_err "leos-doctor: install.sh inspect --saved failed (exit $rc); see the message above."
     return $rc
   fi
-  puts "Leo's Profiles at $LEOS_PROFILES"
+  __leos_puts "Leo's Profiles at $LEOS_PROFILES"
   for line in "${(@f)out}"; do
     fields=("${(@ps:\t:)line}")
     case $fields[1] in
@@ -264,29 +266,29 @@ leos-doctor() {
     esac
   done
   if (( needed )); then
-    puts "Repair with: upgrade-leos-profiles (pulls first), or bash $LEOS_PROFILES/install.sh reconcile --yes"
+    __leos_puts "Repair with: upgrade-leos-profiles (pulls first), or bash $LEOS_PROFILES/install.sh reconcile --yes"
     return 1
   fi
-  puts "Everything the saved setup installs is in place."
+  __leos_puts "Everything the saved setup installs is in place."
 }
 
 # Update only installed AI coding CLIs using their supported native updaters.
 ai-checkup() {
   local found=0 exit_code=0
   if command -v claude >/dev/null 2>&1; then
-    found=1; puts "Updating Claude Code..."; claude update || exit_code=1
+    found=1; __leos_puts "Updating Claude Code..."; claude update || exit_code=1
   fi
   if command -v codex >/dev/null 2>&1; then
-    found=1; puts "Updating Codex..."; codex update || exit_code=1
+    found=1; __leos_puts "Updating Codex..."; codex update || exit_code=1
   fi
   # Skip a Homebrew-managed opencode: brew-checkup already owns that copy, and
   # `opencode upgrade` would fight it. Only self-installed copies are updated.
   # `command -v` for detection (so it can be stubbed like claude/codex above),
   # $commands for the prefix test — empty for a stub, which reads as non-brew.
   if command -v opencode >/dev/null 2>&1 && [[ ${commands[opencode]:-} != ${HOMEBREW_PREFIX:-/opt/homebrew}/* ]]; then
-    found=1; puts "Updating opencode..."; opencode upgrade || exit_code=1
+    found=1; __leos_puts "Updating opencode..."; opencode upgrade || exit_code=1
   fi
-  (( found )) || puts "No supported installed AI CLI was detected; nothing to update."
+  (( found )) || __leos_puts "No supported installed AI CLI was detected; nothing to update."
   return $exit_code
 }
 
@@ -302,14 +304,14 @@ __leos_display_manager() {
 }
 
 gui-start() {
-  local service; service=$(__leos_display_manager) || { puts-err "No supported display manager was found."; return 1; }
+  local service; service=$(__leos_display_manager) || { __leos_puts_err "No supported display manager was found."; return 1; }
   sudo systemctl start "$service"
 }
 gui-stop() {
-  local service; service=$(__leos_display_manager) || { puts-err "No supported display manager was found."; return 1; }
+  local service; service=$(__leos_display_manager) || { __leos_puts_err "No supported display manager was found."; return 1; }
   sudo systemctl stop "$service"
 }
-gui-disable() { command -v systemctl >/dev/null 2>&1 || { puts-err "systemd is required."; return 1; }; sudo systemctl set-default multi-user.target && gui-stop; }
-gui-enable()  { command -v systemctl >/dev/null 2>&1 || { puts-err "systemd is required."; return 1; }; sudo systemctl set-default graphical.target && gui-start; }
+gui-disable() { command -v systemctl >/dev/null 2>&1 || { __leos_puts_err "systemd is required."; return 1; }; sudo systemctl set-default multi-user.target && gui-stop; }
+gui-enable()  { command -v systemctl >/dev/null 2>&1 || { __leos_puts_err "systemd is required."; return 1; }; sudo systemctl set-default graphical.target && gui-start; }
 
 :

@@ -155,7 +155,8 @@ test_zsh_config_preserves_runtime_expansions() {
   INSTALL_FONTS=no
   mkdir -p "$HOME"
   install_zsh_config
-  assert_contains "$(< "$HOME/.zshenv")" "path=(\"\$HOME/.local/bin\" \"\$HOME/.local/npm/bin\" \$path)"
+  # shellcheck disable=SC2016  # expanded by zsh, not here
+  assert_contains "$(< "$HOME/.zshenv")" '(( ${path[(Ie)$HOME/.local/bin]} )) || path=("$HOME/.local/bin" $path)'
   [[ $(< "$HOME/.zshenv") != *LEOS_PROFILES_HOME* ]] || fail ".zshenv globally overrides the relocatable profile root"
   assert_contains "$(< "$HOME/.zshrc")" 'LEOS_PROFILES_HOME='"$temp/profile\\ with\\ spaces"
   assert_contains "$(< "$HOME/.zshrc")" 'source "$LEOS_PROFILES_HOME/zsh/start.zsh"'
@@ -1512,6 +1513,35 @@ test_zshenv_block_skips_global_compinit() {
   command -v zsh >/dev/null 2>&1 || { rm -rf "$temp"; return 0; }
   # Debian's /etc/zsh/zshrc checks this after .zshenv has run.
   assert_equals "$(HOME="$HOME" zsh -fc 'source ~/.zshenv; print -r -- ${skip_global_compinit-unset}')" "1"
+  rm -rf "$temp"
+}
+
+# .zshenv runs in every zsh, so in a child shell it must not move ~/.local/bin
+# back in front of the version-manager shims the parent's profile put first.
+test_zshenv_block_prepends_only_missing_local_bins() {
+  local temp
+  command -v zsh >/dev/null 2>&1 || return 0
+  temp=$(mktemp -d)
+  HOME="$temp/home"
+  TARGET="$temp/profile"
+  DRY_RUN=0
+  mkdir -p "$HOME"
+  install_zsh_config
+  # A fresh login environment: both, in this order, ahead of the system.
+  # shellcheck disable=SC2016  # expanded by zsh, not here
+  assert_equals "$(HOME="$HOME" zsh -fc 'path=(/usr/bin /bin); source ~/.zshenv; print -r -- $PATH')" \
+    "$HOME/.local/bin:$HOME/.local/npm/bin:/usr/bin:/bin"
+  # Inherited from a profile shell: left exactly as it is.
+  # shellcheck disable=SC2016
+  assert_equals "$(HOME="$HOME" zsh -fc 'path=("$HOME/.pyenv/shims" "$HOME/.local/bin" "$HOME/.local/npm/bin" /usr/bin); source ~/.zshenv; print -r -- $PATH')" \
+    "$HOME/.pyenv/shims:$HOME/.local/bin:$HOME/.local/npm/bin:/usr/bin"
+  # Root with someone else's HOME (`sudo -s`): nothing user-writable is added,
+  # but Debian's global compinit is still skipped.
+  if [[ $(id -u) == 0 ]] && chown 65534 "$HOME" 2>/dev/null; then
+    # shellcheck disable=SC2016
+    assert_equals "$(HOME="$HOME" zsh -fc 'path=(/usr/bin /bin); source ~/.zshenv; print -r -- $PATH ${skip_global_compinit-unset}')" \
+      "/usr/bin:/bin 1"
+  fi
   rm -rf "$temp"
 }
 
@@ -3003,6 +3033,7 @@ TESTS=(
   test_legacy_loader_inside_other_code_keeps_it_valid
   test_remove_blocks_also_removes_legacy_loaders
   test_zshenv_block_skips_global_compinit
+  test_zshenv_block_prepends_only_missing_local_bins
   test_zsh_config_follows_zdotdir
   test_zsh_config_follows_zdotdir_set_in_zshenv
   test_macos_login_path_block
