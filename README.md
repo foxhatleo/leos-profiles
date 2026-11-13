@@ -92,8 +92,10 @@ before their installation. The AI shows all selected and implied groups plus
 exact OS package membership before asking for approval.
 
 `languages` (system node, python and ruby) stays its own group. `heroku` is
-macOS-only and opt-in: the Heroku CLI comes from Heroku's third-party Homebrew
-tap, which is added (and shown in the plan) only when this group is selected.
+macOS-only and opt-in: the Heroku CLI is a homebrew/core formula (no tap is
+added), but no Linux distribution packages it. A Mac that tapped
+`heroku/brew` for an older version of this installer can drop the tap with
+`brew untap heroku/brew` once `brew info heroku` names homebrew/core.
 
 Recommended selects every component except `bins`, and every package group
 except `python` and `heroku`. Customize allows whole-group selection. The initial package pass keeps
@@ -146,8 +148,10 @@ so missing or corrupt tools are repaired.
 
 Besides the selection, packages, artifacts and files, `inspect` reports every
 action that runs as root (`privileged`: package-manager runs, Arch's
-`pacman -Syu`, Fedora's ffmpeg swap, the `/etc/shells` edit,
-`sudo chsh`, cask upgrades), side effects (`behaviour`: Debian's fd/bat links,
+`pacman -Syu`, Fedora's RPM Fusion and ffmpeg swap, the GitHub CLI apt
+repository on Debian/Ubuntu, the `/etc/shells` edit,
+`sudo chsh`, cask upgrades), side effects (`behaviour`: Debian's fd/bat links, gh
+from GitHub CLI's apt repository,
 GNU tools ahead of BSD on macOS, global Git identity writes, the Homebrew
 mirror, cask upgrades), effects that
 cannot be undone automatically (`irreversible`), existing installations in the
@@ -214,9 +218,23 @@ bare `brew upgrade` would include casks). It upgrades casks (GUI apps; some
 cask installers ask for sudo) only with `--upgrade-casks`, which apply saves
 for later reconciles; `bye`'s `brew-checkup` still upgrades casks as before.
 
-Two downloads stay pinned to a reviewed URL and SHA-256 digest, because there
-is nothing newer to follow: Homebrew's installer script (it runs once, on a
-Mac without Homebrew) and rpatool (its GitHub repository is archived).
+Two downloads stay pinned to a reviewed URL and SHA-256 digest rather than
+following upstream: Homebrew's installer script (it runs once, on a Mac
+without Homebrew, and is re-pinned when a new macOS ships) and rpatool (its archived GitHub repository's final
+commit; development moved to codeberg.org/shiz/rpatool).
+
+On Debian and Ubuntu, dev-tools takes gh from GitHub CLI's own apt repository
+(`https://cli.github.com/packages`), because the distributions' gh is years
+old (2.4 on Ubuntu 22.04, 2.23 on Debian 12). The packages step installs its
+keyring, checked against the SHA-256 GitHub publishes, as
+`/etc/apt/keyrings/githubcli-archive-keyring.gpg` and its source line as
+`/etc/apt/sources.list.d/github-cli.list`, before the apt install; the plan
+lists both as a root action. An existing correct setup, or any other enabled
+apt source for that repository, is left as it is. A disabled one (a deb822
+stanza with `Enabled: no`, or a commented-out line) does not count: setup
+adds its own source next to it, and the plan warns about it. A gh installed
+earlier from the
+distribution moves to the repository's version on the next full upgrade.
 
 Equivalent GitHub HTTPS/SSH origins are accepted and normalized; dirty
 installer-managed checkouts, and checkouts at a commit made locally or with a
@@ -477,10 +495,16 @@ vim); Home, End, Delete and Ctrl-Left/Right work; Up/Down search history for
 lines starting with what is already typed. When fd (or Debian's `fdfind`) is
 installed, fzf's Ctrl-T, Alt-C and `**<Tab>` use it, so they honour
 `.gitignore`; with bat, Ctrl-T previews files. Existing `FZF_*` settings win.
-fzf-tab's `cd` preview uses eza, or `ls` where eza is not packaged. zoxide
+fzf-tab's `cd` preview uses eza, or `ls` where eza is not installed (the
+installer's dev-tools group installs eza on macOS, Fedora and Arch; the
+Debian/Ubuntu list leaves it out because Debian 12 and Ubuntu 22.04 do not
+package it, so `apt install eza` it yourself on Debian 13 or Ubuntu 24.04+). zoxide
 adds `z <words>` (jump to the best-ranked directory matching them; a plain path
 works as with `cd`) and `zi` (pick one interactively); `cd` itself stays the
-shell builtin.
+shell builtin. Debian 12 and Ubuntu 22.04 package zoxide 0.4.3, whose `z` and
+`zi` behave differently from 0.8 and later; inspect warns
+(`zoxide-outdated`) there, and `cargo install zoxide --locked` or zoxide's
+release binary in `~/.local/bin` gives a current one.
 
 ### Optional integrations
 
@@ -491,11 +515,6 @@ ones you use to `local/private.zsh` (or, for completions, to
 ```zsh
 # Flutter SDK on PATH
 [[ -d $HOME/.flutter/bin ]] && path=("$HOME/.flutter/bin" $path)
-
-# thefuck, initialised lazily on first use (it starts Python)
-if (( $+commands[thefuck] )); then
-  fuck() { unfunction fuck; eval "$(thefuck --alias)"; eval "fuck ${(j: :)${(q)@}}"; }
-fi
 
 # Google Cloud SDK PATH (Homebrew cask on macOS; the Linux packages put gcloud
 # on PATH already)

@@ -100,6 +100,194 @@ apt_get() {
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
 }
 
+# GitHub CLI's own apt repository, for dev-tools on Debian/Ubuntu: the
+# distributions' gh is years old (2.4 on Ubuntu 22.04, 2.23 on Debian 12).
+# This follows cli/cli's docs/install_linux.md: the binary keyring in
+# /etc/apt/keyrings (mode 644) and a one-line source naming it. The keyring is
+# checked against the SHA-256 GitHub publishes there; it holds the signing
+# keys 2C6106201985B60E6C7AC87323F3D4EA75716059 and
+# 7F38BBB59D064DBCB3D84D725612B36462313325. tests/release-artifacts-test.sh
+# checks the digest against the live file. Like Fedora's RPM Fusion, the
+# repository is added only when the packages step runs the package manager,
+# and never twice: a correct existing setup, or any other enabled apt source
+# that already names the repository (which a second Signed-By would make apt
+# reject), is left alone. A source that names it but is disabled (a deb822
+# stanza with `Enabled: no`, or a commented-out one-line entry) does not
+# count: apt ignores it, so it cannot conflict with ours, and skipping setup
+# would leave the distribution's old gh in place. APT_ETC moves /etc/apt for
+# tests.
+GH_APT_REPOSITORY="https://cli.github.com/packages"
+GH_APT_KEYRING_URL="https://cli.github.com/packages/githubcli-archive-keyring.gpg"
+GH_APT_KEYRING_SHA256="6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b"
+APT_ETC=/etc/apt
+gh_apt_keyring() { printf '%s/keyrings/githubcli-archive-keyring.gpg\n' "$APT_ETC"; }
+gh_apt_list() { printf '%s/sources.list.d/github-cli.list\n' "$APT_ETC"; }
+gh_apt_source_line() {
+  printf 'deb [arch=%s signed-by=%s] %s stable main\n' \
+    "$(dpkg --print-architecture)" "$(gh_apt_keyring)" "$GH_APT_REPOSITORY"
+}
+
+# gh_apt_source_status <file>: `enabled` when an apt source in <file> names
+# GitHub CLI's repository and apt would use it, `disabled` when only disabled
+# entries name it, `none` otherwise. A *.sources file is deb822: stanzas
+# separated by blank lines, field names case-insensitive, `Enabled:` with one
+# of apt's false values switching a stanza off, and only a stanza whose URIs
+# field holds the repository counting. Anything else is one-line format: `#`
+# starts a comment, so a commented-out entry is disabled, as apt reads it, and
+# only the URI after `deb`/`deb-src` and any [options] counts.
+gh_apt_source_status() {
+  local format=one-line
+  [[ $1 == *.sources ]] && format=deb822
+  awk -v repo="$GH_APT_REPOSITORY" -v format="$format" '
+    function norm(uri) { sub(/\/+$/, "", uri); return uri }
+    function names_repo(uris,   n, i, parts) {
+      n = split(uris, parts, /[ \t\r]+/)
+      for (i = 1; i <= n; i++) if (parts[i] != "" && norm(parts[i]) == repo) return 1
+      return 0
+    }
+    function end_stanza(   enabled) {
+      if (in_stanza && names_repo(fields["uris"])) {
+        enabled = tolower(fields["enabled"])
+        gsub(/[ \t\r]/, "", enabled)
+        if (enabled ~ /^(no|false|off|0|without|disable)$/) found_disabled = 1
+        else found_enabled = 1
+      }
+      split("", fields)
+      in_stanza = 0
+      current = ""
+    }
+    format == "deb822" {
+      if ($0 ~ /^[ \t\r]*$/) { end_stanza(); next }
+      if ($0 ~ /^[ \t]*#/) next
+      if ($0 ~ /^[ \t]/) {
+        if (current != "") fields[current] = fields[current] " " $0
+        next
+      }
+      colon = index($0, ":")
+      if (colon == 0) next
+      current = tolower(substr($0, 1, colon - 1))
+      gsub(/[ \t]/, "", current)
+      fields[current] = substr($0, colon + 1)
+      in_stanza = 1
+      next
+    }
+    {
+      line = $0
+      hash = index(line, "#")
+      if (hash) line = substr(line, 1, hash - 1)
+      lb = index(line, "[")
+      rb = index(line, "]")
+      if (lb && rb > lb) line = substr(line, 1, lb - 1) " " substr(line, rb + 1)
+      sub(/^[ \t]+/, "", line)
+      n = split(line, words, /[ \t\r]+/)
+      if (n >= 2 && (words[1] == "deb" || words[1] == "deb-src") && norm(words[2]) == repo) found_enabled = 1
+      else if ($0 ~ /^[ \t]*#/ && index($0, repo)) found_disabled = 1
+    }
+    END {
+      if (format == "deb822") end_stanza()
+      print found_enabled ? "enabled" : (found_disabled ? "disabled" : "none")
+    }
+  ' "$1"
+}
+
+# gh_apt_other_sources: a `<status>\t<file>` line for each apt source file
+# other than our own list whose status is not `none`.
+gh_apt_other_sources() {
+  local list file status
+  list=$(gh_apt_list)
+  for file in "$APT_ETC/sources.list" "$APT_ETC"/sources.list.d/*.list "$APT_ETC"/sources.list.d/*.sources; do
+    [[ -f $file && $file != "$list" ]] || continue
+    status=$(gh_apt_source_status "$file")
+    [[ $status == none ]] || printf '%s\t%s\n' "$status" "$file"
+  done
+}
+
+# gh_apt_repository_state: `configured` (our source line and the pinned
+# keyring are in place), `other` (another enabled apt source names the
+# repository), `disabled` (only disabled sources name it, so ours is added) or
+# `missing`.
+gh_apt_repository_state() {
+  local list keyring others
+  list=$(gh_apt_list)
+  keyring=$(gh_apt_keyring)
+  if [[ -f $list && -f $keyring ]] && [[ $(cat "$list") == "$(gh_apt_source_line)" ]] &&
+    [[ $(sha256 "$keyring") == "$GH_APT_KEYRING_SHA256" ]]; then
+    printf 'configured\n'
+    return 0
+  fi
+  others=$(gh_apt_other_sources)
+  case $'\n'"$others" in
+    *$'\n'enabled$'\t'*) printf 'other\n' ;;
+    *$'\n'disabled$'\t'*) printf 'disabled\n' ;;
+    *) printf 'missing\n' ;;
+  esac
+}
+
+gh_apt_repository_needed() {
+  [[ $OS_FAMILY == apt ]] || return 1
+  has_csv_item "$SELECTED_GROUPS" dev-tools || return 1
+  case $(gh_apt_repository_state) in
+    missing|disabled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# gh_apt_disabled_source: when the repository is being added although a
+# disabled source names it, the first such file; fails otherwise.
+gh_apt_disabled_source() {
+  gh_apt_repository_needed || return 1
+  local others
+  others=$(gh_apt_other_sources)
+  [[ $'\n'"$others" == *$'\n'disabled$'\t'* ]] || return 1
+  others=${others#*disabled$'\t'}
+  printf '%s\n' "${others%%$'\n'*}"
+}
+
+ensure_gh_apt_repository() {
+  gh_apt_repository_needed || return 0
+  local keyring list temp disabled
+  keyring=$(gh_apt_keyring)
+  list=$(gh_apt_list)
+  say "Adding GitHub CLI's apt repository ($GH_APT_REPOSITORY): the distribution's gh is outdated"
+  if disabled=$(gh_apt_disabled_source); then
+    say "The disabled apt source for it in $disabled is left as it is"
+  fi
+  temp=$(mktemp -d "${TMPDIR:-/tmp}/leos-gh-apt.XXXXXX")
+  track_temp "$temp"
+  download_verified "$GH_APT_KEYRING_URL" "$GH_APT_KEYRING_SHA256" "$temp/keyring.gpg"
+  say "GitHub CLI keyring SHA-256: $GH_APT_KEYRING_SHA256"
+  gh_apt_source_line > "$temp/github-cli.list"
+  run_root install -d -m 755 "${keyring%/*}" "${list%/*}"
+  run_root install -m 644 "$temp/keyring.gpg" "$keyring"
+  run_root install -m 644 "$temp/github-cli.list" "$list"
+  # The next apt-get install must see the new repository's index.
+  APT_INDEX_UPDATED=0
+}
+
+# apt_zoxide_outdated: on Debian/Ubuntu with dev-tools, the one-line warning
+# when apt's zoxide candidate predates 0.8 (Debian 12 and Ubuntu 22.04 carry
+# 0.4.3) and no other zoxide is on PATH; fails silently otherwise, including
+# when apt-cache knows no candidate.
+zoxide_on_path() { type -P zoxide 2>/dev/null; }
+apt_zoxide_outdated() {
+  [[ $OS_FAMILY == apt ]] || return 1
+  has_csv_item "$SELECTED_GROUPS" dev-tools || return 1
+  local existing key value rest candidate="" version major minor
+  existing=$(zoxide_on_path) || existing=""
+  [[ -z $existing || $existing == /usr/bin/zoxide ]] || return 1
+  while read -r key value rest; do
+    if [[ $key == Candidate: ]]; then candidate=$value; break; fi
+  done < <(apt-cache policy zoxide 2>/dev/null)
+  [[ -n $candidate && $candidate != "(none)" ]] || return 1
+  version=${candidate#*:}
+  major=${version%%.*}
+  minor=${version#*.}
+  minor=${minor%%[!0-9]*}
+  [[ $major =~ ^[0-9]+$ && $minor =~ ^[0-9]+$ ]] || return 1
+  (( major == 0 && minor < 8 )) || return 1
+  printf 'apt'"'"'s zoxide %s predates 0.8, so z and zi may behave differently; for a current one, run cargo install zoxide --locked or put zoxide'"'"'s release binary in ~/.local/bin\n' "$candidate"
+}
+
 # pkg_install <packages...>: install packages with the host package manager.
 # The bootstrap, the packages step and the credential prerequisites all use
 # this one definition (CQ-3).
@@ -221,6 +409,10 @@ bootstrap_tools() {
 # formula on purpose: the `python`/`python3` aliases follow Homebrew's newest
 # minor release, so each move made reconcile install another Python next to
 # the old one. Change python@3.15 here deliberately.
+# eza is in every dev-tools map but apt's: Debian 13 and Ubuntu 24.04+ package
+# it, Debian 12 and Ubuntu 22.04 do not, and the apt map is one list for
+# every release (the per-image package-map gate would fail there). The
+# profile falls back to ls where eza is missing.
 # heroku is a macOS-only, opt-in group: the formula is in homebrew/core (no
 # third-party tap), but no Linux distribution packages the CLI. It has no
 # members elsewhere, and main() refuses it there.
@@ -232,8 +424,8 @@ package_list_for_group() {
     macos:dev-tools) printf '%s\n' 'bat direnv eza fd fzf gh git jq libyaml pkgconf openssl@3 readline ripgrep sqlite tcl-tk vim xz zlib zoxide' ;;
     macos:languages) printf '%s\n' 'node python@3.15 ruby' ;;
     macos:python) printf '%s\n' 'python@3.15' ;;
-    macos:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
-    macos:network) printf '%s\n' 'wget rclone gnutls ssh-copy-id' ;;
+    macos:media) printf '%s\n' 'ffmpeg imagemagick' ;;
+    macos:network) printf '%s\n' 'wget rclone' ;;
     macos:heroku) printf '%s\n' 'heroku' ;;
     macos:system) printf '%s\n' 'smartmontools' ;;
     apt:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
@@ -241,15 +433,15 @@ package_list_for_group() {
     apt:dev-tools) printf '%s\n' 'bat build-essential clang direnv fd-find fzf gcc gh git jq libbz2-dev libffi-dev liblzma-dev libncurses-dev libreadline-dev libsqlite3-dev libssl-dev libxml2-dev libxmlsec1-dev libyaml-dev llvm ripgrep tk-dev vim xz-utils zlib1g-dev zoxide' ;;
     apt:languages) printf '%s\n' 'nodejs npm python-is-python3 ruby' ;;
     apt:python) printf '%s\n' 'python3' ;;
-    apt:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
+    apt:media) printf '%s\n' 'ffmpeg imagemagick' ;;
     apt:network) printf '%s\n' 'wget rclone' ;;
     apt:system) printf '%s\n' 'smartmontools' ;;
     fedora:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
     fedora:shell) printf '%s\n' 'zsh' ;;
-    fedora:dev-tools) printf '%s\n' 'bat bzip2 bzip2-devel direnv fd-find fzf gcc gdbm-libs gh git jq libffi-devel libnsl2 libuuid-devel libyaml-devel make openssl-devel patch readline-devel ripgrep sqlite sqlite-devel tk-devel vim xz-devel zlib-devel zoxide' ;;
+    fedora:dev-tools) printf '%s\n' 'bat bzip2 bzip2-devel direnv eza fd-find fzf gcc gdbm-libs gh git jq libffi-devel libnsl2 libuuid-devel libyaml-devel make openssl-devel patch readline-devel ripgrep sqlite sqlite-devel tk-devel vim xz-devel zlib-devel zoxide' ;;
     fedora:languages) printf '%s\n' 'nodejs python-unversioned-command ruby' ;;
     fedora:python) printf '%s\n' 'python3' ;;
-    fedora:media) printf '%s\n' 'ImageMagick ffmpeg yt-dlp' ;;
+    fedora:media) printf '%s\n' 'ImageMagick ffmpeg' ;;
     fedora:network) printf '%s\n' 'wget rclone' ;;
     fedora:system) printf '%s\n' 'smartmontools' ;;
     arch:core-utils) printf '%s\n' 'bash coreutils diffutils ed findutils grep gawk gzip less nano' ;;
@@ -257,7 +449,7 @@ package_list_for_group() {
     arch:dev-tools) printf '%s\n' 'base-devel bat direnv eza fd fzf git github-cli jq libffi libyaml openssl readline ripgrep tk vim xz zlib zoxide' ;;
     arch:languages) printf '%s\n' 'nodejs npm python ruby' ;;
     arch:python) printf '%s\n' 'python' ;;
-    arch:media) printf '%s\n' 'ffmpeg imagemagick yt-dlp' ;;
+    arch:media) printf '%s\n' 'ffmpeg imagemagick' ;;
     arch:network) printf '%s\n' 'wget rclone' ;;
     arch:system) printf '%s\n' 'smartmontools' ;;
   esac
@@ -413,6 +605,7 @@ install_os_packages() {
       pkg_install "${requested[@]}"
       BREW_FORMULAE="" ;;
     apt)
+      ensure_gh_apt_repository
       apt_update_once
       [[ $FULL_UPGRADE -eq 0 ]] || apt_get upgrade -y
       pkg_install "${requested[@]}"

@@ -19,6 +19,8 @@ unset HOMEBREW_PREFIX HOMEBREW_BREW_GIT_REMOTE HOMEBREW_BOTTLE_DOMAIN HOMEBREW_A
 unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GITHUB_TOKEN GH_TOKEN NERD_FONTS_TEST_RELEASE_URL
 # shellcheck source=../install.sh
 source "$ROOT/install.sh"
+# The host's apt sources must not steer the GitHub CLI repository checks.
+APT_ETC=/nonexistent/leos-test-apt
 
 # No test reaches GitHub or reads the developer's gh login: the API token is
 # never looked up, gh counts as logged out, and a curl no test stubs fails as
@@ -297,7 +299,14 @@ test_package_maps_cover_every_supported_os() {
     else
       assert_equals "$(package_list_for_group heroku)" ""
     fi
+    # No YouTube tooling in any group.
+    for group in ${CANONICAL_GROUPS//,/ }; do
+      [[ " $(package_list_for_group "$group") " != *" yt-dlp "* ]] || fail "$family/$group still installs yt-dlp"
+    done
   done
+  # A keg-only formula never reaches PATH; gnutls had no user in the profile.
+  OS_FAMILY=macos
+  assert_equals "$(package_list_for_group network)" "wget rclone"
   OS_FAMILY=apt
   assert_contains "$(package_list_for_group dev-tools)" "libssl-dev"
   assert_contains "$(package_list_for_group dev-tools)" "libreadline-dev"
@@ -305,8 +314,11 @@ test_package_maps_cover_every_supported_os() {
   # the portable replacement (pulls in libncursesw6).
   assert_contains "$(package_list_for_group dev-tools)" "libncurses-dev"
   [[ $(package_list_for_group dev-tools) != *libncursesw5-dev* ]] || fail "apt dev-tools still pins the removed libncursesw5-dev"
+  # eza is not packaged on Debian 12 / Ubuntu 22.04, and the apt map covers both.
+  [[ " $(package_list_for_group dev-tools) " != *" eza "* ]] || fail "apt dev-tools names eza, which Debian 12 and Ubuntu 22.04 lack"
   OS_FAMILY=fedora
   assert_contains "$(package_list_for_group dev-tools)" "openssl-devel"
+  assert_contains " $(package_list_for_group dev-tools) " " eza "
   OS_FAMILY=macos
   assert_contains "$(package_list_for_group dev-tools)" "openssl@3"
 }
@@ -1248,7 +1260,7 @@ test_heroku_is_an_opt_in_macos_group() {
   out=$(install_os_packages)
   # heroku is a homebrew/core formula: no third-party tap is added.
   [[ $out != *"brew tap"* ]] || fail "the heroku group still adds a Homebrew tap: $out"
-  assert_contains "$out" " heroku"
+  assert_contains "$out" "+ brew install wget rclone heroku"
   SELECTED_STEPS=packages
   REQUESTED_STEPS=packages
   REQUESTED_GROUPS=$SELECTED_GROUPS
@@ -1905,12 +1917,199 @@ test_fedora_media_swaps_only_ffmpeg() {
   SELECTED_GROUPS=media
   out=$(install_os_packages)
   assert_contains "$out" "+ sudo dnf install -y https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm"
-  assert_contains "$out" "+ sudo dnf install -y ImageMagick yt-dlp "
+  assert_contains "$out" "+ sudo dnf install -y ImageMagick "
   assert_contains "$out" "+ sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing"
   [[ $(grep -c -- --allowerasing <<< "$out") == 1 ]] || fail "--allowerasing reached another command: $out"
   SELECTED_GROUPS=core-utils
   out=$(install_os_packages)
   [[ $out != *rpmfusion* && $out != *swap* && $out != *allowerasing* ]] || fail "a non-media install touched RPM Fusion: $out"
+}
+
+# Debian/Ubuntu dev-tools take gh from GitHub CLI's apt repository: the
+# pinned keyring and the source line are installed as root before apt's index
+# refresh, disclosed in the plan, and never added twice.
+test_apt_dev_tools_add_the_github_cli_repository() {
+  local temp out keyring list
+  temp=$(mktemp -d)
+  OS_FAMILY=apt
+  DRY_RUN=1
+  SUDO=sudo
+  FULL_UPGRADE=0
+  APT_ETC="$temp/etc/apt"
+  keyring="$APT_ETC/keyrings/githubcli-archive-keyring.gpg"
+  list="$APT_ETC/sources.list.d/github-cli.list"
+  mkdir -p "$APT_ETC/sources.list.d"
+  dpkg() { [[ $* == --print-architecture ]] && printf 'arm64\n'; }
+  package_installed() { return 1; }
+  ensure_sudo() { :; }
+  apt_compat_links() { :; }
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=dev-tools
+  # The bootstrap already refreshed the index; the new repository needs another.
+  APT_INDEX_UPDATED=1
+  out=$(install_os_packages)
+  assert_contains "$out" "Would download and SHA-256 verify https://cli.github.com/packages/githubcli-archive-keyring.gpg"
+  assert_contains "$out" "+ sudo install -d -m 755 $APT_ETC/keyrings $APT_ETC/sources.list.d"
+  assert_contains "$out" "+ sudo install -m 644 "
+  assert_contains "$out" " $keyring "
+  assert_contains "$out" " $list "
+  [[ $(grep -n "github-cli.list" <<< "$out" | head -1 | cut -d: -f1) -lt $(grep -n "apt-get update" <<< "$out" | cut -d: -f1) ]] ||
+    fail "the GitHub CLI repository was not added before apt's index refresh: $out"
+  [[ $(grep -n "apt-get update" <<< "$out" | cut -d: -f1) -lt $(grep -n "install -y" <<< "$out" | cut -d: -f1) ]] ||
+    fail "apt installed before refreshing the index: $out"
+  assert_contains "$(privileged_plan)" $'repository\tsudo install of GitHub CLI\'s apt keyring ('"$keyring"') and source list ('"$list"')'
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  verify_step() { return 1; }
+  out=$(inspect_tsv)
+  assert_contains "$out" $'action\trepository\tGitHub CLI apt repository'
+  assert_contains "$out" $'artifact\tdirect\tgithub-cli-keyring\thttps://cli.github.com/packages/githubcli-archive-keyring.gpg\t'"$GH_APT_KEYRING_SHA256"
+  assert_contains "$out" $'behaviour\tgithub-cli-apt\t'
+  # Without dev-tools, nothing about it.
+  SELECTED_GROUPS=shell
+  out=$(install_os_packages)
+  [[ $out != *cli.github.com* && $out != *github-cli* ]] || fail "a dev-tools-free install touched the GitHub CLI repository: $out"
+  [[ $(privileged_plan) != *GitHub* ]] || fail "a dev-tools-free plan discloses the GitHub CLI repository"
+  # A real run, as root: the keyring (mode 644) and the exact source line.
+  SELECTED_GROUPS=dev-tools
+  DRY_RUN=0
+  SUDO=""
+  FIXTURE_KEYRING="$temp/keyring.gpg"
+  printf 'fixture keyring' > "$FIXTURE_KEYRING"
+  GH_APT_KEYRING_SHA256=$(sha256 "$FIXTURE_KEYRING")
+  # ensure_gh_apt_repository has its own local $temp.
+  download_verified() { cp "$FIXTURE_KEYRING" "$3"; }
+  ensure_gh_apt_repository >/dev/null
+  assert_equals "$(cat "$list")" "deb [arch=arm64 signed-by=$keyring] https://cli.github.com/packages stable main"
+  assert_equals "$(cat "$keyring")" "fixture keyring"
+  assert_equals "$(file_mode "$keyring")" 644
+  assert_equals "$(file_mode "$list")" 644
+  assert_equals "$APT_INDEX_UPDATED" 0
+  # Idempotent: the same setup is left alone, in the plan and in a run.
+  assert_equals "$(gh_apt_repository_state)" configured
+  download_verified() { fail "downloaded the keyring for a configured repository"; }
+  APT_INDEX_UPDATED=1
+  out=$(ensure_gh_apt_repository)
+  assert_equals "$out" ""
+  DRY_RUN=1
+  SUDO=sudo
+  out=$(install_os_packages)
+  [[ $out != *github-cli* ]] || fail "a configured repository was added again: $out"
+  [[ $(privileged_plan) != *GitHub* ]] || fail "a configured repository is still a planned root action"
+  # A stale line (an older signed-by path) is replaced.
+  printf 'deb [signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' > "$list"
+  assert_equals "$(gh_apt_repository_state)" missing
+  # Another source for the same repository (here deb822) stays the only one.
+  rm -f "$list"
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\n' > "$APT_ETC/sources.list.d/gh.sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  out=$(install_os_packages)
+  [[ $out != *github-cli* ]] || fail "a second GitHub CLI source was added next to an existing one: $out"
+  rm -rf "$temp"
+}
+
+# Only an enabled apt source for GitHub CLI's repository stops setup from
+# adding its own: a disabled deb822 stanza or a commented-out line is ignored
+# by apt, so skipping would keep the distribution's old gh. The disabled case
+# is disclosed in inspect.
+test_disabled_github_cli_apt_sources_do_not_count() {
+  local temp out dir sources list
+  temp=$(mktemp -d)
+  OS_FAMILY=apt
+  DRY_RUN=1
+  SUDO=sudo
+  FULL_UPGRADE=0
+  APT_ETC="$temp/etc/apt"
+  dir="$APT_ETC/sources.list.d"
+  sources="$dir/gh.sources"
+  list="$dir/github-cli.list"
+  mkdir -p "$dir"
+  dpkg() { [[ $* == --print-architecture ]] && printf 'arm64\n'; }
+  package_installed() { return 1; }
+  ensure_sudo() { :; }
+  apt_compat_links() { :; }
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=dev-tools
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  verify_step() { return 1; }
+  APT_INDEX_UPDATED=1
+  # A disabled deb822 stanza: our source is added and inspect warns.
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\nComponents: main\nEnabled: no\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  out=$(install_os_packages)
+  assert_contains "$out" " $list "
+  assert_contains "$out" "The disabled apt source for it in $sources is left as it is"
+  assert_contains "$(privileged_plan)" $'repository\tsudo install of GitHub CLI\'s apt keyring'
+  out=$(inspect_tsv)
+  assert_contains "$out" $'warning\tgithub-cli-apt-disabled\t'"$sources"' names GitHub CLI'"'"'s apt repository but is disabled; it is left as it is and '"$list"' is added'
+  # Field names and values are case-insensitive, and continuation lines count.
+  printf 'types: deb\nuris:\n https://cli.github.com/packages/\nENABLED: No\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  # Enabled: yes, or no Enabled field, is a source apt uses: setup skips.
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\nEnabled: yes\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  out=$(install_os_packages)
+  [[ $out != *github-cli.list* ]] || fail "a second GitHub CLI source was added next to an enabled one: $out"
+  [[ $(inspect_tsv) != *github-cli-apt-disabled* ]] || fail "an enabled GitHub CLI source was reported as disabled"
+  # Stanzas are separate: Enabled: no in another stanza does not disable it,
+  # and a disabled GitHub CLI stanza is not enabled by its neighbour.
+  printf 'Types: deb\nURIs: https://example.com/debian\nSuites: stable\nEnabled: no\n\nTypes: deb\nURIs: https://cli.github.com/packages\nSuites: stable\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" other
+  printf 'Types: deb\nURIs: https://cli.github.com/packages\nSuites: stable\nEnabled: no\n\nTypes: deb\nURIs: https://example.com/debian\nSuites: stable\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  # Only the URIs field counts, not a mention elsewhere in the stanza.
+  printf 'Types: deb\nURIs: https://example.com/debian\nSuites: stable\nX-Note: mirrors https://cli.github.com/packages\n' > "$sources"
+  assert_equals "$(gh_apt_repository_state)" missing
+  rm -f "$sources"
+  # One-line entries: a commented-out line is disabled; an active one with
+  # options in brackets counts.
+  printf '# deb [arch=arm64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main # disabled on upgrade\n' > "$dir/gh.list"
+  assert_equals "$(gh_apt_repository_state)" disabled
+  out=$(install_os_packages)
+  assert_contains "$out" " $list "
+  printf 'deb [arch=arm64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' > "$dir/gh.list"
+  assert_equals "$(gh_apt_repository_state)" other
+  rm -rf "$temp"
+}
+
+# Debian 12 / Ubuntu 22.04 package zoxide 0.4.3: inspect warns in one line,
+# only for an apt candidate before 0.8 and only when no other zoxide is on PATH.
+test_old_apt_zoxide_is_warned_about() {
+  local out
+  OS_FAMILY=apt
+  SELECTED_STEPS=packages
+  SELECTED_GROUPS=dev-tools
+  REQUESTED_STEPS=$SELECTED_STEPS
+  REQUESTED_GROUPS=$SELECTED_GROUPS
+  apt-cache() { printf 'zoxide:\n  Installed: (none)\n  Candidate: %s\n  Version table:\n' "$FAKE_CANDIDATE"; }
+  zoxide_on_path() { [[ -n $FAKE_ZOXIDE ]] && printf '%s\n' "$FAKE_ZOXIDE"; }
+  FAKE_ZOXIDE=""
+  FAKE_CANDIDATE=0.4.3-5
+  out=$(apt_zoxide_outdated) || fail "zoxide 0.4.3 was not reported"
+  assert_contains "$out" "zoxide 0.4.3-5 predates 0.8"
+  # The distribution's own copy, once installed, is still the old one.
+  FAKE_ZOXIDE=/usr/bin/zoxide
+  apt_zoxide_outdated >/dev/null || fail "an installed zoxide 0.4.3 was not reported"
+  verify_step() { return 1; }
+  dpkg() { printf 'amd64\n'; }
+  assert_contains "$(inspect_tsv)" $'warning\tzoxide-outdated\tapt\'s zoxide 0.4.3-5 predates 0.8'
+  for FAKE_CANDIDATE in 0.9.3-1 1:0.8.0-1 '(none)' ''; do
+    ! apt_zoxide_outdated >/dev/null || fail "zoxide '$FAKE_CANDIDATE' was reported as outdated"
+  done
+  FAKE_CANDIDATE=0.4.3-5
+  # The user's own zoxide on PATH wins over the package.
+  FAKE_ZOXIDE=$HOME/.local/bin/zoxide
+  ! apt_zoxide_outdated >/dev/null || fail "a zoxide outside the package was reported"
+  # Other families and selections never look.
+  FAKE_ZOXIDE=""
+  SELECTED_GROUPS=shell
+  ! apt_zoxide_outdated >/dev/null || fail "zoxide was reported without dev-tools"
+  OS_FAMILY=fedora
+  SELECTED_GROUPS=dev-tools
+  ! apt_zoxide_outdated >/dev/null || fail "zoxide was reported on Fedora"
 }
 
 # BP-8: missing packages on Arch sync and upgrade in one transaction, with or
@@ -3636,6 +3835,9 @@ TESTS=(
   test_linux_artifacts_use_static_musl_builds
   test_apt_upgrade_keeps_local_configuration
   test_fedora_media_swaps_only_ffmpeg
+  test_apt_dev_tools_add_the_github_cli_repository
+  test_disabled_github_cli_apt_sources_do_not_count
+  test_old_apt_zoxide_is_warned_about
   test_arch_installs_with_a_synced_database
   test_version_manager_extension_compile_is_best_effort
   test_nerd_font_rejects_unknown_names_before_downloading
