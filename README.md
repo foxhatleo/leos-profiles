@@ -25,6 +25,11 @@ any GitHub steps you choose wait for you.
 
 ### What the wizard asks
 
+The wizard takes over the terminal window, one page per question, and fits
+itself to the window as you resize it. It draws its pages with
+[gum](https://github.com/charmbracelet/gum), which setup fetches if you do
+not have it; `install.sh setup --plain` asks with numbered prompts instead.
+
 1. **Recommended** or **Customize** (and, once you have set up, **the saved
    choices**).
 2. Customize only: which components and package groups, the Nerd Font, the
@@ -38,9 +43,10 @@ any GitHub steps you choose wait for you.
 
 The saved choices skip straight to whether to run the full upgrade.
 
-Then it shows the plan: packages, runtimes, where each tool comes from,
-everything that runs as root, what cannot be undone, files it touches, and
-each component as "to do" or "done". One confirmation applies exactly that.
+Then it shows the plan: each component as "to do" or "done", the totals and
+any warnings, with the full plan (packages, runtimes, where each tool comes
+from, everything that runs as root, what cannot be undone, files it touches)
+one choice away. One confirmation applies exactly that.
 `bash ~/.leos-profiles/install.sh setup --dry-run` shows the same plan and
 changes nothing.
 

@@ -878,26 +878,30 @@ apply_selection() {
 # $(...)), so the Node, runtime and release picks it shows are the ones
 # apply_selection then installs.
 setup_main() {
-  local plan
+  local plan plan_text plan_summary
   ui_terminal_available ||
     die "setup needs a terminal to ask its questions. For an unattended Recommended install run: bash $TARGET/install.sh apply --yes"
   if [[ $UI_TTY == /dev/tty ]] && ! [[ -t 0 ]]; then exec 0</dev/tty; fi
   detect_os
   ui_init
-  ui_header "Leo's Profiles" "Sets up zsh with its tools and runtimes on this machine ($OS_FAMILY). Nothing changes until you approve the plan."
+  ui_header "Leo's Profiles" "Sets up zsh with its tools and runtimes on this machine ($(os_display_name)). Nothing changes until you approve the plan."
   if [[ $DRY_RUN -eq 1 ]]; then ui_note "Dry run: the plan is real; applying it only prints what it would do."; fi
   setup_wizard
   prepare_selection
   INTERACTIVE_MANUAL=1
-  ui_section "Working out the plan"
-  ui_note "Checking what is installed, the package manager and the GitHub releases to use..."
+  ui_step Review
+  ui_status "Working out the plan" "Checking what is installed, the package manager and the GitHub releases to use..."
   plan=$(mktemp "${TMPDIR:-/tmp}/leos-plan.XXXXXX")
+  plan_text=$(mktemp "${TMPDIR:-/tmp}/leos-plan-text.XXXXXX")
+  plan_summary=$(mktemp "${TMPDIR:-/tmp}/leos-plan-summary.XXXXXX")
   track_temp "$plan"
+  track_temp "$plan_text"
+  track_temp "$plan_summary"
   warm_release_picks
   inspect_tsv > "$plan"
-  render_plan "$plan"
-  printf '\n'
-  if ! ui_confirm "Apply this plan?" yes; then
+  render_plan "$plan" > "$plan_text"
+  render_plan "$plan" summary > "$plan_summary"
+  if ! ui_review "Review the plan" "$plan_summary" "$plan_text" "Apply this plan?" "$(render_plan "$plan" warnings)"; then
     say "Nothing was changed. Run bash $TARGET/install.sh setup again to choose differently."
     return 0
   fi

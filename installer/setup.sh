@@ -14,11 +14,16 @@
 SETUP_MODE=""
 
 setup_wizard() {
+  ui_steps Welcome Options Keys Review
+  ui_step Welcome
   setup_mode
   case $SETUP_MODE in
     saved)
+      ui_steps Welcome Options Review
+      ui_step Options
       setup_full_upgrade ;;
     customize)
+      ui_step Options
       setup_components
       setup_package_groups
       setup_fonts
@@ -26,23 +31,37 @@ setup_wizard() {
       setup_casks
       setup_default_shell
       setup_release_age ;;
+    *)
+      ui_steps Welcome Keys Review ;;
   esac
   if [[ $SETUP_MODE != saved ]]; then
+    ui_step Keys
     setup_ssh
     setup_gpg
   fi
   setup_git_identity
+  ui_step Review
   setup_conflicts
+}
+
+# os_display_name: the platform as people call it.
+os_display_name() {
+  case $OS_FAMILY in
+    macos) printf 'macOS' ;;
+    apt) printf 'Debian or Ubuntu' ;;
+    fedora) printf 'Fedora' ;;
+    arch) printf 'Arch Linux' ;;
+    *) printf '%s' "$OS_FAMILY" ;;
+  esac
 }
 
 setup_mode() {
   local default=0
-  local -a options=(
-    "Recommended: the full workstation (every component but rpatool; full package upgrade)"
-    "Customize: choose components and package groups and options"
-  )
+  local -a options=("Recommended" "Customize")
+  ui_note "Recommended is the full workstation: every component but rpatool, with a full package upgrade. Customize lets you choose the components, package groups and options."
   if [[ -f $PROFILE_FILE ]]; then
-    options+=("Use the saved choices (local/install-profile.tsv)")
+    options+=("Use the saved choices")
+    ui_note "The saved choices are the ones the last setup on this machine applied (local/install-profile.tsv)."
     default=2
   fi
   ui_choose "How do you want to set up this machine?" "$default" "${options[@]}"
@@ -64,7 +83,7 @@ component_summary() {
     uv) printf 'uv and uvx' ;;
     cpython) printf 'the newest stable Python from uv (adds uv)' ;;
     starship) printf 'the Starship prompt' ;;
-    plugins) printf 'zsh plugins: autosuggestions; syntax highlighting; completions; fzf-tab' ;;
+    plugins) printf 'autosuggestions; syntax highlighting; completions; fzf-tab' ;;
     fonts) printf 'a Nerd Font for the prompt icons' ;;
     zsh-config) printf 'the managed blocks in .zshrc and .zshenv that load the profile' ;;
     default-shell) printf 'make zsh your login shell' ;;
@@ -339,12 +358,14 @@ warm_release_picks() {
   done
 }
 
-# render_plan <inspect TSV file>: the plan as a person reads it, grouped by
-# record type, ending with a per-component summary in the inventory's
-# STATE/NAME layout. Every record type in docs/development.md's table is
-# shown somewhere except meta.
+# render_plan <inspect TSV file> [summary]: the plan as a person reads it,
+# grouped by record type, ending with a per-component summary in the
+# inventory's STATE/NAME layout. Every record type in docs/development.md's
+# table is shown somewhere except meta. With `summary`, only the totals and
+# the per-component summary, and with `warnings` only the warnings, one per
+# line (the full-screen review page).
 render_plan() {
-  awk -F '\t' -v bold="$UI_BOLD" -v dim="$UI_DIM" -v reset="$UI_RESET" '
+  awk -F '\t' -v bold="$UI_BOLD" -v dim="$UI_DIM" -v reset="$UI_RESET" -v part="${2:-full}" '
     function head(title) { printf "\n%s%s%s\n", bold, title, reset }
     function item(text) { printf "  - %s\n", text }
     function count(type) { return (type in n) ? n[type] : 0 }
@@ -353,7 +374,27 @@ render_plan() {
       n[$1]++
       row[$1, n[$1]] = $0
     }
+    function summary(   i, status, state) {
+      todo = 0; done = 0
+      for (i = 1; i <= count("postcondition"); i++) {
+        status = field("postcondition", i, 3)
+        if (status == "verified") { state[i] = "done"; done++ }
+        else if (status == "skipped") state[i] = "skipped"
+        else { state[i] = "to do"; todo++ }
+      }
+      totals = sprintf("%d to do, %d already done; %d packages; %d root actions; %d irreversible; %d warnings",
+        todo, done, count("package"), count("privileged"), count("irreversible"), count("warning"))
+      if (part == "summary") printf "%s\n\n", totals
+      printf "  %-10s %s\n", "STATE", "COMPONENT"
+      for (i = 1; i <= count("postcondition"); i++) printf "  %-10s %s\n", state[i], field("postcondition", i, 2)
+      if (part != "summary") printf "\n  %s\n", totals
+    }
     END {
+      if (part == "summary") { summary(); exit }
+      if (part == "warnings") {
+        for (i = 1; i <= count("warning"); i++) printf "Warning (%s): %s\n", field("warning", i, 2), field("warning", i, 3)
+        exit
+      }
       head("Selection")
       for (i = 1; i <= count("platform"); i++) item("platform: " field("platform", i, 3))
       for (i = 1; i <= count("profile"); i++) item("profile checkout: " field("profile", i, 3))
@@ -470,17 +511,7 @@ render_plan() {
       }
 
       head("Summary")
-      printf "  %-10s %s\n", "STATE", "COMPONENT"
-      todo = 0; done = 0
-      for (i = 1; i <= count("postcondition"); i++) {
-        status = field("postcondition", i, 3)
-        if (status == "verified") { state = "done"; done++ }
-        else if (status == "skipped") state = "skipped"
-        else { state = "to do"; todo++ }
-        printf "  %-10s %s\n", state, field("postcondition", i, 2)
-      }
-      printf "\n  %d to do, %d already done; %d packages; %d root actions; %d irreversible; %d warnings\n",
-        todo, done, count("package"), count("privileged"), count("irreversible"), count("warning")
+      summary()
     }
   ' "$1"
 }

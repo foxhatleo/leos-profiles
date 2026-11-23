@@ -21,6 +21,8 @@ track_temp() { TEMP_PATHS+=("$1"); }
 
 cleanup() {
   local path
+  # A full-screen setup gives the terminal back and replays what it logged.
+  ui_screen_end
   # A sudo keepalive (packages.sh) dies with the run.
   if [[ -n ${SUDO_KEEPALIVE_PID:-} ]]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi
   for path in "${TEMP_PATHS[@]-}"; do [[ -z $path ]] || rm -rf -- "$path"; done

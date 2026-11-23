@@ -376,7 +376,7 @@ The implementation stays compatible with macOS Bash 3.2, and so does
 | --- | --- |
 | `bootstrap.sh` | The curl entry point: installs Git, clones or fast-forwards the checkout, execs `install.sh setup` on `/dev/tty` (see "Setup") |
 | `installer/setup.sh` | The setup wizard's stages, the release-tag warm-up and `render_plan` |
-| `installer/ui.sh` | Prompt primitives (gum or plain numbered prompts) and `ensure_gum` |
+| `installer/ui.sh` | Prompt primitives (the full-screen gum wizard or plain numbered prompts) and `ensure_gum` |
 | `installer/registry.sh` | Ordered component registry, dependency closure, handler validation, the tool-artifact table, and which steps a full upgrade re-runs |
 | `installer/state.sh` | Saved profiles, schema migration, state signatures, locking and cleanup |
 | `installer/packages.sh` | Platform bootstrap, package maps, package-manager operations and the extra repositories they need (RPM Fusion, GitHub CLI's apt repository) |
@@ -576,7 +576,9 @@ which cannot happen at a terminal). Then:
    `setup_conflicts` (a blocking `version_manager_conflicts rbenv` becomes
    `SKIP_EXISTING_VERSION_MANAGERS=1` or a stop). Each stage only sets the
    globals the matching apply option sets; validation stays
-   `validate_options`'s.
+   `validate_options`'s. `ui_steps` and `ui_step` name the wizard's steps
+   (Welcome, Options, Keys, Review; fewer for Recommended and the saved
+   choices) for the full-screen header.
 3. `prepare_selection`, `INTERACTIVE_MANUAL=1`, `warm_release_picks` (each
    selected release artifact's tag is picked in this shell, so inspect's
    subshells and apply see the same one), `inspect_tsv` into a temporary
@@ -584,15 +586,45 @@ which cannot happen at a terminal). Then:
    do not survive `$(...)`), `render_plan` on it (grouped by record type,
    every type but `meta`, a release tool's `artifact` and `release` records
    joined on one line, ending with each `postcondition` as to do / done /
-   skipped and the counts), and one `ui_confirm`.
+   skipped and the counts; `render_plan <file> summary` is the counts and
+   that summary alone, `render_plan <file> warnings` the warnings), and one
+   `ui_review`: plain, the whole plan on stdout and a confirmation; full
+   screen, the counts, summary and warnings on a page, the whole plan in
+   `gum pager` on request, and the wizard leaves the screen with the summary
+   printed as a record of what is applied.
 4. `apply_selection` in the same process, with `COMMAND=setup` (it writes
    the profile as apply does).
 
-The UI primitives (`ui_choose`, `ui_multi`, `ui_confirm`, `ui_input`, plus
-`ui_header`, `ui_section`, `ui_note`) draw on stderr and return in
-`UI_REPLY`/`UI_INDEX`, never through `$(...)`. The plain prompts re-ask on a
-bad answer; end of input (or cancelling a gum prompt) exits 130. Option
-labels contain no commas (gum's `--selected` splits on them).
+The UI primitives (`ui_choose`, `ui_multi`, `ui_confirm`, `ui_input`,
+`ui_review`, plus `ui_header`, `ui_section`, `ui_note`, `ui_status`) draw on
+stderr and return in `UI_REPLY`/`UI_INDEX`, never through `$(...)`. The
+plain prompts re-ask on a bad answer; end of input (or cancelling a gum
+prompt) exits 130. Option labels contain no commas (gum's `--selected`
+splits on them) and are kept short: gum truncates a label wider than the
+terminal, so the explanation goes in a `ui_note`.
+
+With gum the wizard is full screen. `ui_section` starts a page and `ui_note`
+adds to it (after the page's first prompt, a note is a one-off highlighted
+hint, such as why an answer was refused). Each prompt calls `ui_render`,
+which reads the size (`stty size` on fd 7, else `LINES`/`COLUMNS`) and
+redraws the page on the alternate screen in a centred column at most 80
+wide: the title and steps, the page's title, notes, block and message, then
+the question; the gum list gets the rows left (`--height`). Where the page
+does not fit, the block gives way first, then the notes, the message and
+the header. gum runs in the background (`ui_gum`) so a WINCH trap can interrupt
+the wait: the prompt is stopped, the page redrawn for the new size and the
+question asked again (a multi-select's unsubmitted toggles start over from
+its defaults). The colours are palette indexes (`UI_ACCENT` 6, cyan;
+`UI_ATTENTION` 3, yellow) so the wizard follows the terminal's theme, and
+every gum colour default (its pink 212 and purple) is overridden.
+
+While it owns the screen (`ui_screen_begin`), the run's stdout and stderr go
+to logs and the terminal's are kept on fd 8 and 9; new stderr lines appear
+on the next page as its message. `ui_screen_end` leaves the screen and
+replays the logs; `ui_review`, `ui_cancelled` and `cleanup` (so any exit,
+including `die`) call it, and only the shell that took the screen gives it
+back. After that, prompts (the manual-action waits during apply) are drawn
+inline, so the apply log keeps its context.
 
 Manual actions: with `INTERACTIVE_MANUAL=1`, `credential_manual_action` calls
 `await_manual_action`, which shows the explanation (with its "then rerun"

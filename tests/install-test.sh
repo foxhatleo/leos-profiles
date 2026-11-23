@@ -4388,6 +4388,131 @@ test_plain_prompts_validate_and_stop_at_end_of_input() {
   assert_contains "$out" "nothing was changed"
 }
 
+# gum_stub <dir> <answer...>: gum mode with a stand-in gum. Each call is
+# recorded in <dir>/calls (one argument per line, then "--end--") and gets
+# the next answer: printed as the choice, or WINCH (the terminal is resized
+# while the prompt is open: signal the installer's shell and hang until
+# stopped).
+gum_stub() {
+  local dir=$1
+  shift
+  cat > "$dir/gum" <<'STUB'
+#!/usr/bin/env bash
+{ printf '%s\n' "$@"; printf '%s\n' --end--; } >> "$GUM_STUB_DIR/calls"
+calls=$(grep -c '^--end--$' "$GUM_STUB_DIR/calls")
+answer=$(sed -n "${calls}p" "$GUM_STUB_DIR/answers")
+if [[ $answer == WINCH ]]; then kill -WINCH "$PPID"; sleep 5; exit 0; fi
+printf '%s\n' "$answer"
+STUB
+  chmod +x "$dir/gum"
+  if (( $# )); then printf '%s\n' "$@" > "$dir/answers"; else : > "$dir/answers"; fi
+  : > "$dir/calls"
+  export GUM_STUB_DIR=$dir
+  GUM="$dir/gum"
+  UI_MODE=gum
+  UI_TTY="$dir/answers"
+  exec 7<"$UI_TTY"
+}
+
+# gum_call_value <calls file> <call number> <flag>: the flag's value in that
+# call.
+gum_call_value() {
+  awk -v want="$2" -v flag="$3" '
+    $0 == "--end--" { call++; next }
+    call + 1 == want && take { print; exit }
+    { take = ($0 == flag) }
+  ' "$1"
+}
+
+# The full-screen wizard: each prompt draws its page on the alternate screen
+# for the terminal's size (text wrapped to the column, the list as tall as
+# the rows left), in the terminal's own palette; once the wizard has left the
+# screen, prompts are inline again.
+test_gum_pages_fit_the_terminal_and_its_palette() {
+  local temp status=0 screen line
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  (
+    TEMP_PATHS=()
+    gum_stub "$temp" "Option 12" "Option 2" "Yes" "Done"
+    LINES=40 COLUMNS=100
+    ui_header "Leo's Profiles" "Sets up zsh on this machine."
+    ui_steps Welcome Options Review
+    ui_step Options
+    ui_section "Components"
+    ui_note "$(printf 'word %.0s' {1..60})"
+    ui_choose "Pick one" 0 "Option "{1..12}
+    assert_equals "$UI_INDEX" 11
+    assert_equals "$(gum_call_value "$temp/calls" 1 --height)" 12
+    # A short, narrow terminal: the list scrolls in the rows that are left.
+    LINES=16 COLUMNS=50
+    ui_choose "Pick one" 0 "Option "{1..12}
+    assert_equals "$UI_INDEX" 1
+    (( $(gum_call_value "$temp/calls" 2 --height) < 12 )) || fail "the list did not shrink to the terminal"
+    ui_confirm "Sure?" no || fail "Yes was not taken"
+    assert_equals "$(gum_call_value "$temp/calls" 3 --selected)" No
+    ui_screen_end
+    ui_section "Action needed"
+    ui_choose "Continue when it is done" 0 "Done" "Stop"
+    assert_equals "$UI_REPLY" Done
+  ) 2>"$temp/screen" || status=$?
+  screen=$(cat "$temp/screen")
+  [[ $status -eq 0 ]] || fail "the prompts failed ($status): $screen"
+  # gum's own pink and purple are overridden; the accent is a palette colour.
+  ! grep -qxE '212|99|#7571F9' "$temp/calls" || fail "a gum prompt kept gum's default colours: $(cat "$temp/calls")"
+  assert_equals "$(gum_call_value "$temp/calls" 1 --cursor.foreground)" "$UI_ACCENT"
+  [[ $(grep -c $'\033\[?1049h' <<< "$screen") -eq 1 ]] || fail "the alternate screen was not taken once"
+  assert_contains "$screen" $'\033[?1049l'
+  [[ $(grep -c 'word' <<< "$screen") -ge 3 ]] || fail "the note was not wrapped: $screen"
+  while IFS= read -r line; do
+    (( ${#line} <= 100 )) || fail "a drawn line is wider than the terminal: '$line'"
+  done < <(sed $'s/\033\\[[0-9;?]*[A-Za-z]//g' "$temp/screen")
+  # After the wizard, the heading is drawn inline, not as a new screen.
+  assert_contains "${screen##*$'\033[?1049l'}" "Action needed"
+}
+
+# A resize while a prompt is open draws the page again for the new size and
+# asks again.
+test_gum_prompt_is_asked_again_after_a_resize() {
+  local temp status=0
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  (
+    TEMP_PATHS=()
+    gum_stub "$temp" WINCH b
+    ui_section "Pick"
+    ui_choose "Pick" 0 a b c
+    assert_equals "$UI_INDEX|$UI_REPLY" 1\|b
+    ui_screen_end
+  ) 2>"$temp/screen" || status=$?
+  [[ $status -eq 0 ]] || fail "the resized prompt failed ($status): $(cat "$temp/screen")"
+  assert_equals "$(grep -c '^--end--$' "$temp/calls")" 2
+  [[ $(grep -o $'\033\[H\033\[2J' "$temp/screen" | wc -l) -ge 2 ]] || fail "the page was not drawn again"
+}
+
+# While the wizard owns the screen, what the run prints is kept and shown on
+# the normal screen when it ends, even when it ends with an error.
+test_gum_screen_replays_the_run_output_when_it_ends() {
+  local temp status=0 out
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  out=$( (
+    TEMP_PATHS=()
+    trap cleanup EXIT
+    gum_stub "$temp"
+    ui_status "Working out the plan" "Checking what is installed"
+    warn "careful"
+    say "hello"
+    die "boom"
+  ) 2>&1) || status=$?
+  assert_equals "$status" 1
+  assert_contains "$out" "Working out the plan"
+  out=${out#*$'\033[?1049l'}
+  assert_contains "$out" "WARNING: careful"
+  assert_contains "$out" "==> hello"
+  assert_contains "$out" "ERROR: boom"
+}
+
 # render_plan shows every inspect record type the contract documents (all but
 # meta) and ends with the per-component summary.
 test_render_plan_shows_every_record_type() {
@@ -4425,6 +4550,12 @@ test_render_plan_shows_every_record_type() {
   assert_contains "$out" "done       zsh-config"
   assert_contains "$out" "to do      fnm"
   assert_contains "$out" "2 to do, 1 already done; 1 packages; 1 root actions; 1 irreversible; 1 warnings"
+  # The review page's parts: the totals first, then the summary; the warnings.
+  out=$(render_plan "$plan_rows" summary)
+  assert_equals "$(sed -n '1p' <<< "$out")" "2 to do, 1 already done; 1 packages; 1 root actions; 1 irreversible; 1 warnings"
+  assert_contains "$out" "to do      fnm"
+  [[ $out != *Selection* ]] || fail "the summary held the whole plan: $out"
+  assert_equals "$(render_plan "$plan_rows" warnings)" "Warning (M-warning): M-warning"
 }
 
 # setup through the real entrypoint (dry run): the wizard's selection is
@@ -5040,6 +5171,9 @@ TESTS=(
   test_setup_saved_choices_come_from_the_profile
   test_setup_turns_an_rbenv_conflict_into_a_choice
   test_plain_prompts_validate_and_stop_at_end_of_input
+  test_gum_pages_fit_the_terminal_and_its_palette
+  test_gum_prompt_is_asked_again_after_a_resize
+  test_gum_screen_replays_the_run_output_when_it_ends
   test_render_plan_shows_every_record_type
   test_setup_applies_the_plan_it_showed
   test_setup_waits_for_manual_actions_at_a_terminal
