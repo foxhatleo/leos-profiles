@@ -85,9 +85,12 @@ die() { printf '%s\n' "ERROR: $*" >&2; exit 1; }
 # plan changed) or 3 (manual action): those are contract exits (CQ-2).
 # Subshells ($(...), ( )) are left alone: their status reaches the main shell,
 # which reports the failure there if it is not handled.
-# MAIN_SUBSHELL is the depth of the shell that runs the installer: 0, or a
-# setup pass's (setup_pass runs in a subshell of setup_main).
+# MAIN_SUBSHELL is the depth of the shell that runs the installer, and
+# INSTALLER_PID its process (the lock's owner): $$ and 0, or a setup pass's
+# (setup_pass runs in a subshell of setup_main, where $$ is still the
+# parent's).
 MAIN_SUBSHELL=0
+INSTALLER_PID=$$
 on_unexpected_error() {
   local status=$1 file=$2 line=$3
   [[ ${BASH_SUBSHELL:-0} -eq $MAIN_SUBSHELL ]] || return 0
@@ -902,8 +905,12 @@ setup_main() {
   : > "$history/answers"
   : > "$history/remembered"
   if [[ $UI_MODE == gum ]]; then ui_screen_begin; fi
-  trap ':' INT TERM HUP
-  while :; do
+  # A signal sent to this shell (not the pass's process group) is acted on
+  # when the pass ends: setup then stops with its status.
+  SETUP_SIGNAL=""
+  trap 'SETUP_SIGNAL=130' INT
+  trap 'SETUP_SIGNAL=143' TERM HUP
+  while [[ -z $SETUP_SIGNAL ]]; do
     rm -f "$history/back" "$history/released" "$history/applying"
     ui_log_mark
     # Only the pass gives the screen back while it runs.
@@ -915,6 +922,10 @@ setup_main() {
     status=$?
     set -e
     install_error_trap
+    # The screen is this shell's again: if it fails between passes, its
+    # cleanup leaves the screen and shows why.
+    UI_SCREEN_OWNER=${BASH_SUBSHELL:-0}
+    if [[ -n $SETUP_SIGNAL ]]; then status=$SETUP_SIGNAL; break; fi
     if [[ $status -eq $UI_BACK_STATUS && -f $history/back && ! -f $history/applying ]]; then
       ui_log_rewind
       ui_history_back "$history"
@@ -937,6 +948,9 @@ setup_pass() {
   local history=$1 plan plan_text plan_summary
   TEMP_PATHS=()
   MAIN_SUBSHELL=${BASH_SUBSHELL:-0}
+  # bash 3.2 has no BASHPID; a direct child's parent is this pass.
+  sh -c 'echo "$PPID"' > "$history/pass-pid"
+  INSTALLER_PID=$(cat "$history/pass-pid")
   trap cleanup EXIT
   install_error_trap
   trap 'exit 130' INT

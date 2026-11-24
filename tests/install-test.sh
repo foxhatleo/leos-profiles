@@ -4712,6 +4712,128 @@ test_setup_back_history_trims_and_remembers() {
   assert_contains "$(cat "$temp/out")" "Something changed since you answered this"
 }
 
+# Only the answer a stage accepts is recorded: a question asked again
+# replaces its rejected answer. A replayed answer the stage now rejects keeps
+# the stage's explanation next to the note that setup asks again.
+test_setup_back_records_only_accepted_answers() {
+  local temp dir
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  dir="$temp/history"
+  mkdir "$dir"
+  : > "$dir/answers"
+  : > "$dir/remembered"
+  (
+    setup_answers /taken /fresh
+    ui_history_begin "$dir"
+    ui_page "SSH key for GitHub"
+    ui_input "Path for the new key" ""
+    ui_note "/taken exists"
+    ui_input "Path for the new key" ""
+    assert_equals "$(cat "$dir/answers")" $'input\tSSH key for GitHub|Path for the new key\t/fresh'
+  ) 2>/dev/null || fail "a rejected answer was kept"
+  printf 'input\tSSH key for GitHub|Path for the new key\t/now-taken\nchoose\tSSH key for GitHub|Passphrase\tAsk\n' > "$dir/answers"
+  (
+    setup_answers /other
+    ui_history_begin "$dir"
+    ui_page "SSH key for GitHub"
+    ui_input "Path for the new key" ""
+    ui_note "/now-taken exists; choose another path."
+    ui_input "Path for the new key" ""
+  ) 2>"$temp/out" || fail "the rejected replay failed: $(cat "$temp/out")"
+  assert_contains "$(cat "$temp/out")" "/now-taken exists; choose another path."
+  assert_contains "$(cat "$temp/out")" "Something changed since you answered this"
+}
+
+# BSD head rejects `head -c 0`: rewinding a log that was empty at the mark
+# must not call it (the stdout log is nearly always empty).
+test_setup_log_rewind_handles_an_empty_mark() {
+  local temp status=0
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  (
+    TEMP_PATHS=()
+    head() { if [[ $1 == -c && $2 == 0 ]]; then echo "head: illegal byte count -- 0" >&2; return 1; fi; command head "$@"; }
+    gum_stub "$temp"
+    ui_screen_begin
+    say "kept"
+    ui_log_mark
+    say "abandoned pass"
+    warn "abandoned warning"
+    ui_log_rewind
+    printf '%s|%s' "$(cat "$UI_LOG_OUT")" "$(cat "$UI_LOG_ERR")" > "$temp/logs"
+    ui_screen_end
+  ) >/dev/null 2>"$temp/err" || status=$?
+  assert_equals "$status" 0
+  assert_equals "$(cat "$temp/logs")" "==> kept|"
+  # And from an empty log.
+  status=0
+  (
+    TEMP_PATHS=()
+    head() { if [[ $1 == -c && $2 == 0 ]]; then return 1; fi; command head "$@"; }
+    gum_stub "$temp"
+    ui_screen_begin
+    ui_log_mark
+    say "abandoned pass"
+    ui_log_rewind
+    [[ ! -s $UI_LOG_OUT ]] || fail "the log was not cut back"
+    ui_screen_end
+  ) >/dev/null 2>&1 || status=$?
+  assert_equals "$status" 0
+}
+
+# setup_main_process <temp> <wizard body>: setup_main in its own bash process
+# (so $$ is the supervisor's), plain prompts, with setup_wizard replaced.
+setup_main_process() {
+  : > "$1/answers"
+  bash -c '
+    export LEOS_PROFILES_INSTALL_LIB_ONLY=1
+    source "$1"
+    UI_TTY="$2/answers" UI_PLAIN=1 TEMP="$2"
+    eval "setup_wizard() { $3; }"
+    trap cleanup EXIT
+    setup_main
+  ' _ "$ROOT/install.sh" "$1" "$2"
+}
+
+# A signal reaches setup: sent to the PID the lock records (the pass's), it
+# stops the pass at once; sent to the supervising shell, setup stops when the
+# pass ends and starts no other pass.
+test_setup_signals_stop_setup() {
+  local temp status=0
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  setup_main_process "$temp" 'kill -TERM "$INSTALLER_PID"; : > "$TEMP/carried-on"' >/dev/null 2>&1 || status=$?
+  assert_equals "$status" 143
+  [[ ! -e $temp/carried-on ]] || fail "a TERM to the lock's PID did not stop the pass"
+  status=0
+  setup_main_process "$temp" 'if [[ -e $TEMP/first ]]; then : > "$TEMP/second-pass"; return 0; fi
+    : > "$TEMP/first"; kill -TERM $$; printf "x\n" > "$UI_HIST_DIR/back"; exit 75' >/dev/null 2>&1 || status=$?
+  assert_equals "$status" 143
+  [[ ! -e $temp/second-pass ]] || fail "setup started another pass after a TERM"
+}
+
+# The supervisor failing between passes (here, the answers are gone) still
+# leaves the full screen and shows why.
+test_setup_supervisor_failure_leaves_the_screen() {
+  local temp status=0 out
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  gum_stub "$temp"
+  out=$(bash -c '
+    export LEOS_PROFILES_INSTALL_LIB_ONLY=1
+    source "$1"
+    TEMP="$2" UI_TTY="$2/answers"
+    ui_init() { exec 7<"$UI_TTY"; UI_MODE=gum; GUM="$TEMP/gum"; }
+    setup_wizard() { rm -f "$UI_HIST_DIR/answers"; printf "x\n" > "$UI_HIST_DIR/back"; exit 75; }
+    trap cleanup EXIT
+    setup_main
+  ' _ "$ROOT/install.sh" "$temp" 2>&1) || status=$?
+  assert_equals "$status" 1
+  out=${out##*$'\033[?1049l'}
+  assert_contains "$out" "setup could not read its answers"
+}
+
 # With gum, Esc goes back where there is a question to go back to (ending the
 # pass with UI_BACK_STATUS and naming the question), and quits on the first.
 test_gum_escape_goes_back() {
@@ -5335,6 +5457,10 @@ TESTS=(
   test_setup_pass_runs_with_errexit
   test_setup_back_history_trims_and_remembers
   test_gum_escape_goes_back
+  test_setup_back_records_only_accepted_answers
+  test_setup_log_rewind_handles_an_empty_mark
+  test_setup_signals_stop_setup
+  test_setup_supervisor_failure_leaves_the_screen
   test_setup_waits_for_manual_actions_at_a_terminal
   test_preflight_never_stops_setup_with_run_in_terminal
   test_bare_install_sh_runs_setup_lean_profile_or_usage

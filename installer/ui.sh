@@ -324,7 +324,10 @@ ui_log_rewind() {
   for file in "$UI_LOG_OUT:$UI_LOG_MARK_OUT" "$UI_LOG_ERR:$UI_LOG_MARK_ERR"; do
     size=${file##*:}
     file=${file%:*}
-    if ! { head -c "$size" "$file" > "$file.cut" && cat "$file.cut" > "$file" && rm -f "$file.cut"; }; then
+    # BSD head rejects a count of 0.
+    if (( size == 0 )); then
+      : > "$file" || die "setup could not rewind its log $file"
+    elif ! { head -c "$size" "$file" > "$file.cut" && cat "$file.cut" > "$file" && rm -f "$file.cut"; }; then
       die "setup could not rewind its log $file"
     fi
   done
@@ -659,12 +662,21 @@ ui_history_truncate() {
 
 ui_history_diverge() {
   ui_history_truncate
-  UI_PAGE_MESSAGE="Something changed since you answered this (a key was added or removed, say), so setup asks again from here."
+  UI_PAGE_MESSAGE="${UI_PAGE_MESSAGE:+$UI_PAGE_MESSAGE$UI_NL}Something changed since you answered this (a key was added or removed, say), so setup asks again from here."
 }
 
-# ui_history_record <kind> <key> <value>: record a live answer.
+# ui_history_record <kind> <key> <value>: record a live answer. An answer to
+# the question just answered replaces that one: the stage rejected it and
+# asked again, and only the answer it accepts may be replayed (a rejected SSH
+# key path could be valid by the next pass).
 ui_history_record() {
   ui_history_recording || return 0
+  if (( UI_REPLAY_COUNT > 0 )) &&
+    [[ ${UI_REPLAY_LINES[UI_REPLAY_COUNT - 1]%%"$UI_TAB"*} == "$1" &&
+      $(ui_entry_key "${UI_REPLAY_LINES[UI_REPLAY_COUNT - 1]}") == "$2" ]]; then
+    UI_REPLAY_POS=$((UI_REPLAY_COUNT - 1))
+    ui_history_truncate
+  fi
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$UI_HIST_DIR/answers" || die "setup could not record an answer in $UI_HIST_DIR"
   UI_REPLAY_LINES[UI_REPLAY_COUNT]="$1$UI_TAB$2$UI_TAB$3"
   UI_REPLAY_COUNT=$((UI_REPLAY_COUNT + 1))

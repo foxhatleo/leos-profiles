@@ -28,7 +28,7 @@ cleanup() {
   for path in "${TEMP_PATHS[@]-}"; do [[ -z $path ]] || rm -rf -- "$path"; done
   # Only remove the lock if it is still ours — never delete a lock a different
   # run now holds (defensive backstop for the reclaim race).
-  if [[ $LOCK_HELD -eq 1 && -f $LOCK_DIR/pid ]] && [[ $(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null) == "$$" ]]; then
+  if [[ $LOCK_HELD -eq 1 && -f $LOCK_DIR/pid ]] && [[ $(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null) == "$INSTALLER_PID" ]]; then
     rm -rf -- "$LOCK_DIR"
   fi
 }
@@ -42,7 +42,7 @@ acquire_lock() {
   # trap clears it on any normal or signalled exit — so we fail closed and tell
   # the operator how to remove it rather than racily auto-reclaiming it.
   if mkdir "$LOCK_DIR" 2>/dev/null; then
-    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    printf '%s\n' "$INSTALLER_PID" > "$LOCK_DIR/pid"
     chmod 600 "$LOCK_DIR/pid"
     LOCK_HELD=1
     return 0

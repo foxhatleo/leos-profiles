@@ -635,8 +635,10 @@ go back to the previous question. The wizard's stages set globals as they go
 inspect add their own), so Back does not undo them: setup runs in passes.
 `setup_pass` is a subshell of `setup_main` that does everything from the
 header to `apply_selection`, starting from the parent's untouched state.
-While `UI_HISTORY` is 1 every answer (`ui_choose`, `ui_multi`,
-`ui_confirm`, `ui_input`) is appended to `<history>/answers` as
+While `UI_HISTORY` is 1 every answer a stage accepts (`ui_choose`,
+`ui_multi`, `ui_confirm`, `ui_input`; an answer to the question just
+answered replaces it, as the stage rejected it) is kept in
+`<history>/answers` as
 `kind<TAB>key<TAB>value`: the key is the page title and the question, the
 value the option's text (a multi-select's texts joined by `\037`), yes/no or
 the input. A pass first replays those answers, drawing and printing nothing
@@ -648,8 +650,8 @@ Back (`ui_back`, allowed while history is on and some answer comes before
 the question) writes the question's key to `<history>/back` and exits the
 pass with `UI_BACK_STATUS` (75). `setup_main` starts another pass only for
 75 with that marker and without `<history>/applying`; `ui_history_back` drops
-the question's own answers (rejected ones it asked again for), then the
-answer before it with its re-asks, and appends that answer to
+the question's own answer (one it rejected and asked again for), then the
+answer before it, and appends that answer to
 `<history>/remembered`, whose last answer for a key is the question's
 default when it is asked again. A pass after a Back that asks nothing live
 before the review goes back once more (`ui_history_wizard_done`). The review
@@ -661,10 +663,14 @@ The pass re-enables errexit first (a subshell keeps the parent's `set +e`,
 which the parent needs: a pass run as `( ... ) || status=$?` would ignore
 errexit entirely), clears `TEMP_PATHS` (its cleanup removes only its own
 temporary files and lock), sets `MAIN_SUBSHELL` so `on_unexpected_error`
-reports its failures, and installs the EXIT, ERR, INT, TERM/HUP and WINCH
-traps a subshell loses. `setup_main` supervises: its INT/TERM/HUP traps do
-nothing while a pass runs (the pass handles the signal; a TERM sent only to
-the parent's PID waits until the pass ends), it hands the screen to the pass
+reports its failures and `INSTALLER_PID` to its own process (bash 3.2 has
+no `BASHPID`; `$$` is still the parent's), which the lock records and the
+sudo keepalive watches, so a TERM to the PID the lock names stops the pass at
+once, and installs the EXIT, ERR, INT, TERM/HUP and WINCH traps a subshell
+loses. `setup_main` supervises: a signal sent to it alone (Ctrl+C and a
+closed terminal reach the pass's process group) is recorded and acted on
+when the pass ends, which then ends setup with 130 or 143 and no further
+pass; it hands the screen to the pass and takes it back between passes
 (`UI_SCREEN_OWNER=-1`, `ui_screen_adopt`), cuts the logs back to where the
 pass started after a Back (`ui_log_mark`, `ui_log_rewind`), and at the end
 takes back the terminal's fds only if the pass left the screen

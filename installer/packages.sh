@@ -109,7 +109,7 @@ sudo_keepalive_start() {
   (
     trap - ERR
     while sleep 50; do
-      kill -0 "$$" 2>/dev/null || exit 0
+      kill -0 "$INSTALLER_PID" 2>/dev/null || exit 0
       sudo -n -v 2>/dev/null || exit 0
     done
   ) >/dev/null 2>&1 &
