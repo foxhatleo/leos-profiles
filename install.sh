@@ -85,16 +85,25 @@ die() { printf '%s\n' "ERROR: $*" >&2; exit 1; }
 # plan changed) or 3 (manual action): those are contract exits (CQ-2).
 # Subshells ($(...), ( )) are left alone: their status reaches the main shell,
 # which reports the failure there if it is not handled.
+# MAIN_SUBSHELL is the depth of the shell that runs the installer: 0, or a
+# setup pass's (setup_pass runs in a subshell of setup_main).
+MAIN_SUBSHELL=0
 on_unexpected_error() {
   local status=$1 file=$2 line=$3
-  [[ ${BASH_SUBSHELL:-0} -eq 0 ]] || return 0
+  [[ ${BASH_SUBSHELL:-0} -eq $MAIN_SUBSHELL ]] || return 0
   # Status 1 is also what `die` exits with inside a $(...), after it already
   # printed its own message, so a location line there would only be noise.
   if [[ $status -ne 1 ]]; then
     printf '%s\n' "ERROR: unexpected failure (status $status) at $file:$line" >&2
   fi
-  if [[ $status -eq 2 || $status -eq 3 ]]; then status=1; fi
+  # Nor may it pose as setup's Back (UI_BACK_STATUS, installer/ui.sh).
+  if [[ $status -eq 2 || $status -eq 3 || $status -eq 75 ]]; then status=1; fi
   exit "$status"
+}
+
+# install_error_trap: the ERR trap above (main, and each setup pass).
+install_error_trap() {
+  trap 'on_unexpected_error "$?" "${BASH_SOURCE[0]:-install.sh}" "$LINENO"' ERR
 }
 
 usage() {
@@ -873,20 +882,71 @@ apply_selection() {
 
 # setup_main: the interactive setup. It needs a terminal: the questions are
 # read from it (UI_TTY), and stdin moves there too, so sudo, ssh-keygen, gpg
-# and gh can prompt and preflight never stops for want of one. The plan shown
-# is inspect's, computed in this process into a file (globals do not survive
-# $(...)), so the Node, runtime and release picks it shows are the ones
-# apply_selection then installs.
+# and gh can prompt and preflight never stops for want of one.
+#
+# Setup runs in passes, each a subshell (setup_pass), so that Back can start
+# again from setup's untouched state: a pass that goes back exits with
+# UI_BACK_STATUS and a marker, and the next pass replays the answers kept
+# (installer/ui.sh, "Back"). Meanwhile this shell only supervises: the pass
+# owns the screen and the signals (these traps would run only after it
+# ends), and setup ends with the last pass's status, exactly.
 setup_main() {
-  local plan plan_text plan_summary
+  local status history
   ui_terminal_available ||
     die "setup needs a terminal to ask its questions. For an unattended Recommended install run: bash $TARGET/install.sh apply --yes"
   if [[ $UI_TTY == /dev/tty ]] && ! [[ -t 0 ]]; then exec 0</dev/tty; fi
   detect_os
   ui_init
+  history=$(mktemp -d "${TMPDIR:-/tmp}/leos-setup-history.XXXXXX")
+  track_temp "$history"
+  : > "$history/answers"
+  : > "$history/remembered"
+  if [[ $UI_MODE == gum ]]; then ui_screen_begin; fi
+  trap ':' INT TERM HUP
+  while :; do
+    rm -f "$history/back" "$history/released" "$history/applying"
+    ui_log_mark
+    # Only the pass gives the screen back while it runs.
+    UI_SCREEN_OWNER=-1
+    # Not `( ... ) || status=$?`: errexit would be off inside the pass.
+    trap - ERR
+    set +e
+    (setup_pass "$history")
+    status=$?
+    set -e
+    install_error_trap
+    if [[ $status -eq $UI_BACK_STATUS && -f $history/back && ! -f $history/applying ]]; then
+      ui_log_rewind
+      ui_history_back "$history"
+      continue
+    fi
+    break
+  done
+  ui_screen_settle "$history"
+  exit "$status"
+}
+
+# setup_pass <history dir>: one pass of setup (see setup_main): the wizard,
+# replaying the answers kept in <history dir>, then the plan (inspect's,
+# computed in this shell into a file, as globals do not survive $(...), so
+# the Node, runtime and release picks it shows are the ones apply_selection
+# installs), the review and, once approved, apply.
+setup_pass() {
+  # A subshell keeps the parent's `set +e` and loses its caught traps.
+  set -e
+  local history=$1 plan plan_text plan_summary
+  TEMP_PATHS=()
+  MAIN_SUBSHELL=${BASH_SUBSHELL:-0}
+  trap cleanup EXIT
+  install_error_trap
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+  ui_screen_adopt
+  ui_history_begin "$history"
   ui_header "Leo's Profiles" "Sets up zsh with its tools and runtimes on this machine ($(os_display_name)). Nothing changes until you approve the plan."
   if [[ $DRY_RUN -eq 1 ]]; then ui_note "Dry run: the plan is real; applying it only prints what it would do."; fi
   setup_wizard
+  ui_history_wizard_done
   prepare_selection
   INTERACTIVE_MANUAL=1
   ui_step Review
@@ -897,8 +957,10 @@ setup_main() {
   track_temp "$plan"
   track_temp "$plan_text"
   track_temp "$plan_summary"
+  setup_release_cache_load "$history"
   warm_release_picks
   inspect_tsv > "$plan"
+  setup_release_cache_save "$history"
   render_plan "$plan" > "$plan_text"
   render_plan "$plan" summary > "$plan_summary"
   if ! ui_review "Review the plan" "$plan_summary" "$plan_text" "Apply this plan?" "$(render_plan "$plan" warnings)"; then
@@ -915,7 +977,7 @@ main() {
   INVOCATION=${INVOCATION% }
   parse_args "$@"
   trap cleanup EXIT
-  trap 'on_unexpected_error "$?" "${BASH_SOURCE[0]:-install.sh}" "$LINENO"' ERR
+  install_error_trap
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
   # These two only read, or remove the profile's own blocks: they work on any
@@ -929,10 +991,8 @@ main() {
     inventory
     return 0
   fi
-  if [[ $COMMAND == setup ]]; then
-    setup_main
-    return 0
-  fi
+  # setup_main exits with its last pass's status.
+  if [[ $COMMAND == setup ]]; then setup_main; fi
   if [[ $COMMAND == reconcile || $SAVED_SELECTION -eq 1 ]]; then
     read_profile
   fi

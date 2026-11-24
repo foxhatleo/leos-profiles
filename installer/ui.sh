@@ -64,11 +64,41 @@ UI_PAGE_PROMPTED=0
 # The layout, from ui_size and ui_render: the terminal, the centred column's
 # width and left margin, and the rows left under the page for the prompt.
 UI_NL=$'\n'
+UI_TAB=$'\t'
+UI_US=$'\037'
 UI_ROWS=24
 UI_COLS=80
 UI_WIDTH=76
 UI_MARGIN=2
 UI_FREE=0
+# A faint line under the question: the keys for Back and quitting.
+UI_HINT=""
+# Plain and inline: whether the page's title and notes have been printed,
+# and whether the page is the welcome (printed as the header).
+UI_PAGE_PRINTED=0
+UI_PAGE_WELCOME=0
+
+# Back. Setup runs in passes (setup_main, setup_pass): while UI_HISTORY is 1
+# (the wizard and the review page), every answer is recorded in
+# UI_HIST_DIR/answers as "kind<TAB>key<TAB>value", the key being the page's
+# title and the question. A pass first replays the recorded answers without
+# drawing anything, then asks live. Back (Esc with gum, "<" in plain
+# prompts) ends the pass with UI_BACK_STATUS and a marker naming the prompt;
+# setup_main drops that prompt's answers and the one before it, and starts a
+# new pass, so every pass starts from setup's untouched state.
+UI_HISTORY=0
+UI_HISTORY_SKIP=0
+UI_HIST_DIR=""
+UI_REPLAY_LINES=()
+UI_REPLAY_POS=0
+UI_REPLAY_COUNT=0
+UI_REPLAY_INITIAL=0
+UI_PASS_LIVE=0
+UI_HIST_VALUE=""
+UI_PROMPT_KEY=""
+UI_BACK_STATUS=75
+UI_LOG_MARK_OUT=0
+UI_LOG_MARK_ERR=0
 
 # ui_terminal_available: UI_TTY can be opened for reading.
 ui_terminal_available() { { : <"$UI_TTY"; } 2>/dev/null; }
@@ -248,6 +278,56 @@ ui_screen_end() {
   if [[ -s $UI_LOG_ERR ]]; then cat "$UI_LOG_ERR" >&2; fi
   : > "$UI_LOG_OUT"
   : > "$UI_LOG_ERR"
+  # A pass tells setup_main it has given the screen back.
+  if [[ -n $UI_HIST_DIR ]]; then : > "$UI_HIST_DIR/released"; fi
+}
+
+# ui_screen_adopt: a pass takes over the screen setup_main took: it gives the
+# screen back itself (ui_review, ui_cancelled, cleanup) and listens for
+# resizes (a subshell starts without the WINCH trap).
+ui_screen_adopt() {
+  [[ $UI_SCREEN -eq 1 ]] || return 0
+  UI_SCREEN_OWNER=${BASH_SUBSHELL:-0}
+  trap 'UI_RESIZED=1; UI_TRAPPED=1' WINCH
+}
+
+# ui_screen_settle <history dir>: after the last pass: if it gave the screen
+# back, take the terminal's stdout and stderr back without leaving the screen
+# again (that would restore an old cursor position over the output);
+# otherwise (it died without its cleanup) leave the screen here.
+ui_screen_settle() {
+  [[ $UI_SCREEN -eq 1 ]] || return 0
+  if [[ -f $1/released ]]; then
+    trap - WINCH
+    exec 1>&9 2>&8 8>&- 9>&-
+    UI_SCREEN=0
+    UI_SCREEN_USED=1
+  else
+    UI_SCREEN_OWNER=${BASH_SUBSHELL:-0}
+    ui_screen_end
+  fi
+}
+
+# ui_log_mark: before a pass, note how long the logs are (ui_log_rewind cuts
+# them back after a Back, so an abandoned pass's output is not replayed) and
+# count what they hold as shown.
+ui_log_mark() {
+  [[ $UI_SCREEN -eq 1 ]] || return 0
+  UI_LOG_MARK_OUT=$(($(wc -c < "$UI_LOG_OUT")))
+  UI_LOG_MARK_ERR=$(($(wc -c < "$UI_LOG_ERR")))
+  UI_LOG_SEEN=$(awk 'END { print NR }' "$UI_LOG_ERR")
+}
+
+ui_log_rewind() {
+  local file size
+  [[ $UI_SCREEN -eq 1 ]] || return 0
+  for file in "$UI_LOG_OUT:$UI_LOG_MARK_OUT" "$UI_LOG_ERR:$UI_LOG_MARK_ERR"; do
+    size=${file##*:}
+    file=${file%:*}
+    if ! { head -c "$size" "$file" > "$file.cut" && cat "$file.cut" > "$file" && rm -f "$file.cut"; }; then
+      die "setup could not rewind its log $file"
+    fi
+  done
 }
 
 # ui_log_news: the last lines the run printed on stderr since the page was
@@ -265,7 +345,12 @@ ui_log_news() {
 # ui_page <title>: start a page.
 ui_page() {
   UI_PAGE_TITLE=$1 UI_PAGE_NOTES="" UI_PAGE_BLOCK="" UI_PAGE_MESSAGE="" UI_PAGE_PROMPTED=0
+  UI_PAGE_PRINTED=0 UI_PAGE_WELCOME=0
 }
+
+# ui_prompted: a prompt on the page was answered (live or replayed): later
+# notes are hints for the next prompt, and the current hint is spent.
+ui_prompted() { UI_PAGE_PROMPTED=1 UI_PAGE_MESSAGE=""; }
 
 # ui_steps <step...>: the wizard's steps, shown in the header.
 ui_steps() { UI_STEPS="$*"; }
@@ -310,7 +395,7 @@ ui_header_line() {
 # message; on a very short terminal the header goes too.
 ui_render() {
   local question=$1 need=$2 accent attention width notes block message asked
-  local n_notes n_block n_message n_asked fixed room header=1 top=1 line used=0
+  local n_notes n_block n_message n_asked n_hint=0 fixed room header=1 top=1 line used=0
   ui_screen_begin
   ui_size
   ui_log_news
@@ -324,9 +409,11 @@ ui_render() {
   asked=$(ui_wrap "$width" "$question")
   n_notes=$(ui_lines "$notes") n_block=$(ui_lines "$block")
   n_message=$(ui_lines "$message") n_asked=$(ui_lines "$asked")
+  [[ -z $UI_HINT || n_asked -eq 0 ]] || n_hint=1
   (( UI_ROWS >= 20 )) || top=0
-  # header + rule + blank, title + blank, the question and a blank before it.
-  fixed=$((top + 3 + 2 + n_asked + (n_asked > 0 ? 1 : 0) + need))
+  # header + rule + blank, title + blank, the question (and its hint) and a
+  # blank before it.
+  fixed=$((top + 3 + 2 + n_asked + n_hint + (n_asked > 0 ? 1 : 0) + need))
   if (( fixed > UI_ROWS )); then header=0 top=0 fixed=$((fixed - 3)); fi
   room=$((UI_ROWS - fixed))
   (( room >= 0 )) || room=0
@@ -370,6 +457,7 @@ ui_render() {
     if (( n_asked > 0 )); then
       printf '\n'; used=$((used + 1))
       while IFS= read -r line; do printf '%*s\033[1m%s\033[0m\n' "$UI_MARGIN" '' "$line"; used=$((used + 1)); done <<< "$asked"
+      if (( n_hint )); then printf '%*s\033[2m%s\033[0m\n' "$UI_MARGIN" '' "$UI_HINT"; used=$((used + 1)); fi
     fi
   } >&8
   UI_FREE=$((UI_ROWS - used))
@@ -435,6 +523,7 @@ ui_gum_choose() {
     need=$((count + 2))
     (( need <= 8 )) || need=8
     if ui_fullscreen; then
+      ui_hint
       ui_render "$question" "$need"
       if (( count + 2 <= UI_FREE )); then height=$count; else height=$((UI_FREE - 4)); fi
     else
@@ -452,30 +541,227 @@ ui_gum_choose() {
     [[ -z $selected ]] || args+=(--selected "$selected")
     if ui_gum "${args[@]}" "$@"; then break; fi
   done
-  [[ $UI_GUM_STATUS -eq 0 ]] || ui_cancelled
-  UI_PAGE_PROMPTED=1 UI_PAGE_MESSAGE=""
+  ui_gum_outcome
 }
+
+# ui_gum_outcome: after a gum prompt: Esc (status 1) is Back where Back is
+# allowed; any other failure, and Esc where it is not, cancels setup. (A gum
+# that fails by itself also exits 1, but it fails on the first prompt, where
+# there is nothing to go back to, so it still cancels.)
+ui_gum_outcome() {
+  case $UI_GUM_STATUS in
+    0) return 0 ;;
+    1) if ui_back_allowed; then ui_back "$UI_PROMPT_KEY"; fi ;;
+  esac
+  ui_cancelled
+}
+
+# ui_hint: UI_HINT becomes the keys line full-screen prompts show while the
+# wizard records answers.
+ui_hint() {
+  UI_HINT=""
+  [[ $UI_HISTORY -eq 1 ]] || return 0
+  if ui_back_allowed; then UI_HINT="Esc goes back    Ctrl+C quits"; else UI_HINT="Ctrl+C quits"; fi
+}
+
+# ui_plain_back_hint: what a plain prompt adds when Back is allowed.
+ui_plain_back_hint() {
+  if ui_back_allowed; then printf ' (< to go back)'; fi
+}
+
+# --- History: Back (see UI_HISTORY above)
+
+# ui_history_begin <dir>: start recording; the answers recorded so far are
+# this pass's replay queue.
+ui_history_begin() {
+  local line
+  UI_HIST_DIR=$1
+  UI_HISTORY=1 UI_HISTORY_SKIP=0 UI_REPLAY_POS=0 UI_REPLAY_COUNT=0 UI_PASS_LIVE=0
+  UI_REPLAY_LINES=()
+  while IFS= read -r line || [[ -n $line ]]; do
+    UI_REPLAY_LINES[UI_REPLAY_COUNT]=$line
+    UI_REPLAY_COUNT=$((UI_REPLAY_COUNT + 1))
+  done < "$UI_HIST_DIR/answers" || die "setup could not read its answers in $UI_HIST_DIR"
+  UI_REPLAY_INITIAL=$UI_REPLAY_COUNT
+}
+
+# ui_history_stop: the plan is decided: nothing more is recorded, nothing
+# goes back, and setup_main starts no other pass.
+ui_history_stop() {
+  [[ $UI_HISTORY -eq 1 ]] || return 0
+  UI_HISTORY=0
+  : > "$UI_HIST_DIR/applying" || die "setup could not write to $UI_HIST_DIR"
+}
+
+# ui_history_key <question>: the key of a question on the current page.
+ui_history_key() { printf '%s|%s' "$UI_PAGE_TITLE" "$1"; }
+
+# ui_entry_key <entry>: an answers line's key.
+ui_entry_key() {
+  local rest=${1#*"$UI_TAB"}
+  printf '%s' "${rest%%"$UI_TAB"*}"
+}
+
+# ui_history_recording: answers are recorded and replayed (not on the review
+# page, whose choice is never replayed).
+ui_history_recording() { [[ $UI_HISTORY -eq 1 && $UI_HISTORY_SKIP -eq 0 ]]; }
+
+# ui_back_allowed: Back has somewhere to go: setup records answers and this
+# is not the first question.
+ui_back_allowed() { [[ $UI_HISTORY -eq 1 ]] && (( UI_REPLAY_POS > 0 )); }
+
+# ui_back <key>: go back from the prompt with that key: end the pass for
+# setup_main to start the next. The screen stays up for the next pass.
+ui_back() {
+  printf '%s\n' "$1" > "$UI_HIST_DIR/back" || die "setup could not write to $UI_HIST_DIR"
+  UI_SCREEN=0
+  exit "$UI_BACK_STATUS"
+}
+
+# ui_history_replay <kind> <key>: UI_HIST_VALUE becomes the next recorded
+# answer when it is for this question; a recorded answer for another
+# question means setup now asks differently (ui_history_diverge).
+ui_history_replay() {
+  local line kind key
+  ui_history_recording || return 1
+  (( UI_REPLAY_POS < UI_REPLAY_COUNT )) || return 1
+  line=${UI_REPLAY_LINES[UI_REPLAY_POS]}
+  kind=${line%%"$UI_TAB"*}
+  key=$(ui_entry_key "$line")
+  if [[ $kind == "$1" && $key == "$2" ]]; then
+    UI_HIST_VALUE=${line#*"$UI_TAB"}
+    UI_HIST_VALUE=${UI_HIST_VALUE#*"$UI_TAB"}
+    UI_REPLAY_POS=$((UI_REPLAY_POS + 1))
+    return 0
+  fi
+  ui_history_diverge
+  return 1
+}
+
+# ui_history_reject: the answer just replayed no longer fits (its option is
+# gone): ask live from it.
+ui_history_reject() {
+  UI_REPLAY_POS=$((UI_REPLAY_POS - 1))
+  ui_history_diverge
+}
+
+# ui_history_truncate: forget the recorded answers from the replay position.
+ui_history_truncate() {
+  local i=0
+  : > "$UI_HIST_DIR/answers.new" || die "setup could not write to $UI_HIST_DIR"
+  while (( i < UI_REPLAY_POS )); do
+    printf '%s\n' "${UI_REPLAY_LINES[i]}" >> "$UI_HIST_DIR/answers.new" || die "setup could not write to $UI_HIST_DIR"
+    i=$((i + 1))
+  done
+  mv -f "$UI_HIST_DIR/answers.new" "$UI_HIST_DIR/answers" || die "setup could not write to $UI_HIST_DIR"
+  UI_REPLAY_COUNT=$UI_REPLAY_POS
+}
+
+ui_history_diverge() {
+  ui_history_truncate
+  UI_PAGE_MESSAGE="Something changed since you answered this (a key was added or removed, say), so setup asks again from here."
+}
+
+# ui_history_record <kind> <key> <value>: record a live answer.
+ui_history_record() {
+  ui_history_recording || return 0
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$UI_HIST_DIR/answers" || die "setup could not record an answer in $UI_HIST_DIR"
+  UI_REPLAY_LINES[UI_REPLAY_COUNT]="$1$UI_TAB$2$UI_TAB$3"
+  UI_REPLAY_COUNT=$((UI_REPLAY_COUNT + 1))
+  UI_REPLAY_POS=$UI_REPLAY_COUNT
+  UI_PASS_LIVE=1
+}
+
+# ui_answered <kind> <key> <value>: a live answer: record it; the page moves on.
+ui_answered() {
+  ui_history_record "$@"
+  ui_prompted
+}
+
+# ui_history_remembered <kind> <key>: UI_HIST_VALUE becomes the answer last
+# given to this question before going back past it, if any: the default.
+ui_history_remembered() {
+  local line found=1
+  UI_HIST_VALUE=""
+  ui_history_recording && [[ -s $UI_HIST_DIR/remembered ]] || return 1
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ ${line%%"$UI_TAB"*} == "$1" && $(ui_entry_key "$line") == "$2" ]]; then
+      UI_HIST_VALUE=${line#*"$UI_TAB"}
+      UI_HIST_VALUE=${UI_HIST_VALUE#*"$UI_TAB"}
+      found=0
+    fi
+  done < "$UI_HIST_DIR/remembered"
+  return "$found"
+}
+
+# ui_history_wizard_done: the wizard's questions are over: forget recorded
+# answers it no longer asked for. A pass after a Back that asked nothing live
+# (the question gone back to is no longer asked) goes back once more.
+ui_history_wizard_done() {
+  ui_history_recording || return 0
+  if (( UI_REPLAY_POS < UI_REPLAY_COUNT )); then ui_history_truncate; fi
+  if (( UI_REPLAY_INITIAL > 0 && UI_PASS_LIVE == 0 )); then ui_back ""; fi
+}
+
+# ui_history_back <dir>: in setup_main, after a pass went back from the
+# question named in <dir>/back: drop that question's answers (the ones it
+# rejected and asked again for), then the answer before it with its own
+# rejected ones. That answer is remembered: it is the default when the
+# question is asked again.
+ui_history_back() {
+  local dir=$1 current line key n=0 i=0
+  local -a lines=()
+  current=$(cat "$dir/back") || die "setup could not read $dir/back"
+  while IFS= read -r line || [[ -n $line ]]; do
+    lines[n]=$line
+    n=$((n + 1))
+  done < "$dir/answers" || die "setup could not read its answers in $dir"
+  if [[ -n $current ]]; then
+    while (( n > 0 )) && [[ $(ui_entry_key "${lines[n - 1]}") == "$current" ]]; do n=$((n - 1)); done
+  fi
+  if (( n > 0 )); then
+    key=$(ui_entry_key "${lines[n - 1]}")
+    printf '%s\n' "${lines[n - 1]}" >> "$dir/remembered" || die "setup could not write to $dir"
+    while (( n > 0 )) && [[ $(ui_entry_key "${lines[n - 1]}") == "$key" ]]; do n=$((n - 1)); done
+  fi
+  : > "$dir/answers.new" || die "setup could not write to $dir"
+  while (( i < n )); do
+    printf '%s\n' "${lines[i]}" >> "$dir/answers.new" || die "setup could not write to $dir"
+    i=$((i + 1))
+  done
+  mv -f "$dir/answers.new" "$dir/answers" || die "setup could not write to $dir"
+  rm -f "$dir/back"
+}
+
 
 # --- Pages
 
 # ui_header <title> <subtitle>: the wizard's title, and its first page.
 ui_header() {
-  if [[ $UI_MODE == gum ]]; then
-    UI_APP_TITLE=$1
+  UI_APP_TITLE=$1
+  if [[ $UI_MODE == gum ]] || ui_history_recording; then
     ui_page "Set up this machine"
     UI_PAGE_NOTES=$2
+    UI_PAGE_WELCOME=1
   else
     printf '\n%s\n%s\n%s\n' "${UI_BOLD}== $1 ==${UI_RESET}" "$2" "" >&2
   fi
 }
 
-# ui_section <title>: a new page (inline: a heading).
+# ui_section <title>: a new page. Plain, while setup records answers, it is
+# printed with its notes before its first live question (a page whose
+# answers are replayed prints nothing); otherwise at once, as is a heading
+# inline.
 ui_section() {
-  if ui_fullscreen; then
+  if ui_fullscreen || { [[ $UI_MODE != gum ]] && ui_history_recording; }; then
     ui_page "$1"
   elif [[ $UI_MODE == gum ]]; then
+    ui_page "$1"
+    UI_PAGE_PRINTED=1
     printf '\n\033[1;%sm%s\033[0m\n' "$(ui_sgr "$UI_ACCENT")" "$1" >&2
   else
+    ui_page "$1"
+    UI_PAGE_PRINTED=1
     printf '\n%s\n' "${UI_BOLD}-- $1 --${UI_RESET}" >&2
   fi
 }
@@ -483,7 +769,7 @@ ui_section() {
 # ui_note <text>: an explanation on the page. After the page's first prompt,
 # it is a hint for the next one (shown once, highlighted).
 ui_note() {
-  if ui_fullscreen; then
+  if ui_fullscreen || { [[ $UI_MODE != gum ]] && ui_history_recording; }; then
     if [[ $UI_PAGE_PROMPTED -eq 0 ]]; then
       UI_PAGE_NOTES="${UI_PAGE_NOTES:+$UI_PAGE_NOTES$UI_NL$UI_NL}$1"
     else
@@ -497,34 +783,70 @@ ui_note() {
   fi
 }
 
+# ui_plain_flush: before a live plain prompt: the page, if not printed yet,
+# and the hint for this prompt.
+ui_plain_flush() {
+  ui_history_recording || return 0
+  if [[ $UI_PAGE_PRINTED -eq 0 ]]; then
+    UI_PAGE_PRINTED=1
+    if [[ $UI_PAGE_WELCOME -eq 1 ]]; then
+      printf '\n%s\n' "${UI_BOLD}== $UI_APP_TITLE ==${UI_RESET}" >&2
+    else
+      printf '\n%s\n' "${UI_BOLD}-- $UI_PAGE_TITLE --${UI_RESET}" >&2
+    fi
+    [[ -z $UI_PAGE_NOTES ]] || printf '%s\n' "$UI_PAGE_NOTES" | fold -s -w 78 >&2
+  fi
+  [[ -z $UI_PAGE_MESSAGE ]] || printf '%s\n' "$UI_PAGE_MESSAGE" | fold -s -w 78 >&2
+}
+
 # ui_status <title> <text>: a page with nothing to answer, shown while setup
-# works (inline and plain: a heading and the text).
+# works (inline and plain: a heading and the text, at once).
 ui_status() {
-  ui_section "$1"
-  ui_note "$2"
-  if ui_fullscreen; then ui_render "" 0; fi
+  if ui_fullscreen; then
+    ui_page "$1"
+    UI_PAGE_NOTES=$2
+    UI_HINT=""
+    ui_render "" 0
+  else
+    ui_page "$1"
+    UI_PAGE_PRINTED=1
+    if [[ $UI_MODE == gum ]]; then
+      printf '\n\033[1;%sm%s\033[0m\n' "$(ui_sgr "$UI_ACCENT")" "$1" >&2
+      ui_size
+      ui_wrap $((UI_COLS > 82 ? 80 : (UI_COLS > 12 ? UI_COLS - 2 : 10))) "$2" >&2
+    else
+      printf '\n%s\n' "${UI_BOLD}-- $1 --${UI_RESET}" >&2
+      printf '%s\n' "$2" | fold -s -w 78 >&2
+    fi
+  fi
 }
 
 # ui_review <title> <summary file> <full file> <question> [warnings]: show a
 # summary and ask whether to go ahead; succeeds for yes. The summary is a
 # line of prose, a blank line, then preformatted lines; the warnings, one per
-# line, are highlighted. Full screen, the full text opens in
-# a pager on request, and the wizard leaves the screen either way, the
-# summary staying on the normal screen as a record. Plain and inline, the
-# full text is printed on stdout before the question.
+# line, are highlighted. Full screen, the full text opens in a pager on
+# request, and the wizard leaves the screen either way, the summary staying
+# on the normal screen as a record. Plain and inline, the full text is
+# printed on stdout before the question. Back returns to the last question;
+# the choice itself is never recorded or replayed, and either way it ends
+# the history (ui_history_stop).
 ui_review() {
-  local title=$1 summary=$2 full=$3 question=$4 warnings=${5:-}
+  local title=$1 summary=$2 full=$3 question=$4 warnings=${5:-} answer=0
   if ! ui_fullscreen; then
     cat "$full"
     printf '\n'
-    ui_confirm "$question" yes
-    return
+    UI_HISTORY_SKIP=1
+    ui_confirm "$question" yes || answer=1
+    UI_HISTORY_SKIP=0
+    ui_history_stop
+    return "$answer"
   fi
   while :; do
     ui_page "$title"
     UI_PAGE_NOTES="$(sed -n '1p' "$summary")"$'\n\n'"Nothing has changed yet. The full plan lists every package, file, release and root action."
     UI_PAGE_BLOCK=$(sed '1,2d' "$summary")
     UI_PAGE_MESSAGE=$warnings
+    UI_PROMPT_KEY="review"
     ui_gum_choose "$question" 1 "Yes: apply it" "Yes: apply it" "Read the full plan" "No: change nothing"
     case $(sed -n '1p' "$UI_GUM_FILE") in
       "Read the full plan")
@@ -535,11 +857,13 @@ ui_review() {
           "$(cat "$full")" <&7 >&8 2>&8 || true
         printf '\033[?1049h' >&8 ;;
       "Yes: apply it")
+        ui_history_stop
         ui_screen_end
         printf '\n%s\n' "${UI_BOLD}$UI_APP_TITLE: applying this plan${UI_RESET}"
         cat "$summary"
         return 0 ;;
       *)
+        ui_history_stop
         ui_screen_end
         return 1 ;;
     esac
@@ -547,21 +871,38 @@ ui_review() {
 }
 
 # --- Prompts
+#
+# Each prompt first takes its recorded answer when setup replays one, then
+# defaults to the answer remembered from before a Back, then asks.
 
 # ui_choose <prompt> <default index> <option...>: UI_INDEX (0-based) and
 # UI_REPLY (the option) become the choice.
 ui_choose() {
-  local prompt=$1 default=$2 out i
+  local prompt=$1 default=$2 out i key
   shift 2
   local -a options=("$@")
+  key=$(ui_history_key "$prompt")
+  if ui_history_replay choose "$key"; then
+    for i in "${!options[@]}"; do
+      if [[ ${options[i]} == "$UI_HIST_VALUE" ]]; then UI_INDEX=$i UI_REPLY=${options[i]}; ui_prompted; return 0; fi
+    done
+    ui_history_reject
+  fi
+  if ui_history_remembered choose "$key"; then
+    for i in "${!options[@]}"; do
+      [[ ${options[i]} != "$UI_HIST_VALUE" ]] || default=$i
+    done
+  fi
+  UI_PROMPT_KEY=$key
   if [[ $UI_MODE == gum ]]; then
     ui_gum_choose "$prompt" 1 "${options[default]}" "${options[@]}"
     out=$(sed -n '1p' "$UI_GUM_FILE")
     for i in "${!options[@]}"; do
-      if [[ ${options[i]} == "$out" ]]; then UI_INDEX=$i; UI_REPLY=$out; return 0; fi
+      if [[ ${options[i]} == "$out" ]]; then UI_INDEX=$i UI_REPLY=$out; ui_answered choose "$key" "$out"; return 0; fi
     done
     ui_cancelled
   fi
+  ui_plain_flush
   printf '\n%s\n' "${UI_BOLD}$prompt${UI_RESET}" >&2
   for i in "${!options[@]}"; do
     if (( i == default )); then
@@ -571,8 +912,9 @@ ui_choose() {
     fi
   done
   while :; do
-    printf 'Choose 1-%d [%d]: ' "${#options[@]}" "$((default + 1))" >&2
+    printf 'Choose 1-%d [%d]%s: ' "${#options[@]}" "$((default + 1))" "$(ui_plain_back_hint)" >&2
     ui_read_line
+    if [[ $UI_LINE == '<' ]] && ui_back_allowed; then ui_back "$key"; fi
     if [[ -z $UI_LINE ]]; then
       UI_INDEX=$default
     elif [[ $UI_LINE =~ ^[0-9]{1,4}$ ]] && (( 10#$UI_LINE >= 1 && 10#$UI_LINE <= ${#options[@]} )); then
@@ -582,17 +924,59 @@ ui_choose() {
       continue
     fi
     UI_REPLY=${options[UI_INDEX]}
+    ui_answered choose "$key" "$UI_REPLY"
     return 0
   done
+}
+
+# ui_multi_match <value> <option...>: UI_REPLY becomes the indices of the
+# options a recorded multi answer (texts joined by UI_US) names; fails when
+# it names an option that is not there.
+ui_multi_match() {
+  local value=$1 rest wanted=0 matched=0 i=0 option
+  shift
+  UI_REPLY=""
+  if [[ -n $value ]]; then
+    rest="$value$UI_US"
+    while [[ -n $rest ]]; do wanted=$((wanted + 1)); rest=${rest#*"$UI_US"}; done
+  fi
+  for option in "$@"; do
+    if [[ "$UI_US$value$UI_US" == *"$UI_US$option$UI_US"* ]]; then
+      UI_REPLY="${UI_REPLY:+$UI_REPLY }$i"
+      matched=$((matched + 1))
+    fi
+    i=$((i + 1))
+  done
+  (( matched == wanted ))
+}
+
+# ui_multi_value <indices> <option...>: the chosen options' texts, joined by
+# UI_US, for the history.
+ui_multi_value() {
+  local indices=$1 value="" i
+  shift
+  local -a options=("$@")
+  for i in $indices; do value="${value:+$value$UI_US}${options[i]}"; done
+  printf '%s' "$value"
 }
 
 # ui_multi <prompt> <default indices (space-separated)> <option...>: UI_REPLY
 # becomes the chosen indices, space-separated, in option order (empty for
 # none). Options must not contain commas (gum's --selected splits on them).
 ui_multi() {
-  local prompt=$1 defaults=$2 i token selected="" line bad
+  local prompt=$1 defaults=$2 i token selected="" line bad key
   shift 2
   local -a options=("$@") flags=()
+  key=$(ui_history_key "$prompt")
+  if ui_history_replay multi "$key"; then
+    if ui_multi_match "$UI_HIST_VALUE" "${options[@]}"; then ui_prompted; return 0; fi
+    ui_history_reject
+  fi
+  if ui_history_remembered multi "$key"; then
+    ui_multi_match "$UI_HIST_VALUE" "${options[@]}" || true
+    defaults=$UI_REPLY
+  fi
+  UI_PROMPT_KEY=$key
   for i in "${!options[@]}"; do
     flags[i]=0
     [[ " $defaults " != *" $i "* ]] || flags[i]=1
@@ -608,16 +992,19 @@ ui_multi() {
         if [[ $line == "${options[i]}" ]]; then UI_REPLY="${UI_REPLY:+$UI_REPLY }$i"; break; fi
       done < "$UI_GUM_FILE"
     done
+    ui_answered multi "$key" "$(ui_multi_value "$UI_REPLY" "${options[@]}")"
     return 0
   fi
+  ui_plain_flush
   while :; do
     printf '\n%s\n' "${UI_BOLD}$prompt${UI_RESET}" >&2
     for i in "${!options[@]}"; do
       if [[ ${flags[i]} -eq 1 ]]; then token='[x]'; else token='[ ]'; fi
       printf '  %2d) %s %s\n' "$((i + 1))" "$token" "${options[i]}" >&2
     done
-    printf 'Numbers to toggle (e.g. "2 5"), "all", "none", or Enter to accept: ' >&2
+    printf 'Numbers to toggle (e.g. "2 5"), "all", "none", or Enter to accept%s: ' "$(ui_plain_back_hint)" >&2
     ui_read_line
+    if [[ $UI_LINE == '<' ]] && ui_back_allowed; then ui_back "$key"; fi
     [[ -n ${UI_LINE//[[:space:]]/} ]] || break
     bad=""
     for token in $UI_LINE; do
@@ -639,24 +1026,41 @@ ui_multi() {
   for i in "${!options[@]}"; do
     [[ ${flags[i]} -eq 0 ]] || UI_REPLY="${UI_REPLY:+$UI_REPLY }$i"
   done
+  ui_answered multi "$key" "$(ui_multi_value "$UI_REPLY" "${options[@]}")"
 }
 
 # ui_confirm <prompt> <yes|no default>: succeeds for yes. With gum, a Yes/No
 # list like every other question.
 ui_confirm() {
-  local prompt=$1 default=$2
+  local prompt=$1 default=$2 key
+  key=$(ui_history_key "$prompt")
+  if ui_history_replay confirm "$key"; then
+    if [[ $UI_HIST_VALUE == yes || $UI_HIST_VALUE == no ]]; then
+      ui_prompted
+      [[ $UI_HIST_VALUE == yes ]]
+      return
+    fi
+    ui_history_reject
+  fi
+  if ui_history_remembered confirm "$key" && [[ $UI_HIST_VALUE == yes || $UI_HIST_VALUE == no ]]; then
+    default=$UI_HIST_VALUE
+  fi
+  UI_PROMPT_KEY=$key
   if [[ $UI_MODE == gum ]]; then
     if [[ $default == yes ]]; then ui_gum_choose "$prompt" 1 Yes Yes No; else ui_gum_choose "$prompt" 1 No Yes No; fi
-    [[ $(sed -n '1p' "$UI_GUM_FILE") == Yes ]]
-    return
+    if [[ $(sed -n '1p' "$UI_GUM_FILE") == Yes ]]; then ui_answered confirm "$key" yes; return 0; fi
+    ui_answered confirm "$key" no
+    return 1
   fi
+  ui_plain_flush
   while :; do
-    if [[ $default == yes ]]; then printf '%s [Y/n]: ' "$prompt" >&2; else printf '%s [y/N]: ' "$prompt" >&2; fi
+    if [[ $default == yes ]]; then printf '%s [Y/n]%s: ' "$prompt" "$(ui_plain_back_hint)" >&2; else printf '%s [y/N]%s: ' "$prompt" "$(ui_plain_back_hint)" >&2; fi
     ui_read_line
+    if [[ $UI_LINE == '<' ]] && ui_back_allowed; then ui_back "$key"; fi
     case $UI_LINE in
-      '') if [[ $default == yes ]]; then return 0; fi; return 1 ;;
-      y|Y|yes|Yes|YES) return 0 ;;
-      n|N|no|No|NO) return 1 ;;
+      '') if [[ $default == yes ]]; then ui_answered confirm "$key" yes; return 0; fi; ui_answered confirm "$key" no; return 1 ;;
+      y|Y|yes|Yes|YES) ui_answered confirm "$key" yes; return 0 ;;
+      n|N|no|No|NO) ui_answered confirm "$key" no; return 1 ;;
       *) printf 'Please answer y or n.\n' >&2 ;;
     esac
   done
@@ -665,10 +1069,19 @@ ui_confirm() {
 # ui_input <prompt> <default>: UI_REPLY becomes the answer (the default for
 # an empty one).
 ui_input() {
-  local prompt=$1 default=$2 width
+  local prompt=$1 default=$2 width key
+  key=$(ui_history_key "$prompt")
+  if ui_history_replay input "$key"; then
+    UI_REPLY=$UI_HIST_VALUE
+    ui_prompted
+    return 0
+  fi
+  if ui_history_remembered input "$key"; then default=$UI_HIST_VALUE; fi
+  UI_PROMPT_KEY=$key
   if [[ $UI_MODE == gum ]]; then
     while :; do
       if ui_fullscreen; then
+        ui_hint
         ui_render "$prompt" 3
         width=$((UI_WIDTH - 2))
       else
@@ -680,13 +1093,16 @@ ui_input() {
         break
       fi
     done
-    [[ $UI_GUM_STATUS -eq 0 ]] || ui_cancelled
-    UI_PAGE_PROMPTED=1 UI_PAGE_MESSAGE=""
+    ui_gum_outcome
     UI_REPLY=$(cat "$UI_GUM_FILE")
     UI_REPLY=${UI_REPLY:-$default}
+    ui_answered input "$key" "$UI_REPLY"
     return 0
   fi
-  if [[ -n $default ]]; then printf '%s [%s]: ' "$prompt" "$default" >&2; else printf '%s: ' "$prompt" >&2; fi
+  ui_plain_flush
+  if [[ -n $default ]]; then printf '%s [%s]%s: ' "$prompt" "$default" "$(ui_plain_back_hint)" >&2; else printf '%s%s: ' "$prompt" "$(ui_plain_back_hint)" >&2; fi
   ui_read_line
+  if [[ $UI_LINE == '<' ]] && ui_back_allowed; then ui_back "$key"; fi
   UI_REPLY=${UI_LINE:-$default}
+  ui_answered input "$key" "$UI_REPLY"
 }

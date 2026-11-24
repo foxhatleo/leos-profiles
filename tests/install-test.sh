@@ -4390,9 +4390,9 @@ test_plain_prompts_validate_and_stop_at_end_of_input() {
 
 # gum_stub <dir> <answer...>: gum mode with a stand-in gum. Each call is
 # recorded in <dir>/calls (one argument per line, then "--end--") and gets
-# the next answer: printed as the choice, or WINCH (the terminal is resized
+# the next answer: printed as the choice, WINCH (the terminal is resized
 # while the prompt is open: signal the installer's shell and hang until
-# stopped).
+# stopped), or ESC (gum's status for Esc).
 gum_stub() {
   local dir=$1
   shift
@@ -4402,6 +4402,7 @@ gum_stub() {
 calls=$(grep -c '^--end--$' "$GUM_STUB_DIR/calls")
 answer=$(sed -n "${calls}p" "$GUM_STUB_DIR/answers")
 if [[ $answer == WINCH ]]; then kill -WINCH "$PPID"; sleep 5; exit 0; fi
+if [[ $answer == ESC ]]; then exit 1; fi
 printf '%s\n' "$answer"
 STUB
   chmod +x "$dir/gum"
@@ -4593,6 +4594,160 @@ $out"
   out=$(export UI_TTY=$temp/no-terminal; run_cli "$checkout" "$temp/home" setup < /dev/null 2>&1) || status=$?
   assert_equals "$status" 1
   assert_contains "$out" "apply --yes"
+}
+
+# Back ("<" in plain prompts) returns to the previous question with its
+# answer as the default, from a later page and from the review page; the
+# plan reflects the answers given after going back, and the run's status is
+# the pass's own.
+test_setup_back_returns_to_the_previous_question() {
+  local temp checkout answers out status=0 shown ran
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  checkout="$temp/profile"
+  make_fixture_checkout "$checkout"
+  answers="$temp/answers"
+  # "<" on the first question is not Back (there is nothing before it).
+  # Customize: zsh-config only; at Package groups go back and add
+  # default-shell to the remembered zsh-config; then groups none, no full
+  # upgrade, login shell No, keep the release age, no keys; at the review go
+  # back to GPG (its remembered Skip is the default), then approve.
+  printf '%s\n' '<' 2 none 12 '' '<' 13 '' none '' n 3 '' '' '' '<' '' y > "$answers"
+  out=$(export UI_TTY=$answers UI_PLAIN=1; run_cli "$checkout" "$temp/home" setup --dry-run < /dev/null 2>&1) || status=$?
+  assert_equals "$status" 0
+  assert_contains "$out" "Please enter a number from 1 to 2"
+  [[ $(grep -c -- '-- Components --' <<< "$out") -eq 2 ]] || fail "Back did not ask Components again: $out"
+  # The question gone back to shows the answer given before.
+  assert_contains "$(awk '/-- Components --/ { n++ } n == 2' <<< "$out")" "[x] zsh-config"
+  [[ $(grep -c -- '-- Git commit signing (GPG) --' <<< "$out") -eq 2 ]] || fail "Back from the review did not ask GPG again: $out"
+  [[ $(grep -c '^Summary' <<< "$out") -eq 2 ]] || fail "the plan was not shown again after Back: $out"
+  assert_contains "$out" "(< to go back)"
+  assert_contains "$out" "components: packages (implied), zsh-config, default-shell"
+  assert_contains "$out" "default-shell: no"
+  shown=$(awk '/^Summary/ { s = 1; next } s && /^  (to do|done|skipped) / { print $NF }' <<< "$out" | sort -u | paste -sd, -)
+  # (default-shell with "No" says "Skipping default shell", so only Running.)
+  ran=$(sed -En 's/^(.*: )?==> Running ([a-z-]+).*/\2/p' <<< "$out" | sort -u | paste -sd, -)
+  [[ $shown == default-shell,packages,zsh-config && $ran == "$shown" ]] ||
+    fail "shown '$shown' / ran '$ran' do not match the answers after Back; setup printed:
+$out"
+  # A pass that ends early keeps its status: end of input cancels with 130,
+  # with no "unexpected failure" from the supervising shell.
+  printf '%s\n' 2 > "$answers"
+  status=0
+  out=$(export UI_TTY=$answers UI_PLAIN=1; run_cli "$checkout" "$temp/home" setup --dry-run < /dev/null 2>&1) || status=$?
+  assert_equals "$status" 130
+  [[ $out != *"unexpected failure"* ]] || fail "the supervisor reported the pass's exit: $out"
+}
+
+# A pass runs with errexit on (a subshell keeps the parent's `set +e`, which
+# setup_main needs around it), and a failure in it ends setup with the
+# failure's status and its location.
+test_setup_pass_runs_with_errexit() {
+  local temp status=0 out
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  : > "$temp/answers"
+  # Not `out=$(...) || status=$?`: in a conditional context bash ignores
+  # errexit even where a subshell sets it again (main calls setup_main as a
+  # plain command).
+  set +e
+  out=$( (
+    TEMP_PATHS=()
+    UI_TTY="$temp/answers"
+    UI_PLAIN=1
+    setup_wizard() {
+      printf '%s' "$-" > "$temp/flags"
+      return 4
+    }
+    setup_main
+  ) 2>&1)
+  status=$?
+  set -e
+  [[ -e $temp/flags ]] || fail "the wizard was not reached ($status): $out"
+  assert_contains "$(cat "$temp/flags")" e
+  assert_equals "$status" 4
+  assert_contains "$out" "unexpected failure (status 4)"
+}
+
+# Back's history: Back from a question that was asked again (a rejected
+# answer) skips its rejected answers and the answer before them, which is
+# remembered as the default; an answer whose option is gone is asked again
+# live with a note.
+test_setup_back_history_trims_and_remembers() {
+  local temp dir
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  dir="$temp/history"
+  mkdir "$dir"
+  : > "$dir/remembered"
+  printf 'choose\tSet up this machine|Mode\tCustomize\nchoose\tNerd Font|Install?\tYes\ninput\tNerd Font|Font\ta b\ninput\tNerd Font|Font\tc d\n' > "$dir/answers"
+  printf 'Nerd Font|Font\n' > "$dir/back"
+  ui_history_back "$dir"
+  assert_equals "$(cat "$dir/answers")" $'choose\tSet up this machine|Mode\tCustomize'
+  assert_equals "$(cat "$dir/remembered")" $'choose\tNerd Font|Install?\tYes'
+  [[ ! -e $dir/back ]] || fail "the Back marker was kept"
+  (
+    setup_answers ''
+    ui_history_begin "$dir"
+    ui_page "Set up this machine"
+    ui_choose "Mode" 0 Recommended Customize
+    assert_equals "$UI_REPLY" Customize
+    ui_page "Nerd Font"
+    ui_choose "Install?" 0 Auto Yes No
+    assert_equals "$UI_REPLY" Yes
+    assert_equals "$(wc -l < "$dir/answers" | tr -d ' ')" 2
+  ) 2>/dev/null || fail "the remembered answer was not the default"
+  # The recorded option is gone: asked live, from that point on.
+  printf 'choose\tSSH key for GitHub|Which key?\t/old/key\nchoose\tSSH key for GitHub|Next\tA\n' > "$dir/answers"
+  : > "$dir/remembered"
+  (
+    setup_answers 1
+    ui_history_begin "$dir"
+    ui_page "SSH key for GitHub"
+    ui_choose "Which key?" 0 /new/key
+    assert_equals "$UI_REPLY" /new/key
+    assert_contains "$UI_PAGE_MESSAGE$(cat "$dir/answers")" "/new/key"
+    assert_equals "$(wc -l < "$dir/answers" | tr -d ' ')" 1
+  ) 2>"$temp/out" || fail "a stale answer was replayed: $(cat "$temp/out")"
+  assert_contains "$(cat "$temp/out")" "Something changed since you answered this"
+}
+
+# With gum, Esc goes back where there is a question to go back to (ending the
+# pass with UI_BACK_STATUS and naming the question), and quits on the first.
+test_gum_escape_goes_back() {
+  local temp status=0
+  temp=$(mktemp -d)
+  track_temp "$temp"
+  mkdir "$temp/history"
+  : > "$temp/history/remembered"
+  printf 'choose\tSet up this machine|Mode\tCustomize\n' > "$temp/history/answers"
+  (
+    TEMP_PATHS=()
+    gum_stub "$temp" ESC
+    ui_history_begin "$temp/history"
+    ui_page "Set up this machine"
+    ui_choose "Mode" 0 Recommended Customize
+    ui_section "Components"
+    ui_choose "Which?" 0 a b
+    fail "Esc did not go back"
+  ) 2>"$temp/screen" || status=$?
+  assert_equals "$status" "$UI_BACK_STATUS"
+  assert_equals "$(cat "$temp/history/back")" "Components|Which?"
+  # Only the live prompt drew a page, and it showed the keys.
+  assert_equals "$(grep -c '^--end--$' "$temp/calls")" 1
+  assert_contains "$(cat "$temp/screen")" "Esc goes back"
+  : > "$temp/history/answers"
+  rm -f "$temp/history/back"
+  status=0
+  (
+    TEMP_PATHS=()
+    gum_stub "$temp" ESC
+    ui_history_begin "$temp/history"
+    ui_page "Set up this machine"
+    ui_choose "Mode" 0 Recommended Customize
+  ) >/dev/null 2>&1 || status=$?
+  assert_equals "$status" 130
+  [[ ! -e $temp/history/back ]] || fail "Esc on the first question went back"
 }
 
 # At a terminal in setup, a credential manual action waits ("done? check
@@ -5176,6 +5331,10 @@ TESTS=(
   test_gum_screen_replays_the_run_output_when_it_ends
   test_render_plan_shows_every_record_type
   test_setup_applies_the_plan_it_showed
+  test_setup_back_returns_to_the_previous_question
+  test_setup_pass_runs_with_errexit
+  test_setup_back_history_trims_and_remembers
+  test_gum_escape_goes_back
   test_setup_waits_for_manual_actions_at_a_terminal
   test_preflight_never_stops_setup_with_run_in_terminal
   test_bare_install_sh_runs_setup_lean_profile_or_usage

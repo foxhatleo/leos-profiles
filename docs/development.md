@@ -555,7 +555,8 @@ terminal: `UI_TTY` (default `/dev/tty`; tests point it at a file of answers)
 must open, and when it is `/dev/tty` and stdin is not a terminal, stdin is
 moved to it, so sudo, ssh-keygen, gpg and gh can prompt and preflight's
 `run-in-terminal` stop never fires inside setup (preflight dies instead,
-which cannot happen at a terminal). Then:
+which cannot happen at a terminal). It runs step 1 and takes the screen,
+then runs steps 2 to 4 as passes (`setup_pass`, see "Back" below). Then:
 
 1. `detect_os`, `ui_init` (installer/ui.sh): fd 7 reads `UI_TTY`; gum is
    used when fd 7 and stderr are terminals, `TERM` is not `dumb`, `--plain`
@@ -592,7 +593,7 @@ which cannot happen at a terminal). Then:
    screen, the counts, summary and warnings on a page, the whole plan in
    `gum pager` on request, and the wizard leaves the screen with the summary
    printed as a record of what is applied.
-4. `apply_selection` in the same process, with `COMMAND=setup` (it writes
+4. `apply_selection` in the same pass, with `COMMAND=setup` (it writes
    the profile as apply does).
 
 The UI primitives (`ui_choose`, `ui_multi`, `ui_confirm`, `ui_input`,
@@ -625,6 +626,53 @@ replays the logs; `ui_review`, `ui_cancelled` and `cleanup` (so any exit,
 including `die`) call it, and only the shell that took the screen gives it
 back. After that, prompts (the manual-action waits during apply) are drawn
 inline, so the apply log keeps its context.
+
+### Back
+
+Esc in a gum prompt (gum exits 1; Ctrl+C exits 130) and `<` in a plain one
+go back to the previous question. The wizard's stages set globals as they go
+(`read_profile` alone sets most of the options, and `prepare_selection` and
+inspect add their own), so Back does not undo them: setup runs in passes.
+`setup_pass` is a subshell of `setup_main` that does everything from the
+header to `apply_selection`, starting from the parent's untouched state.
+While `UI_HISTORY` is 1 every answer (`ui_choose`, `ui_multi`,
+`ui_confirm`, `ui_input`) is appended to `<history>/answers` as
+`kind<TAB>key<TAB>value`: the key is the page title and the question, the
+value the option's text (a multi-select's texts joined by `\037`), yes/no or
+the input. A pass first replays those answers, drawing and printing nothing
+(plain pages are buffered until their first live question), then asks live.
+A recorded answer for another question, or one whose option is gone (a new
+or removed SSH or GPG key), is dropped from there with a note.
+
+Back (`ui_back`, allowed while history is on and some answer comes before
+the question) writes the question's key to `<history>/back` and exits the
+pass with `UI_BACK_STATUS` (75). `setup_main` starts another pass only for
+75 with that marker and without `<history>/applying`; `ui_history_back` drops
+the question's own answers (rejected ones it asked again for), then the
+answer before it with its re-asks, and appends that answer to
+`<history>/remembered`, whose last answer for a key is the question's
+default when it is asked again. A pass after a Back that asks nothing live
+before the review goes back once more (`ui_history_wizard_done`). The review
+page allows Back but is never recorded or replayed, and either answer ends
+the history (`ui_history_stop` writes `applying`), so apply-time prompts
+cancel on Esc as before.
+
+The pass re-enables errexit first (a subshell keeps the parent's `set +e`,
+which the parent needs: a pass run as `( ... ) || status=$?` would ignore
+errexit entirely), clears `TEMP_PATHS` (its cleanup removes only its own
+temporary files and lock), sets `MAIN_SUBSHELL` so `on_unexpected_error`
+reports its failures, and installs the EXIT, ERR, INT, TERM/HUP and WINCH
+traps a subshell loses. `setup_main` supervises: its INT/TERM/HUP traps do
+nothing while a pass runs (the pass handles the signal; a TERM sent only to
+the parent's PID waits until the pass ends), it hands the screen to the pass
+(`UI_SCREEN_OWNER=-1`, `ui_screen_adopt`), cuts the logs back to where the
+pass started after a Back (`ui_log_mark`, `ui_log_rewind`), and at the end
+takes back the terminal's fds only if the pass left the screen
+(`<history>/released`), else leaves it itself (`ui_screen_settle`). It ends
+with `exit` and the pass's status, never a return into `main`, whose ERR
+trap would rewrite 2 and 3; `on_unexpected_error` maps 75 to 1 for the same
+reason. The release lookups' caches are kept across passes in the history
+directory (the tag picks only for the same minimum release age).
 
 Manual actions: with `INTERACTIVE_MANUAL=1`, `credential_manual_action` calls
 `await_manual_action`, which shows the explanation (with its "then rerun"

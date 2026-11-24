@@ -163,7 +163,11 @@ setup_full_upgrade() {
   if [[ $SETUP_MODE == saved && $SAVED_FULL_UPGRADE == no ]]; then default=no; fi
   ui_section "Package upgrade"
   ui_note "A full upgrade also upgrades the packages already installed (within this OS release, never to a new one) and moves every tool to its newest release old enough. Without it, only what is missing is installed."
-  if ui_confirm "Run a full upgrade?" "$default"; then FULL_UPGRADE=1; else FULL_UPGRADE=0; fi
+  # The saved choices' question has its own wording, so an answer given in
+  # Customize is not its remembered default after a Back (installer/ui.sh).
+  if [[ $SETUP_MODE == saved ]]; then
+    if ui_confirm "Run a full upgrade this time?" "$default"; then FULL_UPGRADE=1; else FULL_UPGRADE=0; fi
+  elif ui_confirm "Run a full upgrade?" "$default"; then FULL_UPGRADE=1; else FULL_UPGRADE=0; fi
 }
 
 setup_casks() {
@@ -338,6 +342,25 @@ setup_conflicts() {
   fi
   printf '%s\n' "Nothing was changed. Move ~/.rbenv away (or commit its changes), then run setup again." >&2
   exit 1
+}
+
+# setup_release_cache_load / setup_release_cache_save <history dir>: the
+# release lookups are cached for the run (tools.sh); setup keeps the caches
+# across its passes (a Back from the review page inspects again), the tag
+# picks only for the same minimum release age.
+setup_release_cache_load() {
+  local age
+  if [[ -s $1/release-assets ]]; then RELEASE_ASSET_CACHE=$(cat "$1/release-assets")$'\n'; fi
+  [[ -s $1/release-tags ]] || return 0
+  age=$(sed -n '1p' "$1/release-tags")
+  [[ $age == "$MIN_RELEASE_AGE" ]] || return 0
+  RELEASE_TAG_CACHE=$(sed '1d' "$1/release-tags")
+  [[ -z $RELEASE_TAG_CACHE ]] || RELEASE_TAG_CACHE+=$'\n'
+}
+
+setup_release_cache_save() {
+  printf '%s' "$RELEASE_ASSET_CACHE" > "$1/release-assets" || die "setup could not write to $1"
+  printf '%s\n%s' "$MIN_RELEASE_AGE" "$RELEASE_TAG_CACHE" > "$1/release-tags" || die "setup could not write to $1"
 }
 
 # warm_release_picks: pick each selected release artifact's tag in this shell

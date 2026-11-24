@@ -26,9 +26,12 @@ any GitHub steps you choose wait for you.
 ### What the wizard asks
 
 The wizard takes over the terminal window, one page per question, and fits
-itself to the window as you resize it. It draws its pages with
+itself to the window as you resize it. Esc goes back to the previous
+question (with your answer kept), all the way from the plan; Ctrl+C quits
+without changing anything. It draws its pages with
 [gum](https://github.com/charmbracelet/gum), which setup fetches if you do
-not have it; `install.sh setup --plain` asks with numbered prompts instead.
+not have it; `install.sh setup --plain` asks with numbered prompts instead,
+where `<` goes back.
 
 1. **Recommended** or **Customize** (and, once you have set up, **the saved
    choices**).
