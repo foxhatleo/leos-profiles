@@ -376,7 +376,7 @@ The implementation stays compatible with macOS Bash 3.2, and so does
 | --- | --- |
 | `bootstrap.sh` | The curl entry point: installs Git, clones or fast-forwards the checkout, execs `install.sh setup` on `/dev/tty` (see "Setup") |
 | `installer/setup.sh` | The setup wizard's stages, the release-tag warm-up and `render_plan` |
-| `installer/ui.sh` | Prompt primitives (gum or plain numbered prompts) and `ensure_gum` |
+| `installer/ui.sh` | Prompt primitives (the full-screen gum wizard or plain numbered prompts) and `ensure_gum` |
 | `installer/registry.sh` | Ordered component registry, dependency closure, handler validation, the tool-artifact table, and which steps a full upgrade re-runs |
 | `installer/state.sh` | Saved profiles, schema migration, state signatures, locking and cleanup |
 | `installer/packages.sh` | Platform bootstrap, package maps, package-manager operations and the extra repositories they need (RPM Fusion, GitHub CLI's apt repository) |
@@ -555,7 +555,8 @@ terminal: `UI_TTY` (default `/dev/tty`; tests point it at a file of answers)
 must open, and when it is `/dev/tty` and stdin is not a terminal, stdin is
 moved to it, so sudo, ssh-keygen, gpg and gh can prompt and preflight's
 `run-in-terminal` stop never fires inside setup (preflight dies instead,
-which cannot happen at a terminal). Then:
+which cannot happen at a terminal). It runs step 1 and takes the screen,
+then runs steps 2 to 4 as passes (`setup_pass`, see "Back" below). Then:
 
 1. `detect_os`, `ui_init` (installer/ui.sh): fd 7 reads `UI_TTY`; gum is
    used when fd 7 and stderr are terminals, `TERM` is not `dumb`, `--plain`
@@ -576,7 +577,9 @@ which cannot happen at a terminal). Then:
    `setup_conflicts` (a blocking `version_manager_conflicts rbenv` becomes
    `SKIP_EXISTING_VERSION_MANAGERS=1` or a stop). Each stage only sets the
    globals the matching apply option sets; validation stays
-   `validate_options`'s.
+   `validate_options`'s. `ui_steps` and `ui_step` name the wizard's steps
+   (Welcome, Options, Keys, Review; fewer for Recommended and the saved
+   choices) for the full-screen header.
 3. `prepare_selection`, `INTERACTIVE_MANUAL=1`, `warm_release_picks` (each
    selected release artifact's tag is picked in this shell, so inspect's
    subshells and apply see the same one), `inspect_tsv` into a temporary
@@ -584,15 +587,98 @@ which cannot happen at a terminal). Then:
    do not survive `$(...)`), `render_plan` on it (grouped by record type,
    every type but `meta`, a release tool's `artifact` and `release` records
    joined on one line, ending with each `postcondition` as to do / done /
-   skipped and the counts), and one `ui_confirm`.
-4. `apply_selection` in the same process, with `COMMAND=setup` (it writes
+   skipped and the counts; `render_plan <file> summary` is the counts and
+   that summary alone, `render_plan <file> warnings` the warnings), and one
+   `ui_review`: plain, the whole plan on stdout and a confirmation; full
+   screen, the counts, summary and warnings on a page, the whole plan in
+   `gum pager` on request, and the wizard leaves the screen with the summary
+   printed as a record of what is applied.
+4. `apply_selection` in the same pass, with `COMMAND=setup` (it writes
    the profile as apply does).
 
-The UI primitives (`ui_choose`, `ui_multi`, `ui_confirm`, `ui_input`, plus
-`ui_header`, `ui_section`, `ui_note`) draw on stderr and return in
-`UI_REPLY`/`UI_INDEX`, never through `$(...)`. The plain prompts re-ask on a
-bad answer; end of input (or cancelling a gum prompt) exits 130. Option
-labels contain no commas (gum's `--selected` splits on them).
+The UI primitives (`ui_choose`, `ui_multi`, `ui_confirm`, `ui_input`,
+`ui_review`, plus `ui_header`, `ui_section`, `ui_note`, `ui_status`) draw on
+stderr and return in `UI_REPLY`/`UI_INDEX`, never through `$(...)`. The
+plain prompts re-ask on a bad answer; end of input (or cancelling a gum
+prompt) exits 130. Option labels contain no commas (gum's `--selected`
+splits on them) and are kept short: gum truncates a label wider than the
+terminal, so the explanation goes in a `ui_note`.
+
+With gum the wizard is full screen. `ui_section` starts a page and `ui_note`
+adds to it (after the page's first prompt, a note is a one-off highlighted
+hint, such as why an answer was refused). Each prompt calls `ui_render`,
+which reads the size (`stty size` on fd 7, else `LINES`/`COLUMNS`) and
+redraws the page on the alternate screen in a centred column at most 80
+wide: the title and steps, the page's title, notes, block and message, then
+the question; the gum list gets the rows left (`--height`). Where the page
+does not fit, the block gives way first, then the notes, the message and
+the header. gum runs in the background (`ui_gum`) so a WINCH trap can interrupt
+the wait: the prompt is stopped, the page redrawn for the new size and the
+question asked again (a multi-select's unsubmitted toggles start over from
+its defaults). The colours are palette indexes (`UI_ACCENT` 6, cyan;
+`UI_ATTENTION` 3, yellow) so the wizard follows the terminal's theme, and
+every gum colour default (its pink 212 and purple) is overridden.
+
+While it owns the screen (`ui_screen_begin`), the run's stdout and stderr go
+to logs and the terminal's are kept on fd 8 and 9; new stderr lines appear
+on the next page as its message. `ui_screen_end` leaves the screen and
+replays the logs; `ui_review`, `ui_cancelled` and `cleanup` (so any exit,
+including `die`) call it, and only the shell that took the screen gives it
+back. After that, prompts (the manual-action waits during apply) are drawn
+inline, so the apply log keeps its context.
+
+### Back
+
+Esc in a gum prompt (gum exits 1; Ctrl+C exits 130) and `<` in a plain one
+go back to the previous question. The wizard's stages set globals as they go
+(`read_profile` alone sets most of the options, and `prepare_selection` and
+inspect add their own), so Back does not undo them: setup runs in passes.
+`setup_pass` is a subshell of `setup_main` that does everything from the
+header to `apply_selection`, starting from the parent's untouched state.
+While `UI_HISTORY` is 1 every answer a stage accepts (`ui_choose`,
+`ui_multi`, `ui_confirm`, `ui_input`; an answer to the question just
+answered replaces it, as the stage rejected it) is kept in
+`<history>/answers` as
+`kind<TAB>key<TAB>value`: the key is the page title and the question, the
+value the option's text (a multi-select's texts joined by `\037`), yes/no or
+the input. A pass first replays those answers, drawing and printing nothing
+(plain pages are buffered until their first live question), then asks live.
+A recorded answer for another question, or one whose option is gone (a new
+or removed SSH or GPG key), is dropped from there with a note.
+
+Back (`ui_back`, allowed while history is on and some answer comes before
+the question) writes the question's key to `<history>/back` and exits the
+pass with `UI_BACK_STATUS` (75). `setup_main` starts another pass only for
+75 with that marker and without `<history>/applying`; `ui_history_back` drops
+the question's own answer (one it rejected and asked again for), then the
+answer before it, and appends that answer to
+`<history>/remembered`, whose last answer for a key is the question's
+default when it is asked again. A pass after a Back that asks nothing live
+before the review goes back once more (`ui_history_wizard_done`). The review
+page allows Back but is never recorded or replayed, and either answer ends
+the history (`ui_history_stop` writes `applying`), so apply-time prompts
+cancel on Esc as before.
+
+The pass re-enables errexit first (a subshell keeps the parent's `set +e`,
+which the parent needs: a pass run as `( ... ) || status=$?` would ignore
+errexit entirely), clears `TEMP_PATHS` (its cleanup removes only its own
+temporary files and lock), sets `MAIN_SUBSHELL` so `on_unexpected_error`
+reports its failures and `INSTALLER_PID` to its own process (bash 3.2 has
+no `BASHPID`; `$$` is still the parent's), which the lock records and the
+sudo keepalive watches, so a TERM to the PID the lock names stops the pass at
+once, and installs the EXIT, ERR, INT, TERM/HUP and WINCH traps a subshell
+loses. `setup_main` supervises: a signal sent to it alone (Ctrl+C and a
+closed terminal reach the pass's process group) is recorded and acted on
+when the pass ends, which then ends setup with 130 or 143 and no further
+pass; it hands the screen to the pass and takes it back between passes
+(`UI_SCREEN_OWNER=-1`, `ui_screen_adopt`), cuts the logs back to where the
+pass started after a Back (`ui_log_mark`, `ui_log_rewind`), and at the end
+takes back the terminal's fds only if the pass left the screen
+(`<history>/released`), else leaves it itself (`ui_screen_settle`). It ends
+with `exit` and the pass's status, never a return into `main`, whose ERR
+trap would rewrite 2 and 3; `on_unexpected_error` maps 75 to 1 for the same
+reason. The release lookups' caches are kept across passes in the history
+directory (the tag picks only for the same minimum release age).
 
 Manual actions: with `INTERACTIVE_MANUAL=1`, `credential_manual_action` calls
 `await_manual_action`, which shows the explanation (with its "then rerun"
